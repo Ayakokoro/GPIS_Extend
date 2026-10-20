@@ -662,6 +662,9 @@ void SquaredExponentialCovariance::fromJson(JsonPtr value, const Scene& scene) {
         _l_aniso = Vec3f(_l_conv) * _aniso;
         _l_aniso_inv = Vec3f(1.0) / _l_aniso;
         _l_aniso_inv = filterWithZero(_l_aniso_inv);
+        // Eigen's diagonal assignment leaves the off-diagonal entries untouched.
+        _local_to_world.setZero();
+        _world_to_local.setZero();
         _local_to_world.diagonal() << to_eigen3f(_l_aniso);
         _world_to_local.diagonal() << to_eigen3f(_l_aniso_inv);
     }

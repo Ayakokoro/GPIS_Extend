@@ -1,0 +1,1 @@
+build/Release/tungsten.exe -t 8 -o veach.png -e veach.exr gpis-scenes/veach-mis/veach-mis-mis.json

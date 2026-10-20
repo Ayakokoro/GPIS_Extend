@@ -1,4 +1,5 @@
 #include "Gaussian.hpp"
+#include "math/FunctionSpaceProfile.hpp"
 
 #include "math/Angle.hpp"
 #include <Eigen/IterativeLinearSolvers>
@@ -7,6 +8,7 @@
 
 namespace Tungsten {
     CovMatrix project_to_psd(const CovMatrix& in) {
+        FsProfile::Scope timer(FsProfile::Stage::Projection);
 
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigs(in);
         auto eps = 1e6 * std::numeric_limits<double>::epsilon() * eigs.eigenvalues()[0];
@@ -119,6 +121,7 @@ namespace Tungsten {
     }
 
     MultivariateNormalDistribution::MultivariateNormalDistribution(const Eigen::VectorXd& _mean, const CovMatrix& _cov) : mean(_mean) {
+        FsProfile::count(FsProfile::Counter::SampleDimension, _mean.size());
 #if 0
         svd = Eigen::BDCSVD<Eigen::MatrixXd>(_cov, Eigen::ComputeThinU | Eigen::ComputeThinV);
 
@@ -137,25 +140,31 @@ namespace Tungsten {
 
 #else
 
+        FsProfile::Scope cholTimer(FsProfile::Stage::Cholesky);
 #ifdef SPARSE_COV
         Eigen::SimplicialLLT<CovMatrix> chol(_cov);
 #else
         Eigen::LLT<Eigen::MatrixXd> chol(_cov.triangularView<Eigen::Lower>());
 #endif
+        cholTimer.stop();
 
         // We can only use the cholesky decomposition if 
         // the covariance matrix is symmetric, pos-definite.
         // But a covariance matrix might be pos-semi-definite.
         // In that case, we'll go to an EigenSolver
         if (chol.info() == Eigen::Success) {
+            FsProfile::count(FsProfile::Counter::CholeskySuccess, _mean.size());
             // Use cholesky solver
             normTransform = chol.matrixL();
         }
         else
         {
+            FsProfile::count(FsProfile::Counter::CholeskyFallback, _mean.size());
+            FsProfile::Scope eigenTimer(FsProfile::Stage::EigenSquareRoot);
             Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigs(_cov);
 
             if (eigs.info() != Eigen::ComputationInfo::Success) {
+                FsProfile::count(FsProfile::Counter::EigenFailure, _mean.size());
                 std::cerr << "Matrix square root failed!\n";
             }
 
@@ -178,6 +187,7 @@ namespace Tungsten {
 
     Eigen::MatrixXd MultivariateNormalDistribution::sample(const Constraint* constraints, int numConstraints,
         int samples, PathSampleGenerator& sampler) const {
+        FsProfile::Scope timer(FsProfile::Stage::Draw);
 
         // Generate a vector of standard normal variates with the same dimension as the mean
         Eigen::VectorXd z = Eigen::VectorXd(mean.size());

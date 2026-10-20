@@ -35,6 +35,9 @@ public:
     virtual rapidjson::Value toJson(Allocator &allocator) const override;
 
     virtual bool intersect(Ray &ray, IntersectionTemporary &data) const override;
+    // Recover an exit skipped by the ray's self-intersection epsilon. Call only
+    // when this cube bounds the ray's current medium.
+    bool intersectMediumExit(Ray &ray, IntersectionTemporary &data) const;
     virtual bool occluded(const Ray &ray) const override;
     virtual bool hitBackside(const IntersectionTemporary &data) const override;
     virtual void intersectionInfo(const IntersectionTemporary &data, IntersectionInfo &info) const override;

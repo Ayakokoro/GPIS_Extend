@@ -1,4 +1,9 @@
 data/gpis-scenes/
 results/
+renders/
 cmake-*/
 .idea/
+/gpis-scenes/
+/build/
+/cmake-intellisense/
+/outputs/

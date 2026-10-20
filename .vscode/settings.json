@@ -1,0 +1,29 @@
+{
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.cStandard": "c17",
+    "C_Cpp.default.intelliSenseMode": "windows-msvc-x64",
+
+    // IntelliSense is driven by .vscode/c_cpp_properties.json, not by CMake
+    // Tools. Leave the CMake Tools "Configure" button alone unless you mean it:
+    // it points at build/, which is a "Visual Studio 17 2022" tree, so a
+    // Ninja/other-generator reconfigure there will fail on a generator mismatch.
+    // IntelliSense config is regenerated with the "Regenerate IntelliSense DB"
+    // task instead.
+    "cmake.configureOnOpen": false,
+
+    // cmake-intellisense/ holds a full generated build tree whose only purpose is
+    // compile_commands.json. Keep it out of search results and file watching so it
+    // does not drown out the actual source tree.
+    "files.watcherExclude": {
+        "**/cmake-intellisense/**": true,
+        "**/build/**": true
+    },
+    "search.exclude": {
+        "cmake-intellisense": true,
+        "build": true
+    },
+    "C_Cpp.files.exclude": {
+        "**/cmake-intellisense/**": true,
+        "**/build/**": true
+    }
+}

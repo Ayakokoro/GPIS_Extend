@@ -1,0 +1,45 @@
+{
+  "media": [{
+    "name": "sdf_microfacets",
+    "type": "classic_global",
+    "gaussian_process": {
+      "type": "standard",
+      "mean": {"type": "spherical", "center": [0, 0, 1], "radius": 0.8},
+      "covariance": {"type": "squared_exponential", "sigma": 0.12, "lengthScale": 0.3}
+    },
+    "material": {"eta": [0.2, 0.9, 1.1], "k": [3.9, 2.5, 2.2]},
+    "max_bounces": 64
+  }],
+  "bsdfs": [{"name": "boundary", "type": "forward", "albedo": 1}],
+  "primitives": [
+    {
+      "name": "medium_bounds", "type": "cube", "bsdf": "boundary",
+      "int_medium": "sdf_microfacets",
+      "transform": {"position": [0, 0, 1], "scale": [3, 3, 3]}
+    },
+    {
+      "name": "triangle_inside_medium", "type": "mesh", "file": "triangle.obj",
+      "bsdf": {"type": "mirror", "albedo": [0.3, 0.65, 1.0]}
+    },
+    {
+      "name": "ground", "type": "mesh", "file": "ground.obj",
+      "bsdf": {"type": "lambert", "albedo": [0.35, 0.35, 0.35]}
+    },
+    {"type": "infinite_sphere", "emission": 1, "sample": true}
+  ],
+  "camera": {
+    "type": "pinhole", "resolution": [128, 128], "fov": 35,
+    "transform": {"position": [2, -4, 2.3], "look_at": [0, 0, 0.8], "up": [0, 0, 1]},
+    "tonemap": "filmic", "reconstruction_filter": "tent"
+  },
+  "integrator": {
+    "type": "path_tracer", "max_bounces": 64, "min_bounces": 0,
+    "enable_light_sampling": true, "enable_volume_light_sampling": true,
+    "use_cuda_gpis": false
+  },
+  "renderer": {
+    "spp": 32, "spp_step": 8, "adaptive_sampling": false,
+    "output_file": "classic-global.png", "hdr_output_file": "classic-global.exr",
+    "overwrite_output_files": true
+  }
+}

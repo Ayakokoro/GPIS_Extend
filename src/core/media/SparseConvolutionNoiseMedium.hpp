@@ -3,16 +3,36 @@
 
 #include "GaussianProcessMedium.hpp"
 #include "math/SparseConvolutionNoise.hpp"
+#include "GpRayBatchBackend.hpp"
 
 namespace Tungsten {
 
     class GaussianProcess;
+    class VdbGrid;
+
+    struct Se1DGpBatchConfig {
+        std::shared_ptr<VdbGrid> meanGrid;
+        float meanOffset = 0.0f;
+        float meanScale = 1.0f;
+        float lengthScale = 1.0f;
+        float amplitude = 1.0f;
+        float kernelRadius = 3.0f;
+        float impulseDensity = 3.0f;
+        float maxStepSize = 0.01f;
+        unsigned int minSteps = 8;
+    };
 
     struct GPContextSparseConvNoise : public GPContext {
         SparseConvolutionNoiseRealization noise;
         virtual void reset() override {
             // Don't reset the realization
         }
+    };
+
+    struct PreparedGpisSegment {
+        GpRaySegmentRequest request;
+        std::shared_ptr<GPContextSparseConvNoise> context;
+        UniformSampler uniformSampler;
     };
 
     class SparseConvolutionNoiseMedium : public GaussianProcessMedium
@@ -48,6 +68,13 @@ namespace Tungsten {
         virtual bool sampleGradient(PathSampleGenerator& sampler, const Ray& ray, const Vec3d& isect_p, const float& isect_t, MediumState& state, Vec3d& grad) const override;
 
         virtual bool intersectGP(PathSampleGenerator& sampler, const Ray& ray, MediumState& state, double& t, bool) const override;
+
+        // Returns false for scene features outside the CUDA SE 1D implementation.
+        bool se1DGpuBatchConfig(Se1DGpBatchConfig &config) const;
+        void prepareGpisSegment(PathSampleGenerator &sampler, const Ray &ray,
+            MediumState &state, PreparedGpisSegment &prepared) const;
+        bool finishGpisSegment(const Ray &ray, MediumState &state,
+            PreparedGpisSegment &prepared, const GpRaySegmentReply &reply, double &t) const;
     };
 
 }

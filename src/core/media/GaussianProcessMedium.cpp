@@ -1,4 +1,5 @@
 #include "GaussianProcessMedium.hpp"
+#include "math/FunctionSpaceProfile.hpp"
 
 #include <cfloat>
 
@@ -218,12 +219,26 @@ namespace Tungsten {
         return false;
     }
 
-    bool GaussianProcessMedium::sampleDistance(PathSampleGenerator & sampler, const Ray & ray,
-        MediumState & state, MediumSample & sample) const
+    bool GaussianProcessMedium::sampleDistance(PathSampleGenerator &sampler, const Ray &ray,
+        MediumState &state, MediumSample &sample) const
+    {
+        FsProfile::PurposeScope purpose(false);
+        DistanceState distance;
+        auto status = beginDistance(sampler, ray, state, sample, distance);
+        while (status == DistanceStatus::NeedIntersection) {
+            double t = distance.t;
+            bool hit = intersect(sampler, distance.ray, state, t, distance.firstIntersection);
+            status = resumeDistance(sampler, ray, state, sample, distance, t, hit);
+        }
+        return status == DistanceStatus::Finished;
+    }
+
+    GaussianProcessMedium::DistanceStatus GaussianProcessMedium::beginDistance(
+        PathSampleGenerator &sampler, const Ray &ray, MediumState &state,
+        MediumSample &sample, DistanceState &distance) const
     {
         sample.emission = Vec3f(0.0f);
         auto r = ray;
-        size_t matId = 0;
 
         double startT = r.nearT();
         if (!std::isfinite(r.farT())) {
@@ -233,10 +248,10 @@ namespace Tungsten {
         float maxT = r.farT();
 
         if (state.bounce >= _maxBounce) {
-            return false;
+            return DistanceStatus::Failed;
         }
 
-        if (maxT == 0.f) {
+        if (maxT <= r.nearT()) {
             sample.t = maxT;
             sample.weight = Vec3f(1.f);
             sample.pdf = 1.0f;
@@ -244,12 +259,12 @@ namespace Tungsten {
             sample.p = ray.pos() + sample.t * ray.dir();
             sample.phase = _phaseFunction.get();
             sample.sparseConv1DSamplingScheme = SparseConv1DSamplingScheme::UNI;
-            return true;
+            return DistanceStatus::Finished;
         }
 
         if (_absorptionOnly) {
             if (maxT == Ray::infinity())
-                return false;
+                return DistanceStatus::Failed;
             sample.t = maxT;
             sample.weight = transmittance(sampler, ray, false, false, &state);
             sample.pdf = 1.0f;
@@ -257,79 +272,91 @@ namespace Tungsten {
             sample.sparseConv1DSamplingScheme = SparseConv1DSamplingScheme::UNI;
         }
         else {
-            double t = maxT;
+            distance.ray = r;
+            distance.maxT = maxT;
+            distance.t = maxT;
+            distance.origin = vec_conv<Vec3d>(r.pos());
+            distance.direction = vec_conv<Vec3d>(r.dir()).normalized();
+            distance.firstIntersection = true;
+            return DistanceStatus::NeedIntersection;
+        }
+        finishDistance(ray, state, sample);
+        return DistanceStatus::Finished;
+    }
 
-            auto ro = vec_conv<Vec3d>(r.pos());
-            auto rd = vec_conv<Vec3d>(r.dir()).normalized();
+    GaussianProcessMedium::DistanceStatus GaussianProcessMedium::resumeDistance(
+        PathSampleGenerator &sampler, const Ray &ray, MediumState &state,
+        MediumSample &sample, DistanceState &distance, double t, bool hit) const
+    {
+        const auto &r = distance.ray;
+        const auto &ro = distance.origin;
+        const auto &rd = distance.direction;
+        const float maxT = distance.maxT;
+        distance.firstIntersection = false;
+        distance.t = t;
+        sample.exited = !hit;
+        // We sample a gradient if:
+        // (1) The ray did intersect a surface
+        // (2) The ray did not intersect a surface, but we'll need to continue
+        if (t < maxT) {
 
+            Vec3d ip = ro + rd * t;
 
-            // Handle the "ray marching" case
-            // I.e. we want to allow the intersect function to not handle the whole ray
-            // In that case it will tell us it didn't intersect, but t will be less than ray.farT()
-            bool firstIsectAlongRay = true;
-            do {
-                r.setNearT((float)startT);
-                sample.exited = !intersect(sampler, r, state, t, firstIsectAlongRay);
-                firstIsectAlongRay = false;
-                
-                // We sample a gradient if:
-                // (1) The ray did intersect a surface
-                // (2) The ray did not intersect a surface, but we'll need to continue
-                if (t < maxT) {
-
-                    Vec3d ip = ro + rd * t;
-
-                    Vec3d grad;
-                    if (!sampleGradient(sampler, r, ip, t, state, grad)) {
-                        std::cout << "Failed to sample gradient.\n";
-                        return false;
-                    }
-
-                    state.lastAniso = sample.aniso = grad;
-                    state.firstScatter = false;
-
-                    if (!std::isfinite(sample.aniso.avg())) {
-                        sample.aniso = Vec3d(1.f, 0.f, 0.f);
-                        std::cout << "Gradient invalid in sampleDistance: " << grad << std::endl;
-                        return false;
-                    }
-                }
-
-                startT = t;
-
-                // We only keep going in the case where we haven't finished processing the ray yet.
-            } while (t < maxT && sample.exited);
-
-            if (!sample.exited) {
-                if (sample.aniso.dot(vec_conv<Vec3d>(ray.dir())) > 0) {
-//                    std::cout << "Sampled gradient at intersection point points in the wrong direction. "<< sample.aniso.dot(vec_conv<Vec3d>(ray.dir())) << "\n";
-//                    std::cout << "Grad: " << sample.aniso << ", Ray dir: "<< ray.dir() << "\n";
-                    return false;
-                }
-
-                if (sample.aniso.lengthSq() < 0.0000001f) {
-                    sample.aniso = Vec3d(1.f, 0.f, 0.f);
-                    std::cout << "Gradient zero.\n";
-                    return false;
-                }
-
-                sample.weight = sample.continuedWeight = vec_conv<Vec3f>(_gp->color(ro + rd * t));
-                sample.emission = vec_conv<Vec3f>(_gp->emission(ro + rd * t));
-            } else {
-                sampleGradient(sampler, r, ro + rd * t, t, state, sample.aniso);
-                sample.weight = sample.continuedWeight = Vec3f(1.f);
+            Vec3d grad;
+            if (!sampleGradient(sampler, r, ip, t, state, grad)) {
+                std::cout << "Failed to sample gradient.\n";
+                return DistanceStatus::Failed;
             }
 
-            sample.t = min(float(t), maxT);
-            sample.continuedT = float(t);
-            sample.weight *= sigmaS(ray.pos() + sample.t * ray.dir()) / sigmaT(ray.pos() + sample.t * ray.dir());
-            sample.continuedWeight *= sigmaS(ray.pos() + sample.continuedT * ray.dir()) / sigmaT(ray.pos() + sample.continuedT * ray.dir());
-            sample.pdf = 1;
+            state.lastAniso = sample.aniso = grad;
+            state.firstScatter = false;
 
-            state.lastAniso = sample.aniso;
-            sample.sparseConv1DSamplingScheme = state.sparseConv1DSamplingScheme;
-            state.advance();
+            if (!std::isfinite(sample.aniso.avg())) {
+                sample.aniso = Vec3d(1.f, 0.f, 0.f);
+                std::cout << "Gradient invalid in sampleDistance: " << grad << std::endl;
+                return DistanceStatus::Failed;
+            }
         }
+
+
+        if (t < maxT && sample.exited) {
+            distance.ray.setNearT(float(t));
+            return DistanceStatus::NeedIntersection;
+        }
+        if (!sample.exited) {
+            if (sample.aniso.dot(vec_conv<Vec3d>(ray.dir())) > 0) {
+                return DistanceStatus::Failed;
+            }
+
+            if (sample.aniso.lengthSq() < 0.0000001f) {
+                sample.aniso = Vec3d(1.f, 0.f, 0.f);
+                std::cout << "Gradient zero.\n";
+                return DistanceStatus::Failed;
+            }
+
+            sample.weight = sample.continuedWeight = vec_conv<Vec3f>(_gp->color(ro + rd * t));
+            sample.emission = vec_conv<Vec3f>(_gp->emission(ro + rd * t));
+        } else {
+            sampleGradient(sampler, r, ro + rd * t, t, state, sample.aniso);
+            sample.weight = sample.continuedWeight = Vec3f(1.f);
+        }
+
+        sample.t = min(float(t), maxT);
+        sample.continuedT = float(t);
+        sample.weight *= sigmaS(ray.pos() + sample.t * ray.dir()) / sigmaT(ray.pos() + sample.t * ray.dir());
+        sample.continuedWeight *= sigmaS(ray.pos() + sample.continuedT * ray.dir()) / sigmaT(ray.pos() + sample.continuedT * ray.dir());
+        sample.pdf = 1;
+
+        state.lastAniso = sample.aniso;
+        sample.sparseConv1DSamplingScheme = state.sparseConv1DSamplingScheme;
+        state.advance();
+        finishDistance(ray, state, sample);
+        return DistanceStatus::Finished;
+    }
+
+    void GaussianProcessMedium::finishDistance(const Ray &ray, MediumState &state,
+        MediumSample &sample) const
+    {
         sample.p = ray.pos() + sample.t * ray.dir();
 
         sample.phase = _phaseFunctions[state.lastGPId].get();
@@ -337,59 +364,65 @@ namespace Tungsten {
         sample.ctxt = state.gpContext.get();
         state.info.t += sample.t;
         sample.rayInfo = state.info;
-        return true;
     }
 
-Vec3f GaussianProcessMedium::transmittance(PathSampleGenerator & sampler, const Ray & ray, bool startOnSurface, bool endOnSurface, MediumState* state) const
+void GaussianProcessMedium::beginTransmittance(const Ray &ray,
+        TransmittanceState &transmittance) const
     {
-        auto r = ray;
-        size_t matId = 0;
+        transmittance = TransmittanceState();
+        transmittance.ray = ray;
+        if (!std::isfinite(ray.farT()))
+            transmittance.ray.setFarT(ray.nearT() + 2000);
+        transmittance.maxT = transmittance.ray.farT();
+        transmittance.t = transmittance.maxT;
+    }
 
-        double startT = r.nearT();
-        if (!std::isfinite(r.farT())) {
-            r.setFarT(startT + 2000);
-        }
-
-        float maxT = r.farT();
-
-        double t = maxT;
-
-        auto ro = vec_conv<Vec3d>(r.pos());
-        auto rd = vec_conv<Vec3d>(r.dir()).normalized();
-
-
-        // Handle the "ray marching" case
-        // I.e. we want to allow the intersect function to not handle the whole ray
-        // In that case it will tell us it didn't intersect, but t will be less than ray.farT()
-        bool exited;
-        bool firstIsectAlongRay = true;
-        do {
-            r.setNearT((float)startT);
-            exited = !intersect(sampler, r, *state, t, firstIsectAlongRay);
-            firstIsectAlongRay = false;
-
-            if (t < maxT) {
-                Vec3d ip = ro + rd * t;
-
-                Vec3d grad;
-                if (!sampleGradient(sampler, ray, ip, t, *state, grad)) {
-                    std::cout << "Failed to sample gradient.\n";
-                    return Vec3f(0.);
-                }
-                state->lastAniso = grad;
-                state->firstScatter = false;
-
-                if (!std::isfinite(grad.avg())) {
-                    std::cout << "Gradient invalid in transmittance: " << grad << std::endl;
-                    return Vec3f(0.);
-                }
+    GaussianProcessMedium::TransmittanceStatus GaussianProcessMedium::resumeTransmittance(
+        PathSampleGenerator &sampler, const Ray &ray, MediumState &state,
+        TransmittanceState &transmittance, double t, bool hit) const
+    {
+        transmittance.firstIntersection = false;
+        transmittance.t = t;
+        if (t < transmittance.maxT) {
+            Vec3d ip = vec_conv<Vec3d>(ray.pos()) + vec_conv<Vec3d>(ray.dir()).normalized() * t;
+            Vec3d grad;
+            if (!sampleGradient(sampler, ray, ip, t, state, grad)) {
+                std::cout << "Failed to sample gradient.\n";
+                transmittance.value = Vec3f(0.0f);
+                return TransmittanceStatus::Finished;
             }
+            state.lastAniso = grad;
+            state.firstScatter = false;
+            if (!std::isfinite(grad.avg())) {
+                std::cout << "Gradient invalid in transmittance: " << grad << std::endl;
+                transmittance.value = Vec3f(0.0f);
+                return TransmittanceStatus::Finished;
+            }
+        }
+        if (t < transmittance.maxT && !hit) {
+            transmittance.ray.setNearT(float(t));
+            return TransmittanceStatus::NeedIntersection;
+        }
+        transmittance.value = hit ? Vec3f(0.0f) : Vec3f(1.0f);
+        return TransmittanceStatus::Finished;
+    }
 
-            startT = t;
-            // We only keep going in the case where we haven't finished processing the ray yet.
-        } while (t < maxT && exited);
-
-        return exited ? Vec3f(1.) : Vec3f(0.);
+    Vec3f GaussianProcessMedium::transmittance(PathSampleGenerator &sampler,
+        const Ray &ray, bool, bool, MediumState *state) const
+    {
+        FsProfile::PurposeScope purpose(true);
+        if (ray.farT() <= ray.nearT())
+            return Vec3f(1.0f);
+        TransmittanceState transmittance;
+        beginTransmittance(ray, transmittance);
+        TransmittanceStatus status;
+        do {
+            double t = transmittance.t;
+            bool hit = intersect(sampler, transmittance.ray, *state, t,
+                transmittance.firstIntersection);
+            status = resumeTransmittance(sampler, ray, *state, transmittance, t, hit);
+        } while (status == TransmittanceStatus::NeedIntersection);
+        return transmittance.value;
     }
 
     float GaussianProcessMedium::pdf(PathSampleGenerator&/*sampler*/, const Ray & ray, bool startOnSurface, bool endOnSurface) const

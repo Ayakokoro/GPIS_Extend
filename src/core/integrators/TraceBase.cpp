@@ -1,4 +1,6 @@
 #include "TraceBase.hpp"
+#include "primitives/Cube.hpp"
+#include "media/ClassicGlobalMedium.hpp"
 
 namespace Tungsten {
 
@@ -19,6 +21,33 @@ TraceBase::TraceBase(TraceableScene *scene, const TraceSettings &settings, uint3
 
     for (const auto &prim : scene->lights())
         prim->makeSamplable(*_scene, _threadId);
+    for (const auto &prim : scene->primitives()) {
+        auto *cube = dynamic_cast<Cube *>(prim.get());
+        if (cube && (dynamic_cast<const GaussianProcessMedium *>(cube->intMedium().get()) ||
+                     dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get())) &&
+            cube->bsdf(0)->lobes().isForward())
+            _gpisBoundaryCubes.push_back(cube);
+    }
+}
+
+bool TraceBase::intersectScene(Ray &ray, const Medium *medium,
+        IntersectionTemporary &data, IntersectionInfo &info) const
+{
+    bool hit = _scene->intersect(ray, data, info);
+    // BVH traversal also ignores exits before nearT. Query the current GP/classic
+    // boundary directly so a transparent boundary still updates medium state.
+    if (medium) {
+        for (const auto *cube : _gpisBoundaryCubes) {
+            if (cube->intMedium().get() == medium && cube->intersectMediumExit(ray, data)) {
+                info.p = ray.hitpoint();
+                info.w = ray.dir();
+                info.epsilon = _scene->rayEpsilon();
+                cube->intersectionInfo(data, info);
+                hit = true;
+            }
+        }
+    }
+    return hit;
 }
 
 SurfaceScatterEvent TraceBase::makeLocalScatterEvent(IntersectionTemporary &data, IntersectionInfo &info,
@@ -40,7 +69,7 @@ SurfaceScatterEvent TraceBase::makeLocalScatterEvent(IntersectionTemporary &data
         frame.tangent = -frame.tangent;
     }
 
-    return SurfaceScatterEvent(
+    SurfaceScatterEvent event(
         &info,
         sampler,
         frame,
@@ -48,6 +77,12 @@ SurfaceScatterEvent TraceBase::makeLocalScatterEvent(IntersectionTemporary &data
         BsdfLobes::AllLobes,
         flipFrame
     );
+    // These are real geometry events. GP phase functions set their own sampling
+    // scheme/context explicitly; leaving them uninitialized here makes ordinary
+    // mirror/conductor triangles accidentally dereference a GP context.
+    event.sparseConv1DSamplingScheme = SparseConv1DSamplingScheme::UNI;
+    event.ctxt = nullptr;
+    return event;
 }
 
 bool TraceBase::isConsistent(const SurfaceScatterEvent &event, const Vec3f &w) const
@@ -87,7 +122,7 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
     int count = 0;
     do {
         count ++;
-        bool didHit = _scene->intersect(ray, data, info) && info.primitive != endCap;
+        bool didHit = intersectScene(ray, medium, data, info) && info.primitive != endCap;
         if (didHit) {
             if (!info.bsdf->lobes().hasForward())
                 return Vec3f(0.0f);
@@ -151,6 +186,263 @@ Vec3f TraceBase::generalizedShadowRayAndPdfs(PathSampleGenerator &sampler, Ray &
     pdfForward = pdfBackward = 1.0f;
     return generalizedShadowRayImpl<true>(sampler, ray, medium, endCap, bounce,
             startsOnSurface, endsOnSurface, mediumState, pdfForward, pdfBackward);
+}
+
+void TraceBase::beginShadow(ShadowState &shadow, const Ray &ray, const Medium *medium,
+        const Primitive *endCap, int bounce, bool startsOnSurface,
+        const Medium::MediumState &state)
+{
+    shadow = ShadowState();
+    shadow.ray = ray;
+    shadow.initialFarT = ray.farT();
+    shadow.medium = medium;
+    shadow.endCap = endCap;
+    shadow.bounce = bounce;
+    shadow.startsOnSurface = startsOnSurface;
+    shadow.state = state;
+    shadow.state.gpRayBatchBackend = nullptr;
+    shadow.blankState.reset();
+    shadow.blankState.info = state.info;
+}
+
+bool TraceBase::advanceShadow(ShadowState &shadow, PathSampleGenerator &sampler,
+        PreparedGpisSegment &prepared, const GpRaySegmentReply &reply, bool &replyReady) const
+{
+    using Stage = ShadowState::Stage;
+    using Status = GaussianProcessMedium::TransmittanceStatus;
+    while (shadow.stage != Stage::Finished) {
+        if (shadow.stage == Stage::Segment) {
+            shadow.didHit = intersectScene(shadow.ray, shadow.medium, shadow.data, shadow.info) &&
+                shadow.info.primitive != shadow.endCap;
+            if (shadow.didHit) {
+                if (!shadow.info.bsdf->lobes().hasForward()) {
+                    shadow.throughput = Vec3f(0.0f);
+                    shadow.stage = Stage::Finished;
+                    break;
+                }
+                auto event = makeLocalScatterEvent(shadow.data, shadow.info, shadow.ray, nullptr);
+                Vec3f transparency = shadow.info.bsdf->eval(event.makeForwardEvent(), false);
+                if (transparency == 0.0f || shadow.bounce >= _settings.maxBounces) {
+                    shadow.throughput = Vec3f(0.0f);
+                    shadow.stage = Stage::Finished;
+                    break;
+                }
+                shadow.throughput *= transparency;
+                shadow.blankState.info.pixelSampleSegment.w()++;
+            }
+            shadow.stage = Stage::Medium;
+        }
+        if (shadow.stage == Stage::Medium) {
+            shadow.sparse = dynamic_cast<const SparseConvolutionNoiseMedium *>(shadow.medium);
+            Se1DGpBatchConfig config;
+            if (shadow.ray.farT() <= shadow.ray.nearT()) {
+                shadow.stage = Stage::Boundary;
+            } else if (shadow.sparse && shadow.sparse->se1DGpuBatchConfig(config)) {
+                shadow.sparse->beginTransmittance(shadow.ray, shadow.transmittance);
+                shadow.stage = Stage::Intersection;
+            } else {
+                if (shadow.medium)
+                    shadow.throughput *= shadow.medium->transmittance(sampler, shadow.ray,
+                        shadow.startsOnSurface, true, &shadow.state);
+                shadow.stage = Stage::Boundary;
+            }
+        }
+        if (shadow.stage == Stage::Waiting) {
+            if (!replyReady)
+                return false;
+            double t = shadow.transmittance.t;
+            bool hit = shadow.sparse->finishGpisSegment(shadow.transmittance.ray,
+                shadow.state, prepared, reply, t);
+            replyReady = false;
+            auto status = shadow.sparse->resumeTransmittance(sampler, shadow.ray,
+                shadow.state, shadow.transmittance, t, hit);
+            prepared.context.reset();
+            if (status == Status::NeedIntersection)
+                shadow.stage = Stage::Intersection;
+            else {
+                shadow.throughput *= shadow.transmittance.value;
+                shadow.stage = Stage::Boundary;
+            }
+        }
+        if (shadow.stage == Stage::Intersection) {
+            shadow.sparse->prepareGpisSegment(sampler, shadow.transmittance.ray,
+                shadow.state, prepared);
+            prepared.request.purpose = GpRaySegmentRequest::Purpose::Shadow;
+            shadow.stage = Stage::Waiting;
+            return false;
+        }
+        if (shadow.stage == Stage::Boundary) {
+            if (!shadow.info.primitive || shadow.info.primitive == shadow.endCap) {
+                if (shadow.bounce < _settings.minBounces)
+                    shadow.throughput = Vec3f(0.0f);
+                shadow.stage = Stage::Finished;
+                break;
+            }
+            shadow.medium = shadow.info.primitive->selectMedium(shadow.medium,
+                !shadow.info.primitive->hitBackside(shadow.data));
+            shadow.state = shadow.blankState;
+            shadow.startsOnSurface = true;
+            shadow.ray.setPos(shadow.ray.hitpoint());
+            shadow.initialFarT -= shadow.ray.farT();
+            shadow.ray.setNearT(shadow.info.epsilon);
+            shadow.ray.setFarT(shadow.initialFarT);
+            shadow.stage = Stage::Segment;
+        }
+    }
+    return true;
+}
+
+void TraceBase::beginDirectLighting(DirectLightingState &direct, PathSampleGenerator &sampler,
+        const Vec3f &p, const Medium::MediumState &state, int bounce, bool surface)
+{
+    direct = DirectLightingState();
+    direct.surface = surface;
+    direct.bounce = bounce;
+    direct.state = state;
+    direct.state.info.pixelSampleSegment.w()++;
+    direct.light = chooseLight(sampler, p, direct.lightWeight);
+    if (!direct.light)
+        direct.stage = DirectLightingState::Stage::Finished;
+}
+
+bool TraceBase::beginLightShadow(DirectLightingState &direct, Ray ray, const Medium *medium,
+        float expectedDist, bool startsOnSurface, const Medium::MediumState &state)
+{
+    const auto &light = *direct.light;
+    if (light.isDirac())
+        ray.setFarT(expectedDist);
+    else if (!light.intersect(ray, direct.lightData) || ray.farT()*(1.0f + 1e-3f) < expectedDist)
+        return false;
+    direct.lightInfo.p = ray.pos() + ray.dir()*ray.farT();
+    direct.lightInfo.w = ray.dir();
+    light.intersectionInfo(direct.lightData, direct.lightInfo);
+    beginShadow(direct.shadow, ray, medium, &light, direct.bounce, startsOnSurface, state);
+    return true;
+}
+
+bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGenerator &sampler,
+        MediumSample &sample, SurfaceScatterEvent &event, const Medium *medium,
+        const Ray &parentRay, PreparedGpisSegment &prepared, const GpRaySegmentReply &reply,
+        bool &replyReady)
+{
+    using Stage = DirectLightingState::Stage;
+    while (direct.stage != Stage::Finished) {
+        const auto &light = *direct.light;
+        if (direct.stage == Stage::LightSample) {
+            direct.stage = Stage::ScatterSample;
+            if (direct.surface && (event.info->bsdf->lobes().isPureSpecular() ||
+                                  event.info->bsdf->lobes().isForward())) {
+                direct.stage = Stage::Finished;
+                break;
+            }
+            if (!direct.surface && sample.phase->isSpecular() &&
+                sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::UNI)
+                continue;
+            const Vec3f p = direct.surface ? event.info->p : sample.p;
+            if (!light.sampleDirect(_threadId, p, sampler, direct.lightSample))
+                continue;
+            auto &ls = direct.lightSample;
+            const Medium *shadowMedium = medium;
+            auto shadowState = direct.state;
+            if (direct.surface) {
+                event.wo = event.frame.toLocal(ls.d);
+                if (!isConsistent(event, ls.d))
+                    continue;
+                shadowMedium = event.info->primitive->selectMedium(medium, ls.d.dot(event.info->Ng) < 0.0f);
+                event.requestedLobe = BsdfLobes::AllButSpecular;
+                direct.f = event.info->bsdf->eval(event, false);
+                shadowState.firstScatter = true;
+            } else {
+                direct.f = sample.phase->eval(parentRay.dir(), ls.d, sample);
+                if (sample.phase->isSpecular())
+                    shadowState.lastAniso = Vec3d(sample.phase->evalGrad(parentRay.dir(), ls.d, sample));
+            }
+            if (direct.f == 0.0f)
+                continue;
+            auto ray = parentRay.scatter(p, ls.d, direct.surface ? event.info->epsilon : 0.0f);
+            ray.setPrimaryRay(false);
+            if (beginLightShadow(direct, ray, shadowMedium, ls.dist, direct.surface, shadowState))
+                direct.stage = Stage::LightShadow;
+        }
+        if (direct.stage == Stage::LightShadow) {
+            if (!advanceShadow(direct.shadow, sampler, prepared, reply, replyReady))
+                return false;
+            direct.visibility = direct.shadow.throughput;
+            if (direct.visibility != 0.0f) {
+                Vec3f e = direct.visibility*light.evalDirect(direct.lightData, direct.lightInfo);
+                if (e != 0.0f) {
+                    direct.firstResult = direct.f*e/direct.lightSample.pdf;
+                    if (direct.surface) {
+                        if (!light.isDirac())
+                            direct.firstResult *= SampleWarp::powerHeuristic(direct.lightSample.pdf,
+                                event.info->bsdf->pdf(event));
+                    } else {
+                        bool disableMIS = sample.phase->isSpecular() &&
+                            sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE;
+                        if (!light.isDirac() && !disableMIS)
+                            direct.firstResult *= SampleWarp::powerHeuristic(direct.lightSample.pdf,
+                                sample.phase->pdf(parentRay.dir(), direct.lightSample.d, sample));
+                    }
+                }
+            }
+            direct.stage = Stage::ScatterSample;
+        }
+        if (direct.stage == Stage::ScatterSample) {
+            direct.stage = Stage::Finished;
+            if (light.isDirac())
+                break;
+            const Medium *shadowMedium = medium;
+            auto shadowState = direct.state;
+            Vec3f p, wo;
+            if (direct.surface) {
+                event.requestedLobe = BsdfLobes::AllButSpecular;
+                if (!event.info->bsdf->sample(event, false) || event.weight == 0.0f)
+                    break;
+                wo = event.frame.toGlobal(event.wo);
+                if (!isConsistent(event, wo))
+                    break;
+                p = event.info->p;
+                shadowMedium = event.info->primitive->selectMedium(medium, wo.dot(event.info->Ng) < 0.0f);
+                shadowState.firstScatter = true;
+            } else {
+                if (sample.phase->isSpecular() &&
+                    sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE)
+                    break;
+                if (!sample.phase->sample(sampler, parentRay.dir(), sample, direct.phaseSample))
+                    break;
+                p = sample.p;
+                wo = direct.phaseSample.w;
+            }
+            auto ray = parentRay.scatter(p, wo, direct.surface ? event.info->epsilon : 0.0f);
+            ray.setPrimaryRay(false);
+            if (beginLightShadow(direct, ray, shadowMedium, -1.0f, direct.surface, shadowState))
+                direct.stage = Stage::ScatterShadow;
+        }
+        if (direct.stage == Stage::ScatterShadow) {
+            if (!advanceShadow(direct.shadow, sampler, prepared, reply, replyReady))
+                return false;
+            Vec3f shadow = direct.shadow.throughput;
+            if (shadow != 0.0f) {
+                Vec3f e = shadow*light.evalDirect(direct.lightData, direct.lightInfo);
+                if (e != 0.0f) {
+                    if (direct.surface) {
+                        direct.result = e*event.weight;
+                        direct.result *= SampleWarp::powerHeuristic(event.pdf,
+                            light.directPdf(_threadId, direct.lightData, direct.lightInfo, event.info->p));
+                    } else {
+                        direct.result = e*direct.phaseSample.weight;
+                        if (!sample.phase->isSpecular() ||
+                            sample.sparseConv1DSamplingScheme != SparseConv1DSamplingScheme::UNI)
+                            direct.result *= SampleWarp::powerHeuristic(direct.phaseSample.pdf,
+                                light.directPdf(_threadId, direct.lightData, direct.lightInfo, sample.p));
+                    }
+                }
+            }
+            direct.stage = Stage::Finished;
+        }
+    }
+    direct.result = (direct.firstResult + direct.result)*direct.lightWeight;
+    return true;
 }
 
 Vec3f TraceBase::attenuatedEmission(PathSampleGenerator &sampler,
@@ -539,11 +831,11 @@ Vec3f TraceBase::estimateDirect(SurfaceScatterEvent &event,
 bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumSample, 
                              Medium::MediumState& mediumState,
            const Medium *&medium, int bounce, bool adjoint, bool enableLightSampling,
-           Ray &ray, Vec3f &throughput, Vec3f &emission, bool &wasSpecular)
+           Ray &ray, Vec3f &throughput, Vec3f &emission, bool &wasSpecular, bool directLightingDone)
 {
     wasSpecular = !enableLightSampling;
 
-    if (!adjoint && enableLightSampling && bounce < _settings.maxBounces - 1) {
+    if (!directLightingDone && !adjoint && enableLightSampling && bounce < _settings.maxBounces - 1) {
         Medium::MediumState mediumStateBounceIncr = mediumState;
         mediumStateBounceIncr.info.pixelSampleSegment.w() += 1;
         emission += throughput*volumeEstimateDirect(sampler, mediumSample, &mediumStateBounceIncr, medium, bounce + 1, ray);
@@ -562,68 +854,67 @@ bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumS
     return true;
 }
 
-bool TraceBase::handleSurface(SurfaceScatterEvent &event, IntersectionTemporary &data,
-                              IntersectionInfo &info, const Medium *&medium,
-                              int bounce, bool adjoint, bool enableLightSampling, Ray &ray,
-                              Vec3f &throughput, Vec3f &emission, bool &wasSpecular,
-                              Medium::MediumState &mediumState, Vec3f *transmittance)
+void TraceBase::beginSurface(SurfaceState &surface, SurfaceScatterEvent &event,
+        const Ray &ray, Vec3f &throughput) const
 {
-    const Bsdf &bsdf = *info.bsdf;
-
-    // For forward events, the transport direction does not matter (since wi = -wo)
-    Vec3f transparency = bsdf.eval(event.makeForwardEvent(), false);
+    Vec3f transparency = event.info->bsdf->eval(event.makeForwardEvent(), false);
     float transparencyScalar = transparency.avg();
-
-    Vec3f wo;
-    if (event.sampler->nextBoolean(transparencyScalar)) {
-        wo = ray.dir();
+    surface.forward = event.sampler->nextBoolean(transparencyScalar);
+    if (surface.forward) {
+        surface.wo = ray.dir();
         event.pdf = transparencyScalar;
         event.weight = transparency/transparencyScalar;
         event.sampledLobe = BsdfLobes::ForwardLobe;
         throughput *= event.weight;
-    } else {
-        if (!adjoint) {
-            if (enableLightSampling && bounce < _settings.maxBounces - 1) {
-                Medium::MediumState mediumStateBounceIncr = mediumState;
-                mediumStateBounceIncr.info.pixelSampleSegment.w() += 1;
-                emission += estimateDirect(event, &mediumStateBounceIncr, medium, bounce + 1, ray, transmittance)*throughput;
-            }
+    }
+}
 
-            if (info.primitive->isEmissive() && bounce >= _settings.minBounces) {
-                if (!enableLightSampling || wasSpecular || !info.primitive->isSamplable())
-                    emission += info.primitive->evalDirect(data, info)*throughput;
-            }
+bool TraceBase::finishSurface(SurfaceState &surface, SurfaceScatterEvent &event,
+        IntersectionTemporary &data, IntersectionInfo &info, const Medium *&medium,
+        int bounce, bool adjoint, bool enableLightSampling, Ray &ray,
+        Vec3f &throughput, Vec3f &emission, bool &wasSpecular,
+        Medium::MediumState &mediumState) const
+{
+    if (!surface.forward) {
+        if (!adjoint && info.primitive->isEmissive() && bounce >= _settings.minBounces) {
+            if (!enableLightSampling || wasSpecular || !info.primitive->isSamplable())
+                emission += info.primitive->evalDirect(data, info)*throughput;
         }
-
         event.requestedLobe = BsdfLobes::AllLobes;
-        if (!bsdf.sample(event, adjoint))
+        if (!info.bsdf->sample(event, adjoint))
             return false;
-
-        //assert(abs(event.wo.lengthSq() - 1.0f) < 0.001f);
-
-        wo = event.frame.toGlobal(event.wo);
-
-        if (!isConsistent(event, wo))
+        surface.wo = event.frame.toGlobal(event.wo);
+        if (!isConsistent(event, surface.wo))
             return false;
-
         throughput *= event.weight;
         wasSpecular = event.sampledLobe.hasSpecular();
         if (!wasSpecular)
             ray.setPrimaryRay(false);
     }
-
     Vec3f wi = event.frame.toGlobal(event.wi);
-    bool geometricBackside = (wo.dot(info.Ng) < 0.0f);
+    bool geometricBackside = (surface.wo.dot(info.Ng) < 0.0f);
     medium = info.primitive->selectMedium(medium, geometricBackside);
-    if (geometricBackside != (wi.dot(info.Ng) < 0.0f)) {
+    if (geometricBackside != (wi.dot(info.Ng) < 0.0f))
         mediumState.reset();
-    }
-
-    ray = ray.scatter(ray.hitpoint(), wo, info.epsilon);
-
-    //assert( abs(ray.dir().lengthSq() - 1.0f) < 0.001f);
-
+    ray = ray.scatter(ray.hitpoint(), surface.wo, info.epsilon);
     return true;
+}
+
+bool TraceBase::handleSurface(SurfaceScatterEvent &event, IntersectionTemporary &data,
+        IntersectionInfo &info, const Medium *&medium, int bounce, bool adjoint,
+        bool enableLightSampling, Ray &ray, Vec3f &throughput, Vec3f &emission,
+        bool &wasSpecular, Medium::MediumState &mediumState, Vec3f *transmittance)
+{
+    SurfaceState surface;
+    beginSurface(surface, event, ray, throughput);
+    if (!surface.forward && !adjoint && enableLightSampling && bounce < _settings.maxBounces - 1) {
+        Medium::MediumState mediumStateBounceIncr = mediumState;
+        mediumStateBounceIncr.info.pixelSampleSegment.w() += 1;
+        emission += estimateDirect(event, &mediumStateBounceIncr, medium, bounce + 1,
+            ray, transmittance)*throughput;
+    }
+    return finishSurface(surface, event, data, info, medium, bounce, adjoint,
+        enableLightSampling, ray, throughput, emission, wasSpecular, mediumState);
 }
 
 void TraceBase::handleInfiniteLights(IntersectionTemporary &data,

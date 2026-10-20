@@ -9,6 +9,7 @@
 
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/MultiResGrid.h>
+#include <vector>
 
 namespace Tungsten {
 
@@ -75,6 +76,15 @@ class VdbGrid : public Grid
     void generateSuperGrid();
 
 public:
+    struct DenseDensity {
+        std::vector<float> values;
+        Vec3i origin;
+        Vec3i dimensions;
+        Mat4f worldToIndex;
+        Vec3f clampMin;
+        Vec3f clampMax;
+    };
+
     VdbGrid();
 
     virtual void fromJson(JsonPtr value, const Scene &scene) override;
@@ -90,6 +100,9 @@ public:
     virtual void requestSDF() override;
 
     float density(Vec3f p) const override;
+    // Export the linear mean grid for a batched GPU GPIS tracer.
+    // Returns false when this grid uses unsupported interpolation or detail grids.
+    bool exportLinearDensity(DenseDensity &out) const;
     Vec3f gradient(Vec3f p) const override;
     Vec3f emission(Vec3f p) const override;
     float opticalDepth(PathSampleGenerator &sampler, Vec3f p, Vec3f w, float t0, float t1) const override;

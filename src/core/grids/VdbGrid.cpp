@@ -16,6 +16,7 @@
 #include <openvdb/tools/Interpolation.h>
 #include <openvdb/tools/GridOperators.h>
 #include <openvdb/tools/FastSweeping.h>
+#include <limits>
 namespace Tungsten {
 
 std::string VdbGrid::sampleMethodToString(SampleMethod method)
@@ -428,6 +429,52 @@ float VdbGrid::density(Vec3f p) const
     case InterpolateMethod::Quadratic:
         return openvdb::tools::QuadraticSampler::sample(grid->tree(), vec_conv<openvdb::Vec3R>(p));
     }
+}
+
+bool VdbGrid::exportLinearDensity(DenseDensity &out) const
+{
+    if (!_densityGrid || _detailGrid || _emissionGrid ||
+        _interpolateMethod != InterpolateMethod::Linear)
+        return false;
+
+    const Vec3f minimum = _bounds.min();
+    const Vec3f maximum = _bounds.max();
+    const Vec3i origin(static_cast<int>(minimum.x()),
+                       static_cast<int>(minimum.y()),
+                       static_cast<int>(minimum.z()));
+    const Vec3i dimensions(static_cast<int>(maximum.x()) - origin.x() + 1,
+                           static_cast<int>(maximum.y()) - origin.y() + 1,
+                           static_cast<int>(maximum.z()) - origin.z() + 1);
+    if (dimensions.x() < 2 || dimensions.y() < 2 || dimensions.z() < 2)
+        return false;
+
+    const size_t x = static_cast<size_t>(dimensions.x());
+    const size_t y = static_cast<size_t>(dimensions.y());
+    const size_t z = static_cast<size_t>(dimensions.z());
+    const Vec3f clampMin = minimum + Vec3f(2.0f);
+    const Vec3f clampMax = maximum - Vec3f(3.0f);
+    if (x > std::numeric_limits<size_t>::max() / y ||
+        x * y > std::numeric_limits<size_t>::max() / z ||
+        clampMin.x() > clampMax.x() ||
+        clampMin.y() > clampMax.y() ||
+        clampMin.z() > clampMax.z())
+        return false;
+
+    out.origin = origin;
+    out.dimensions = dimensions;
+    out.worldToIndex = invNaturalTransform();
+    out.clampMin = clampMin;
+    out.clampMax = clampMax;
+    out.values.resize(x * y * z);
+    const auto &tree = _densityGrid->tree();
+    for (int iz = 0; iz < dimensions.z(); ++iz)
+        for (int iy = 0; iy < dimensions.y(); ++iy)
+            for (int ix = 0; ix < dimensions.x(); ++ix)
+                out.values[(static_cast<size_t>(iz) * y + iy) * x + ix] =
+                    tree.getValue(openvdb::Coord(origin.x() + ix,
+                                                 origin.y() + iy,
+                                                 origin.z() + iz));
+    return true;
 }
 
 Vec3f VdbGrid::gradient(Vec3f p) const

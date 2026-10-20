@@ -1013,6 +1013,11 @@ namespace Tungsten {
         virtual rapidjson::Value toJson(Allocator& allocator) const override;
         virtual void loadResources() override;
 
+        const std::shared_ptr<Grid> &grid() const { return _grid; }
+        float offset() const { return _offset; }
+        float scale() const { return _scale; }
+        bool isVolume() const { return _isVolume; }
+
     private:
         std::shared_ptr<Grid> _grid;
         float _offset = 0;
@@ -1272,20 +1277,28 @@ namespace Tungsten {
             return grad;
         }
 
+        // These are "not implemented" stubs. They used to fall off the end of a
+        // non-void function, which GCC only warns about but MSVC rejects outright
+        // (C4716). Identity is the identity transform, matching the convention of
+        // the stubs above that return their argument unchanged.
         virtual Eigen::Matrix3f worldToLocalMatrix(const Vec3f& p) const {
             std::cerr << "worldToLocalMatrix not implemented!\n";
+            return Eigen::Matrix3f::Identity();
         }
 
         virtual Eigen::Matrix3f localToWorldMatrix(const Vec3f& p) const {
             std::cerr << "localToWorldMatrix not implemented!\n";
+            return Eigen::Matrix3f::Identity();
         }
 
         virtual Eigen::Matrix3f worldToLocalInvTransposeMatrix(const Vec3f& p) const {
             std::cerr << "worldToLocalInvTransposeMatrix not implemented!\n";
+            return Eigen::Matrix3f::Identity();
         }
 
         virtual Eigen::Matrix3f localToWorldInvTransposeMatrix(const Vec3f& p) const {
             std::cerr << "localToWorldInvTransposeMatrix not implemented!\n";
+            return Eigen::Matrix3f::Identity();
         }
 
         double spectral_density(Derivative a, Derivative b, double s) {
@@ -1791,6 +1804,11 @@ namespace Tungsten {
         virtual rapidjson::Value toJson(Allocator& allocator) const override;
 
         virtual std::string id() const;
+
+        float lengthScale() const { return _l; }
+        bool isIsotropic() const {
+            return !_use_aniso_mtx && _aniso == Vec3f(1.0f);
+        }
 
         virtual bool hasAnalyticSpectralDensity() const override { return true; }
 

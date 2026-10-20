@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build (MSBuild, Release)",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--config", "Release", "--parallel"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$msCompile"]
+        },
+        {
+            // Only needed when CMakeLists.txt changes the include paths or
+            // defines -- the compile database is not re-read after every edit.
+            "label": "Regenerate IntelliSense DB",
+            "type": "shell",
+            "command": "${workspaceFolder}/.vscode/configure-intellisense.bat",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
+        }
+    ]
+}

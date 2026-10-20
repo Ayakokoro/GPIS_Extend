@@ -1,4 +1,5 @@
 #include "GaussianProcess.hpp"
+#include "FunctionSpaceProfile.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
 #include "io/MeshIO.hpp"
@@ -315,6 +316,8 @@ std::tuple<Eigen::VectorXd, Eigen::VectorXi, CovMatrix> GaussianProcess::mean_an
     const Vec3d* points, const Derivative* derivative_types, const Vec3d* ddirs,
     Vec3d deriv_dir, size_t numPts) const {
 
+    FsProfile::Scope timer(FsProfile::Stage::MeanCovariance);
+
     Eigen::VectorXd ps_mean(numPts);
     Eigen::VectorXi ps_id(numPts);
     CovMatrix ps_cov(numPts, numPts);
@@ -396,6 +399,8 @@ std::tuple<Eigen::VectorXd, Eigen::VectorXi> GaussianProcess::mean_prior(
     const Vec3d * points, const Derivative * derivative_types, const Vec3d * ddirs,
     Vec3d deriv_dir, size_t numPts) const {
 
+    FsProfile::Scope timer(FsProfile::Stage::Mean);
+
     Eigen::VectorXd ps_mean(numPts);
     Eigen::VectorXi ps_id(numPts);
 
@@ -463,6 +468,8 @@ CovMatrix GaussianProcess::cov_prior(
     const Derivative* dtypes_a, const Derivative* dtypes_b,
     const Vec3d* ddirs_a, const Vec3d* ddirs_b,
     Vec3d deriv_dir, size_t numPtsA, size_t numPtsB) const {
+
+    FsProfile::Scope timer(FsProfile::Stage::Covariance);
 
     CovMatrix ps_cov(numPtsA, numPtsB);
 
@@ -536,6 +543,7 @@ CovMatrix GaussianProcess::cov_sym(
     const Derivative* dtypes_a,
     const Vec3d* ddirs_a,
     Vec3d deriv_dir, size_t numPtsA) const {
+    FsProfile::Scope timer(FsProfile::Stage::Covariance);
     CovMatrix ps_cov(numPtsA, numPtsA);
 
 #ifdef SPARSE_COV
@@ -654,6 +662,8 @@ Eigen::VectorXd _pinv_1d(const Eigen::VectorXd& v, double eps = 1e-5) {
 
 
 CovMatrix pseudo_inverse(const CovMatrix& a) {
+    FsProfile::Scope timer(FsProfile::Stage::PseudoInverse);
+    FsProfile::count(FsProfile::Counter::PseudoInverseDimension, a.rows());
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigs(a);
     double eps = _eigvalsh_to_eps(eigs.eigenvalues());
     Eigen::VectorXd s_pinv = _pinv_1d(eigs.eigenvalues(), eps);
@@ -668,6 +678,8 @@ std::tuple<MultivariateNormalDistribution, Eigen::VectorXi> GaussianProcess::cre
     const Vec3d* cond_ddirs,
     Vec3d deriv_dir) const {
     // Note (for myself): ddirs = nullptr, cond_ddirs = nullptr, deriv_dir = ray direction
+    FsProfile::Scope timer(FsProfile::Stage::Conditioning);
+    FsProfile::count(FsProfile::Counter::ConditionDimension, numCondPts);
 
     if (numCondPts == 0) {
         auto [ps_mean, ps_id, ps_cov] = mean_and_cov(points, derivative_types, ddirs, deriv_dir, numPts);

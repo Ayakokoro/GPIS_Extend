@@ -1,5 +1,6 @@
 #include "Cube.hpp"
 #include "TriangleMesh.hpp"
+#include <limits>
 
 #include "sampling/PathSampleGenerator.hpp"
 #include "sampling/SampleWarp.hpp"
@@ -12,6 +13,9 @@ namespace Tungsten {
 struct CubeIntersection
 {
     bool backSide;
+    // Signed, one-based slab axis. Preserve the actual intersected face even
+    // when a rounded hit point lies on another face at an edge/corner.
+    int face;
 };
 
 Cube::Cube()
@@ -96,18 +100,25 @@ bool Cube::intersect(Ray &ray, IntersectionTemporary &data) const
     Vec3f p = _invRot*(ray.pos() - _pos);
     Vec3f d = _invRot*ray.dir();
 
-    Vec3f invD = 1.0f/d;
-    Vec3f relMin((-_scale - p));
-    Vec3f relMax(( _scale - p));
-
     float ttMin = ray.nearT(), ttMax = ray.farT();
+    int entryFace = 0, exitFace = 0;
     for (int i = 0; i < 3; ++i) {
-        if (invD[i] >= 0.0f) {
-            ttMin = max(ttMin, relMin[i]*invD[i]);
-            ttMax = min(ttMax, relMax[i]*invD[i]);
-        } else {
-            ttMax = min(ttMax, relMin[i]*invD[i]);
-            ttMin = max(ttMin, relMax[i]*invD[i]);
+        if (d[i] == 0.0f) {
+            if (p[i] < -_scale[i] || p[i] > _scale[i])
+                return false;
+            continue;
+        }
+        const float invD = 1.0f/d[i];
+        const bool positive = d[i] > 0.0f;
+        const float nearT = ((positive ? -_scale[i] : _scale[i]) - p[i])*invD;
+        const float farT = ((positive ? _scale[i] : -_scale[i]) - p[i])*invD;
+        if (nearT > ttMin) {
+            ttMin = nearT;
+            entryFace = positive ? -(i + 1) : i + 1;
+        }
+        if (farT < ttMax) {
+            ttMax = farT;
+            exitFace = positive ? i + 1 : -(i + 1);
         }
     }
 
@@ -116,14 +127,46 @@ bool Cube::intersect(Ray &ray, IntersectionTemporary &data) const
             data.primitive = this;
             ray.setFarT(ttMin);
             data.as<CubeIntersection>()->backSide = false;
+            data.as<CubeIntersection>()->face = entryFace;
+            return true;
         } else if (ttMax > ray.nearT() && ttMax < ray.farT()) {
             data.primitive = this;
             ray.setFarT(ttMax);
             data.as<CubeIntersection>()->backSide = true;
+            data.as<CubeIntersection>()->face = exitFace;
+            return true;
         }
-        return true;
     }
     return false;
+}
+
+bool Cube::intersectMediumExit(Ray &ray, IntersectionTemporary &data) const
+{
+    Vec3f p = _invRot*(ray.pos() - _pos);
+    const Vec3f d = _invRot*ray.dir();
+    // Allow only floating-point error at the boundary, not a geometric offset.
+    const float tolerance = 32.0f*std::numeric_limits<float>::epsilon()*_scale.max();
+    float exitT = Ray::infinity();
+    int exitFace = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::abs(p[axis]) > _scale[axis] + tolerance)
+            return false;
+        p[axis] = clamp(p[axis], -_scale[axis], _scale[axis]);
+        if (d[axis] != 0.0f) {
+            const float t = ((d[axis] > 0.0f ? _scale[axis] : -_scale[axis]) - p[axis])/d[axis];
+            if (t < exitT) {
+                exitT = t;
+                exitFace = d[axis] > 0.0f ? axis + 1 : -(axis + 1);
+            }
+        }
+    }
+    if (!std::isfinite(exitT) || exitT > ray.nearT() || exitT >= ray.farT())
+        return false;
+    data.primitive = this;
+    data.as<CubeIntersection>()->backSide = true;
+    data.as<CubeIntersection>()->face = exitFace;
+    ray.setFarT(max(exitT, 0.0f));
+    return true;
 }
 
 bool Cube::occluded(const Ray &ray) const
@@ -154,12 +197,13 @@ bool Cube::hitBackside(const IntersectionTemporary &data) const
     return data.as<CubeIntersection>()->backSide;
 }
 
-void Cube::intersectionInfo(const IntersectionTemporary &/*data*/, IntersectionInfo &info) const
+void Cube::intersectionInfo(const IntersectionTemporary &data, IntersectionInfo &info) const
 {
     Vec3f p = _invRot*(info.p - _pos);
     Vec3f n(0.0f);
-    int dim = (std::abs(p) - _scale).maxDim();
-    n[dim] = p[dim] < 0.0f ? -1.0f : 1.0f;
+    const int face = data.as<CubeIntersection>()->face;
+    const int dim = std::abs(face) - 1;
+    n[dim] = face < 0 ? -1.0f : 1.0f;
 
     Vec3f uvw = (p/_scale)*0.5f + 0.5f;
 
@@ -171,8 +215,7 @@ void Cube::intersectionInfo(const IntersectionTemporary &/*data*/, IntersectionI
 
 bool Cube::tangentSpace(const IntersectionTemporary &/*data*/, const IntersectionInfo &info, Vec3f &T, Vec3f &B) const
 {
-    Vec3f p = _invRot*(info.p - _pos);
-    int dim = (std::abs(p) - _scale).maxDim();
+    const int dim = std::abs(_invRot*info.Ng).maxDim();
     T = B = Vec3f(0.0f);
     T[(dim + 1) % 3] = 1.0f;
     B[(dim + 2) % 3] = 1.0f;

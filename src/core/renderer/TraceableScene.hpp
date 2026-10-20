@@ -204,6 +204,8 @@ public:
         }
     }
 
+    float rayEpsilon() const { return DefaultEpsilon; }
+
     bool intersectInfinites(Ray &ray, IntersectionTemporary &data, IntersectionInfo &info) const
     {
         info.primitive = nullptr;

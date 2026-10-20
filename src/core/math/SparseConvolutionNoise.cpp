@@ -361,8 +361,8 @@ Vec4f SparseConvolutionNoiseRealization::evaluateNoise1DNormalized(const Vec3f& 
 
 Vec4f SparseConvolutionNoiseRealization::noise3D(const Vec3f& p_world, const Vec3f& p, const uint seed, UniformSampler& sampler, float impulseDensity, float kernelRadius, float kernelSpatialScale) const {
     Vec3f p_grid = p / kernelRadius;
-    Vec3f frac = Vec3f(p_grid - floor(p_grid));
-    Vec3i ijk = Vec3i(floor(p_grid));
+    Vec3f frac = Vec3f(p_grid - std::floor(p_grid));
+    Vec3i ijk = Vec3i(std::floor(p_grid));
     Vec4f sum = Vec4f(0.0);
 
     for (int dx = -1; dx <= 1; ++dx)

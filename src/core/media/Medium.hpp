@@ -19,6 +19,8 @@
 
 namespace Tungsten {
 
+class GpRayBatchBackend;
+
 struct DumpData {
     std::vector<float> ts; // distance along the ray
     std::vector<float> vals; // value of the SDF (mean + gp)
@@ -58,6 +60,7 @@ public:
 
     struct MediumState
     {
+        GpRayBatchBackend *gpRayBatchBackend = nullptr;
         bool firstScatter;
         int component;
         int bounce;

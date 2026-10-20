@@ -114,6 +114,38 @@ public:
     virtual bool sampleDistance(PathSampleGenerator &sampler, const Ray &ray,
             MediumState &state, MediumSample &sample) const override;
 
+    enum class DistanceStatus { Failed, Finished, NeedIntersection };
+    struct DistanceState {
+        Ray ray;
+        Vec3d origin, direction;
+        float maxT;
+        double t;
+        bool firstIntersection = true;
+    };
+    DistanceStatus beginDistance(PathSampleGenerator &sampler, const Ray &ray,
+        MediumState &state, MediumSample &sample, DistanceState &distance) const;
+    DistanceStatus resumeDistance(PathSampleGenerator &sampler, const Ray &ray,
+        MediumState &state, MediumSample &sample, DistanceState &distance,
+        double t, bool hit) const;
+
+private:
+    void finishDistance(const Ray &ray, MediumState &state, MediumSample &sample) const;
+
+public:
+
+    enum class TransmittanceStatus { Finished, NeedIntersection };
+    struct TransmittanceState {
+        Ray ray;
+        float maxT;
+        double t;
+        bool firstIntersection = true;
+        Vec3f value = Vec3f(1.0f);
+    };
+    void beginTransmittance(const Ray &ray, TransmittanceState &transmittance) const;
+    TransmittanceStatus resumeTransmittance(PathSampleGenerator &sampler,
+        const Ray &ray, MediumState &state, TransmittanceState &transmittance,
+        double t, bool hit) const;
+
     virtual Vec3f transmittance(PathSampleGenerator &sampler, const Ray &ray, bool startOnSurface, bool endOnSurface, MediumState* state) const override;
     virtual float pdf(PathSampleGenerator &sampler, const Ray &ray, bool startOnSurface, bool endOnSurface) const override;
 

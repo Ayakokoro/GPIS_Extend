@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED On)
 set(CMAKE_CXX_EXTENSIONS Off)
 
+option(TUNGSTEN_ENABLE_CUDA "Build the optional GPIS CUDA backend" OFF)
+
 # Disable annoying boost warning
 set(Boost_NO_WARN_NEW_VERSIONS 1)
 
@@ -41,13 +43,17 @@ else()
 endif()
 
 if (MSVC)
-    add_definitions(-DCONSTEXPR=const -DNOMINMAX -D_CRT_SECURE_NO_WARNINGS)
+    # _USE_MATH_DEFINES makes MSVC's <cmath> expose M_PI and friends, which are a
+    # POSIX extension rather than standard C++. It has to be a command line define
+    # so that it is set before any header includes <cmath>. (NOMINMAX/CRT defines
+    # stay here too — add_definitions applies to the whole directory.)
+    add_definitions(-DCONSTEXPR=const -DNOMINMAX -D_CRT_SECURE_NO_WARNINGS -D_USE_MATH_DEFINES)
 else()
     add_definitions(-DCONSTEXPR=constexpr)
 endif()
 
 if (MSVC)
-  add_compile_options(/bigobj)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
 endif ()
 
 IF(COMMAND cmake_policy)
@@ -195,11 +201,47 @@ endif()
 file(GLOB_RECURSE Core_SOURCES "src/core/*.cpp")
 add_library(core STATIC ${Core_SOURCES})
 
+# `core` is compiled before anything links the imported dependency targets, so it
+# never inherited their include directories. OpenEXR's generated openexr_config.h
+# does `#include <IlmThreadConfig.h>`, which only resolves when include/OpenEXR is
+# on the path -- and that directory comes from OpenEXR::OpenEXRConfig, reachable
+# only through OpenEXR::OpenEXR's INTERFACE_LINK_LIBRARIES, not from a plain
+# property query. Linking the target is what actually pulls it in.
+if (OpenEXR_FOUND AND Imath_FOUND)
+    target_link_libraries(core PRIVATE OpenEXR::OpenEXR Imath::Imath)
+endif()
+
 add_library(facet-forge STATIC src/thirdparty/facet-forge/src/random.cpp)
 set(core_libs ${core_libs} facet-forge)
 
+option(TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS "Build SDF-only classic_global tests" OFF)
+if (TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS)
+    enable_testing()
+    add_executable(classic_global_test tests/ClassicGlobalTest.cpp)
+    target_link_libraries(classic_global_test PRIVATE ${core_libs})
+    add_test(NAME classic_global COMMAND classic_global_test "${CMAKE_CURRENT_BINARY_DIR}/classic-global-test")
+    add_test(NAME classic_global_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/classic-global-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalRenderSmoke.cmake")
+endif()
+
+if (TUNGSTEN_ENABLE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    enable_testing()
+    add_subdirectory(src/gpu)
+endif()
+
 add_executable(obj2json src/obj2json/obj2json.cpp)
 target_link_libraries(obj2json ${core_libs})
+
+find_package(nanovdb CONFIG QUIET)
+if (OpenVDB_FOUND AND OpenEXR_FOUND AND TBB_FOUND AND nanovdb_FOUND)
+    add_executable(obj2json_macrofacet src/obj2json/obj2json_macrofacet.cpp)
+    target_link_libraries(obj2json_macrofacet PRIVATE ${core_libs} nanovdb::nanovdb)
+endif()
 
 add_executable(json2xml src/json2xml/json2xml.cpp)
 target_link_libraries(json2xml ${core_libs})
@@ -218,6 +260,10 @@ endif()
 
 add_executable(tungsten src/tungsten/tungsten.cpp)
 target_link_libraries(tungsten ${core_libs})
+if (TARGET tungsten_gp_cuda_pathtracer)
+    target_compile_definitions(tungsten PRIVATE TUNGSTEN_ENABLE_CUDA=1)
+    target_link_libraries(tungsten tungsten_gp_cuda_pathtracer)
+endif()
 
 if (WIN32)
     set(socket_libs wsock32 Ws2_32)
@@ -229,6 +275,9 @@ add_executable(tungsten_server src/tungsten-server/tungsten-server.cpp)
 target_link_libraries(tungsten_server ${core_libs} ${socket_libs})
 
 set(executables obj2json json2xml scenemanip hdrmanip tungsten tungsten_server)
+if (TARGET obj2json_macrofacet)
+    list(APPEND executables obj2json_macrofacet)
+endif()
 if (EIGEN3_FOUND)
     set(executables ${executables} denoiser)
 endif()
@@ -236,8 +285,12 @@ set(data_dirs example-scenes materialtest mc-loader)
 
 
 find_package(OpenGL)
-find_package(Qt5 COMPONENTS Widgets OpenGL REQUIRED)
-option(BUILD_EDITOR "Build the editor" FALSE) 
+option(BUILD_EDITOR "Build the editor" FALSE)
+# Qt5 is only needed by the editor. Looking it up unconditionally made Qt5 a hard
+# dependency of every build, even BUILD_EDITOR=OFF ones.
+if (BUILD_EDITOR)
+    find_package(Qt5 COMPONENTS Widgets OpenGL REQUIRED)
+endif()
 if (BUILD_EDITOR AND OPENGL_FOUND AND Qt5Widgets_FOUND)
 	set(CMAKE_AUTOMOC ON)
 	set(CMAKE_AUTORCC ON)
@@ -265,7 +318,7 @@ if (BUILD_EDITOR AND OPENGL_FOUND AND Qt5Widgets_FOUND)
     set(data_dirs ${data_dirs} editor shaders)
     set(executables ${executables} editor)
 else()
-    if (NOT Qt5Widgets_FOUND)
+    if (BUILD_EDITOR AND NOT Qt5Widgets_FOUND)
         message(STATUS "Qt5 not found. Editor will not be built")
     endif()
     if (NOT OPENGL_FOUND)

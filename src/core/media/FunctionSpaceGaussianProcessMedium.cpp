@@ -1,4 +1,5 @@
 #include "FunctionSpaceGaussianProcessMedium.hpp"
+#include "math/FunctionSpaceProfile.hpp"
 #include "WeightSpaceGaussianProcessMedium.hpp"
 
 #include <cfloat>
@@ -56,6 +57,7 @@ namespace Tungsten {
     }
 
     bool FunctionSpaceGaussianProcessMedium::intersectGP(PathSampleGenerator& sampler, const Ray& ray, MediumState& state, double& t, bool firstIsectAlongRay) const {
+        FsProfile::Scope timer(FsProfile::Stage::Intersect, true);
         std::vector<Vec3d> points(_samplePoints);
         std::vector<Derivative> derivs(_samplePoints);
         std::vector<double> ts(_samplePoints);
@@ -264,6 +266,7 @@ namespace Tungsten {
                         state.lastGPId = 1;
                 }
 
+                FsProfile::count(FsProfile::Counter::Hit);
                 return true;
             }
             prevV = currV;
@@ -278,10 +281,12 @@ namespace Tungsten {
         state.gpContext = ctxt_ret;
         state.lastGPId = sampleIds(sampleIds.size()-1,0);
 
+        FsProfile::count(FsProfile::Counter::Miss);
         return false;
     }
 
     bool FunctionSpaceGaussianProcessMedium::sampleGradient(PathSampleGenerator& sampler, const Ray& ray, const Vec3d& isect_p, const float&, MediumState& state, Vec3d& grad) const {
+        FsProfile::Scope timer(FsProfile::Stage::Gradient, true);
         if (!state.gpContext)
             return false;
 
