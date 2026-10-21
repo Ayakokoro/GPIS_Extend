@@ -69,12 +69,14 @@ public:
         float lastVal;
         RayInfo info;
         std::shared_ptr<GPContext> gpContext;
+        std::shared_ptr<const MediumPathContext> pathContext;
         SparseConv1DSamplingScheme sparseConv1DSamplingScheme;
 
         void reset()
         {
             firstScatter = true;
             bounce = 0;
+            pathContext.reset();
             if (gpContext) {
                 gpContext->reset();
             }

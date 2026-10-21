@@ -20,6 +20,12 @@ public:
     virtual rapidjson::Value toJson(Allocator &allocator) const override;
 
     virtual Vec3f eval(const Vec3f &wi, const Vec3f &wo, const MediumSample& mediumSample) const = 0;
+    // Evaluate a light connection and sample any latent state needed on that
+    // branch. Ordinary phase functions have no additional state.
+    virtual Vec3f evalConnection(PathSampleGenerator &, const Vec3f &wi, const Vec3f &wo,
+            const MediumSample &s, std::shared_ptr<const MediumPathContext> &) const {
+        return eval(wi, wo, s);
+    }
     virtual Vec3f evalGrad(const Vec3f &wi, const Vec3f &wo, const MediumSample& mediumSample) const {
         std::cout << "PhaseFunction::evalGrad() not implemented!\n";
         return Vec3f(0.f);

@@ -2,6 +2,7 @@
 #define MEDIUMSAMPLE_HPP_
 
 #include "math/Vec.hpp"
+#include "MediumPathContext.hpp"
 #include <Eigen/Dense>
 
 namespace Tungsten {
@@ -19,6 +20,7 @@ struct RayInfo {
 
 struct MediumSample
 {
+    std::shared_ptr<const MediumEventContext> eventContext;
     PhaseFunction *phase;
     Vec3f p;
     float continuedT;

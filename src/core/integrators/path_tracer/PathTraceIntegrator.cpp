@@ -763,8 +763,8 @@ void PathTraceIntegrator::waitForCompletion()
             std::rethrow_exception(_wavefrontException);
     }
     if (_group) {
-        _group->wait();
-        _group.reset();
+        auto group = std::move(_group);
+        group->wait();
     }
 }
 
@@ -781,9 +781,9 @@ void PathTraceIntegrator::abortRender()
             std::rethrow_exception(_wavefrontException);
     }
     if (_group) {
-        _group->abort();
-        _group->wait();
-        _group.reset();
+        auto group = std::move(_group);
+        group->abort();
+        group->wait();
     }
 }
 

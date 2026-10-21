@@ -263,6 +263,7 @@ void ProceduralMean::fromJson(JsonPtr value, const Scene& scene) {
     value.getField("min", _min);
     value.getField("scale", _scale);
     value.getField("offset", _offset);
+    prepareSdfQueries();
 }
 
 rapidjson::Value ProceduralMean::toJson(Allocator& allocator) const {
@@ -272,11 +273,12 @@ rapidjson::Value ProceduralMean::toJson(Allocator& allocator) const {
                         "transform", _configTransform,
                         "min", _min,
                         "scale", _scale,
-                        "scale", _offset,
+                        "offset", _offset,
     };
 }
 
 double ProceduralMean::mean(Vec3d a) const {
+    if(sdfQueries()) return evaluateJet(to_eigen3d(a)).value;
     auto p = vec_conv<Vec3f>(a);
     p = _invConfigTransform.transformPoint(p);
     float m = (*_f)(Vec3d(p));
@@ -285,6 +287,7 @@ double ProceduralMean::mean(Vec3d a) const {
 }
 
 Vec3d ProceduralMean::dmean_da(Vec3d a) const {
+    if(sdfQueries()) return to_vec3d(evaluateJet(to_eigen3d(a)).gradient);
     double eps = 0.001f;
     double vals[] = {
             mean(a),

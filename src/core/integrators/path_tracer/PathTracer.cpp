@@ -1,3 +1,4 @@
+#include "math/conditional/mathutility/NumericPolicy.h"
 #include "PathTracer.hpp"
 
 #include "bsdfs/TransparencyBsdf.hpp"
@@ -197,6 +198,8 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
 
     return emission;
 
+    } catch (const ConditionalGpis::NumericError &) {
+        throw; // A failed conditional bound must never be converted to a black sample.
     } catch (std::runtime_error &e) {
         std::cout << tfm::format("Caught an internal error at pixel %s: %s", pixel, e.what()) << std::endl;
 
@@ -500,6 +503,8 @@ PathTracer::SampleStatus PathTracer::advanceSample(PathState &path, PathSampleGe
 
     return finish(emission);
 
+    } catch (const ConditionalGpis::NumericError &) {
+        throw; // A failed conditional bound must never be converted to a black sample.
     } catch (std::runtime_error &e) {
         std::cout << tfm::format("Caught an internal error at pixel %s: %s", pixel, e.what()) << std::endl;
         return finish(Vec3f(0.0f));

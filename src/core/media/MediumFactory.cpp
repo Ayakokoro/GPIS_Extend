@@ -8,6 +8,8 @@
 #include "WeightSpaceGaussianProcessMedium.hpp"
 #include "SparseConvolutionNoiseMedium.hpp"
 #include "ClassicGlobalMedium.hpp"
+#include "ClassicLocalMedium.hpp"
+#include "GlobalConditionalMedium.hpp"
 
 namespace Tungsten {
 
@@ -21,6 +23,8 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"weight_space_gaussian_process", std::make_shared<WeightSpaceGaussianProcessMedium>},
     {"sparse_conv_noise", std::make_shared<SparseConvolutionNoiseMedium>},
     {"classic_global", std::make_shared<ClassicGlobalMedium>},
+    {"classic_local", std::make_shared<ClassicLocalMedium>},
+    {"global_conditional", std::make_shared<GlobalConditionalMedium>},
 }))
 
 }

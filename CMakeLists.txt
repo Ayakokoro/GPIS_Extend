@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED On)
 set(CMAKE_CXX_EXTENSIONS Off)
 
 option(TUNGSTEN_ENABLE_CUDA "Build the optional GPIS CUDA backend" OFF)
+option(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE "Compile detailed conditional GP transport diagnostics" OFF)
 
 # Disable annoying boost warning
 set(Boost_NO_WARN_NEW_VERSIONS 1)
@@ -200,6 +201,9 @@ endif()
 
 file(GLOB_RECURSE Core_SOURCES "src/core/*.cpp")
 add_library(core STATIC ${Core_SOURCES})
+if (TUNGSTEN_ENABLE_CONDITIONAL_PROFILE)
+    target_compile_definitions(core PUBLIC TUNGSTEN_ENABLE_CONDITIONAL_PROFILE=1)
+endif()
 
 # `core` is compiled before anything links the imported dependency targets, so it
 # never inherited their include directories. OpenEXR's generated openexr_config.h
@@ -214,7 +218,50 @@ endif()
 add_library(facet-forge STATIC src/thirdparty/facet-forge/src/random.cpp)
 set(core_libs ${core_libs} facet-forge)
 
+if (OpenVDB_FOUND AND OpenEXR_FOUND AND TBB_FOUND)
+    add_executable(bake_sdf_mean tools/sdf-baker/ProceduralMeanBaker.cpp)
+    target_link_libraries(bake_sdf_mean PRIVATE ${core_libs})
+endif()
+
 option(TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS "Build SDF-only classic_global tests" OFF)
+option(TUNGSTEN_BUILD_GLOBAL_CONDITIONAL_TESTS "Build SDF-only conditional GP transport tests" OFF)
+if (TUNGSTEN_BUILD_GLOBAL_CONDITIONAL_TESTS)
+    enable_testing()
+    add_executable(global_conditional_test tests/GlobalConditionalTest.cpp)
+    target_link_libraries(global_conditional_test PRIVATE ${core_libs})
+    # Isolate the private SDF arithmetic so tests can compare point queries to
+    # the existing full Jet without exporting a reference-only production API.
+    add_executable(sdf_point_jet_test tests/SdfPointJetTest.cpp src/core/math/Mat4f.cpp)
+    target_link_libraries(sdf_point_jet_test PRIVATE Eigen3::Eigen)
+    add_test(NAME global_conditional_point_jet COMMAND sdf_point_jet_test)
+    add_test(NAME global_conditional_stage1 COMMAND global_conditional_test stage1)
+    add_test(NAME global_conditional_stage2 COMMAND global_conditional_test stage2)
+    add_test(NAME global_conditional_stage3 COMMAND global_conditional_test stage3)
+    add_test(NAME global_conditional_sdf COMMAND global_conditional_test sdf)
+    add_test(NAME global_conditional_knob COMMAND global_conditional_test knob)
+    add_test(NAME global_conditional_bounds COMMAND global_conditional_test bounds)
+    add_test(NAME global_conditional_tracking COMMAND global_conditional_test tracking)
+    foreach(mode stage2 stage3 wavefront furnace furnace_no_nee knob)
+        set(scene_name scene)
+        set(render_mode ${mode})
+        set(no_nee OFF)
+        if (mode STREQUAL "stage2")
+            set(scene_name stage2)
+        elseif (mode STREQUAL "knob")
+            set(scene_name knob)
+        elseif (mode STREQUAL "furnace_no_nee")
+            set(render_mode furnace)
+            set(no_nee ON)
+        endif()
+        add_test(NAME global_conditional_${mode}_render COMMAND ${CMAKE_COMMAND}
+            "-DRENDERER=$<TARGET_FILE:tungsten>"
+            "-DCHECKER=$<TARGET_FILE:global_conditional_test>"
+            "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/global-conditional/${scene_name}.json"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/global-conditional-${mode}-test"
+            "-DMODE=${render_mode}" "-DNO_NEE=${no_nee}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/GlobalConditionalRenderSmoke.cmake")
+    endforeach()
+endif()
 if (TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS)
     enable_testing()
     add_executable(classic_global_test tests/ClassicGlobalTest.cpp)
@@ -238,6 +285,30 @@ add_executable(obj2json src/obj2json/obj2json.cpp)
 target_link_libraries(obj2json ${core_libs})
 
 find_package(nanovdb CONFIG QUIET)
+if (nanovdb_FOUND)
+    target_link_libraries(core PRIVATE nanovdb::nanovdb)
+    set_source_files_properties(src/core/media/ClassicLocalGrid.cpp PROPERTIES
+        COMPILE_DEFINITIONS TUNGSTEN_NANOVDB_AVAILABLE=1)
+endif()
+option(TUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS "Build stationary classic_local tests" OFF)
+if (TUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS)
+    if (NOT nanovdb_FOUND)
+        message(FATAL_ERROR "classic_local tests require NanoVDB")
+    endif()
+    enable_testing()
+    add_executable(classic_local_test tests/ClassicLocalTest.cpp)
+    target_link_libraries(classic_local_test PRIVATE ${core_libs} nanovdb::nanovdb)
+    add_test(NAME classic_local COMMAND classic_local_test "${CMAKE_CURRENT_BINARY_DIR}/classic-local-test")
+    set_tests_properties(classic_local PROPERTIES FIXTURES_SETUP classic_local_field)
+    foreach(local_mode nee no_nee wavefront boundary)
+        add_test(NAME classic_local_${local_mode}_render COMMAND ${CMAKE_COMMAND}
+            "-DRENDERER=$<TARGET_FILE:tungsten>" "-DCHECKER=$<TARGET_FILE:classic_local_test>"
+            "-DSCENE=${CMAKE_CURRENT_BINARY_DIR}/classic-local-test/scene.json"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/classic-local-${local_mode}-render"
+            "-DMODE=${local_mode}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicLocalRenderSmoke.cmake")
+        set_tests_properties(classic_local_${local_mode}_render PROPERTIES FIXTURES_REQUIRED classic_local_field)
+    endforeach()
+endif()
 if (OpenVDB_FOUND AND OpenEXR_FOUND AND TBB_FOUND AND nanovdb_FOUND)
     add_executable(obj2json_macrofacet src/obj2json/obj2json_macrofacet.cpp)
     target_link_libraries(obj2json_macrofacet PRIVATE ${core_libs} nanovdb::nanovdb)

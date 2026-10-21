@@ -32,7 +32,12 @@ class TaskGroup
 
     void finish()
     {
-        if (_finisher && !_abort)
+        bool failed;
+        {
+            std::lock_guard<std::mutex> lock(_waitMutex);
+            failed = bool(_exceptionPtr);
+        }
+        if (_finisher && !_abort && !failed)
             _finisher();
 
         std::unique_lock<std::mutex> lock(_waitMutex);
@@ -57,7 +62,9 @@ public:
         try {
             _func(taskId, _numSubTasks, threadId);
         } catch (...) {
-            _exceptionPtr = std::current_exception();
+            std::lock_guard<std::mutex> lock(_waitMutex);
+            if (!_exceptionPtr)
+                _exceptionPtr = std::current_exception();
         }
 
         uint32 num = ++_finishedSubTasks;

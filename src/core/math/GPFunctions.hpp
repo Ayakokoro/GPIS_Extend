@@ -402,6 +402,7 @@ namespace Tungsten {
     class ProceduralScalar : public JsonSerializable {
     public:
         virtual double operator()(Vec3d p) const = 0;
+        virtual const SdfQueries *sdfQueries() const { return nullptr; }
     };
 
     class ConstantScalar : public ProceduralScalar {
@@ -576,10 +577,27 @@ namespace Tungsten {
         }
     };
 
-    class ProceduralSdf : public ProceduralScalar {
+    class ProceduralSdf : public ProceduralScalar, public SdfQueries {
         SdfFunctions::Function _fn;
     public:
         ProceduralSdf(SdfFunctions::Function fn = SdfFunctions::Function::Knob) : _fn(fn) {}
+        SdfFunctions::Function function() const { return _fn; }
+        const SdfQueries *sdfQueries() const override {
+            return SdfFunctions::supportsQueries(_fn) ? this : nullptr;
+        }
+        SdfJet evaluateJet(const Eigen::Vector3d &p) const override {
+            return SdfFunctions::evaluateJet(_fn,p);
+        }
+        double valueDifference(const Eigen::Vector3d &p,const Eigen::Vector3d &d) const override {
+            return SdfFunctions::valueDifference(_fn,p,d);
+        }
+        SdfBounds bounds(const Eigen::Vector3d &lo,const Eigen::Vector3d &hi) const override {
+            return SdfFunctions::bounds(_fn,lo,hi);
+        }
+        SdfRayBounds rayBounds(const Eigen::Vector3d &o,const Eigen::Vector3d &w,double lo,double hi,
+                              const SdfRayQueryOptions &options = {}) const override {
+            return SdfFunctions::rayBounds(_fn,o,w,lo,hi,options);
+        }
 
         virtual rapidjson::Value toJson(Allocator& allocator) const override {
             return JsonObject{ ProceduralScalar::toJson(allocator), allocator,
@@ -596,6 +614,7 @@ namespace Tungsten {
         }
 
         virtual double operator()(Vec3d p) const override {
+            if(sdfQueries()) return evaluateJet(to_eigen3d(p)).value;
             int mat;
             return SdfFunctions::eval(_fn, vec_conv<Vec3f>(p), mat);
         }
@@ -794,6 +813,7 @@ namespace Tungsten {
 
     class MeanFunction : public JsonSerializable {
     public:
+        virtual const SdfQueries *sdfQueries() const { return nullptr; }
         std::shared_ptr<ProceduralVector> _col = nullptr;
         std::shared_ptr<ProceduralVector> _emission = nullptr;
 
@@ -904,6 +924,8 @@ namespace Tungsten {
     public:
 
         SphericalMean(Vec3d c = Vec3d(0.), float r = 1.) : _c(c), _r(r) {}
+        const Vec3d &center() const { return _c; }
+        double radius() const { return _r; }
 
         virtual void fromJson(JsonPtr value, const Scene& scene) override {
             MeanFunction::fromJson(value, scene);
@@ -949,6 +971,9 @@ namespace Tungsten {
 
         LinearMean(Vec3d ref = Vec3d(0.), Vec3d dir = Vec3d(1., 0., 0.), float scale = 1.0f, float min = -FLT_MAX) :
             _ref(ref), _dir(dir.normalized()), _scale(scale), _min(min), _tf(Vec3f(dir.normalized())) {}
+        const Vec3d &referencePoint() const { return _ref; }
+        Vec3d gradient() const { return _dir*_scale; }
+        double minimum() const { return _min; }
 
         virtual void fromJson(JsonPtr value, const Scene& scene) override {
             MeanFunction::fromJson(value, scene);
@@ -1051,13 +1076,26 @@ namespace Tungsten {
         virtual Vec3d dmean_da(Vec3d a) const override;
     };
 
-    class ProceduralMean : public MeanFunction {
+    class ProceduralMean : public MeanFunction, public SdfQueries {
     public:
 
         ProceduralMean(std::shared_ptr<ProceduralScalar> f = nullptr) : _f(f) {}
         ProceduralMean(SdfFunctions::Function fn) {
             _f = std::make_shared<ProceduralSdf>(fn);
         }
+        const ProceduralScalar *function() const { return _f.get(); }
+        const Mat4f &inverseTransform() const { return _invConfigTransform; }
+        double minimum() const { return _min; }
+        double scale() const { return _scale; }
+        double offset() const { return _offset; }
+        const SdfQueries *sdfQueries() const override {
+            return _f && _f->sdfQueries() ? this : nullptr;
+        }
+        SdfJet evaluateJet(const Eigen::Vector3d &p) const override;
+        double valueDifference(const Eigen::Vector3d &p,const Eigen::Vector3d &d) const override;
+        SdfBounds bounds(const Eigen::Vector3d &minimum,const Eigen::Vector3d &maximum) const override;
+        SdfRayBounds rayBounds(const Eigen::Vector3d &o,const Eigen::Vector3d &w,double lo,double hi,
+                              const SdfRayQueryOptions &options = {}) const override;
 
         virtual void fromJson(JsonPtr value, const Scene& scene) override;
         virtual rapidjson::Value toJson(Allocator& allocator) const override;
@@ -1079,6 +1117,11 @@ namespace Tungsten {
 
     private:
         std::shared_ptr<ProceduralScalar> _f;
+        Eigen::Matrix3d _sdfWorldToLocal = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d _sdfTranslation = Eigen::Vector3d::Zero();
+        double _sdfTransformBound = 1.0;
+        const SdfQueries &localSdfQueries() const;
+        void prepareSdfQueries();
 
         float _min = -FLT_MAX;
         float _offset = 0;

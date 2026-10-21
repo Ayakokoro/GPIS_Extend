@@ -1,0 +1,121 @@
+{
+  "bsdfs": [
+    {
+      "albedo": 1.0,
+      "name": "processBox",
+      "type": "forward"
+    }
+  ],
+  "camera": {
+    "fov": 16.0,
+    "reconstruction_filter": "tent",
+    "resolution": [
+      64,
+      64
+    ],
+    "tonemap": "linear",
+    "transform": {
+      "look_at": [
+        0.0,
+        0.0,
+        0.041
+      ],
+      "position": [
+        0.134,
+        -0.4,
+        0.2
+      ],
+      "scale": [
+        -1.0,
+        1.0,
+        1.0
+      ],
+      "up": [
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "type": "pinhole"
+  },
+  "integrator": {
+    "enable_light_sampling": true,
+    "enable_volume_light_sampling": true,
+    "max_bounces": 32,
+    "min_bounces": 0,
+    "type": "path_tracer",
+    "use_cuda_gpis": false
+  },
+  "media": [
+    {
+      "name": "gp",
+      "type": "classic_local",
+      "field": {
+        "file": "../../../../macrofacet/outputs/fields/shader_ball_full.nvdb",
+        "sdf_grid": "sdf",
+        "density_grid": "density",
+        "macrocell_size": 8
+      },
+      "covariance": {
+        "lengthScale": 0.00282842725908927,
+        "sigma": 0.0010000000474974513,
+        "type": "squared_exponential"
+      },
+      "material": {
+        "type": "conductor",
+        "eta": [
+          0.2,
+          0.9,
+          1.1
+        ],
+        "k": [
+          3.9,
+          2.5,
+          2.2
+        ]
+      },
+      "max_bounces": 64
+    }
+  ],
+  "primitives": [
+    {
+      "bsdf": "processBox",
+      "int_medium": "gp",
+      "name": "processBox",
+      "transform": {
+        "position": [
+          -0.000440231712112122,
+          -0.000440231712112122,
+          0.040501317514315155
+        ],
+        "scale": [
+          0.09597051324044245,
+          0.09597051324044245,
+          0.08804634242242426
+        ]
+      },
+      "type": "cube"
+    },
+    {
+      "bsdf": {
+        "albedo": 1.0,
+        "type": "null"
+      },
+      "emission": 1.0,
+      "sample": true,
+      "scale": 1.0,
+      "type": "infinite_sphere"
+    }
+  ],
+  "renderer": {
+    "adaptive_sampling": false,
+    "enable_resume_render": false,
+    "hdr_output_file": "classic-local.pfm",
+    "output_file": "classic-local.png",
+    "overwrite_output_files": true,
+    "scene_bvh": true,
+    "spp": 16,
+    "spp_step": 4,
+    "stratified_sampler": false
+  }
+}

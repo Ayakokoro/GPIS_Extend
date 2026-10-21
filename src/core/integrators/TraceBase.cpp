@@ -1,6 +1,7 @@
 #include "TraceBase.hpp"
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
+#include "media/ClassicLocalMedium.hpp"
 
 namespace Tungsten {
 
@@ -24,6 +25,7 @@ TraceBase::TraceBase(TraceableScene *scene, const TraceSettings &settings, uint3
     for (const auto &prim : scene->primitives()) {
         auto *cube = dynamic_cast<Cube *>(prim.get());
         if (cube && (dynamic_cast<const GaussianProcessMedium *>(cube->intMedium().get()) ||
+                     dynamic_cast<const ClassicLocalMedium *>(cube->intMedium().get()) ||
                      dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get())) &&
             cube->bsdf(0)->lobes().isForward())
             _gpisBoundaryCubes.push_back(cube);
@@ -159,8 +161,10 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
         }
         if (info.primitive == nullptr || info.primitive == endCap)
             return bounce >= _settings.minBounces ? throughput : Vec3f(0.0f);
-        medium = info.primitive->selectMedium(medium, !info.primitive->hitBackside(data));
-        mediumStateIter = mediumStateIterBlank;
+        const Medium *nextMedium = info.primitive->selectMedium(medium, !info.primitive->hitBackside(data));
+        if (nextMedium != medium || !mediumStateIter.pathContext)
+            mediumStateIter = mediumStateIterBlank;
+        medium = nextMedium;
         startsOnSurface = true;
 
         ray.setPos(ray.hitpoint());
@@ -278,9 +282,11 @@ bool TraceBase::advanceShadow(ShadowState &shadow, PathSampleGenerator &sampler,
                 shadow.stage = Stage::Finished;
                 break;
             }
-            shadow.medium = shadow.info.primitive->selectMedium(shadow.medium,
+            const Medium *nextMedium = shadow.info.primitive->selectMedium(shadow.medium,
                 !shadow.info.primitive->hitBackside(shadow.data));
-            shadow.state = shadow.blankState;
+            if (nextMedium != shadow.medium || !shadow.state.pathContext)
+                shadow.state = shadow.blankState;
+            shadow.medium = nextMedium;
             shadow.startsOnSurface = true;
             shadow.ray.setPos(shadow.ray.hitpoint());
             shadow.initialFarT -= shadow.ray.farT();
@@ -353,7 +359,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                 direct.f = event.info->bsdf->eval(event, false);
                 shadowState.firstScatter = true;
             } else {
-                direct.f = sample.phase->eval(parentRay.dir(), ls.d, sample);
+                direct.f = sample.phase->evalConnection(sampler, parentRay.dir(), ls.d, sample, shadowState.pathContext);
                 if (sample.phase->isSpecular())
                     shadowState.lastAniso = Vec3d(sample.phase->evalGrad(parentRay.dir(), ls.d, sample));
             }
@@ -412,6 +418,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                     break;
                 p = sample.p;
                 wo = direct.phaseSample.w;
+                if (direct.phaseSample.pathContext) shadowState.pathContext = direct.phaseSample.pathContext;
             }
             auto ray = parentRay.scatter(p, wo, direct.surface ? event.info->epsilon : 0.0f);
             ray.setPrimaryRay(false);
@@ -650,7 +657,8 @@ Vec3f TraceBase::volumeLightSample(PathSampleGenerator &sampler,
     if (!light.sampleDirect(_threadId, mediumSample.p, sampler, lightSample))
         return Vec3f(0.0f);
 
-    Vec3f f = mediumSample.phase->eval(parentRay.dir(), lightSample.d, mediumSample);
+    Medium::MediumState mediumStateCorrectNormal = *mediumState;
+    Vec3f f = mediumSample.phase->evalConnection(sampler, parentRay.dir(), lightSample.d, mediumSample, mediumStateCorrectNormal.pathContext);
     if (f == 0.0f)
         return Vec3f(0.0f);
 
@@ -659,7 +667,6 @@ Vec3f TraceBase::volumeLightSample(PathSampleGenerator &sampler,
 
     IntersectionTemporary data;
     IntersectionInfo info;
-    Medium::MediumState mediumStateCorrectNormal = *mediumState;
     if (mediumSample.phase->isSpecular()) {
         mediumStateCorrectNormal.lastAniso = Vec3d(mediumSample.phase->evalGrad(parentRay.dir(), lightSample.d, mediumSample));
     }
@@ -697,7 +704,9 @@ Vec3f TraceBase::volumePhaseSample(const Primitive &light,
 
     IntersectionTemporary data;
     IntersectionInfo info;
-    Vec3f e = attenuatedEmission(sampler, light, medium, -1.0f, data, info, bounce, false, ray, mediumState, nullptr);
+    auto branchState = *mediumState;
+    if (phaseSample.pathContext) branchState.pathContext = phaseSample.pathContext;
+    Vec3f e = attenuatedEmission(sampler, light, medium, -1.0f, data, info, bounce, false, ray, &branchState, nullptr);
 
     if (e == Vec3f(0.0f))
         return Vec3f(0.0f);
@@ -847,6 +856,7 @@ bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumS
         return false;
     }
 
+    if (phaseSample.pathContext) mediumState.pathContext = phaseSample.pathContext;
     ray = ray.scatter(mediumSample.p, phaseSample.w, 0.f);
     ray.setPrimaryRay(false);
     throughput *= phaseSample.weight;
@@ -893,8 +903,9 @@ bool TraceBase::finishSurface(SurfaceState &surface, SurfaceScatterEvent &event,
     }
     Vec3f wi = event.frame.toGlobal(event.wi);
     bool geometricBackside = (surface.wo.dot(info.Ng) < 0.0f);
+    const Medium *previousMedium = medium;
     medium = info.primitive->selectMedium(medium, geometricBackside);
-    if (geometricBackside != (wi.dot(info.Ng) < 0.0f))
+    if (mediumState.pathContext ? medium != previousMedium : geometricBackside != (wi.dot(info.Ng) < 0.0f))
         mediumState.reset();
     ray = ray.scatter(ray.hitpoint(), surface.wo, info.epsilon);
     return true;

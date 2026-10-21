@@ -1,0 +1,31 @@
+file(MAKE_DIRECTORY "${OUTPUT_DIR}")
+file(READ "${SCENE}" scene)
+if (MODE STREQUAL "no_nee")
+    string(JSON scene SET "${scene}" integrator enable_light_sampling false)
+    string(JSON scene SET "${scene}" integrator enable_volume_light_sampling false)
+endif()
+if (MODE STREQUAL "wavefront")
+    string(JSON scene SET "${scene}" integrator wavefront_gpis true)
+endif()
+if (MODE STREQUAL "boundary")
+    # Start just inside the forward cube, facing an exit before ray.nearT().
+    # Without recovery the BVH misses that exit and leaves an infinite flight.
+    string(JSON scene SET "${scene}" camera medium "\"local\"")
+    string(JSON scene SET "${scene}" camera transform position "[0,2.99999,0.5]")
+    string(JSON scene SET "${scene}" camera transform look_at "[0,4,0.5]")
+endif()
+file(WRITE "${OUTPUT_DIR}/scene.json" "${scene}")
+execute_process(COMMAND "${RENDERER}" -t 2 -d "${OUTPUT_DIR}" "${OUTPUT_DIR}/scene.json"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE errors TIMEOUT 180)
+file(WRITE "${OUTPUT_DIR}/render.log" "${output}\n${errors}")
+if (NOT "${result}" STREQUAL "0" OR NOT "${output}" MATCHES "Completed 128/128 spp" OR
+    "${output}\n${errors}" MATCHES "Caught an internal error|unrecoverable error|Unable to load|not implemented|nonfinite|terminate called")
+    message(FATAL_ERROR "classic_local render failed (${result}):\n${output}\n${errors}")
+endif()
+execute_process(COMMAND "${CHECKER}" image "${OUTPUT_DIR}/local.exr"
+    RESULT_VARIABLE result OUTPUT_VARIABLE stats ERROR_VARIABLE errors)
+file(WRITE "${OUTPUT_DIR}/validation.log" "${stats}\n${errors}")
+if (NOT "${result}" STREQUAL "0")
+    message(FATAL_ERROR "classic_local image validation failed:\n${stats}\n${errors}")
+endif()
+message(STATUS "${stats}")

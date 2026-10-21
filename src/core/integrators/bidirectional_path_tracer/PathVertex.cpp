@@ -20,7 +20,7 @@ bool PathVertex::sampleRootVertex(TraceState &state)
 {
     switch (_type) {
     case EmitterVertex: {
-        EmitterRecord &record = _record.emitter;
+        EmitterRecord &record = std::get<EmitterRecord>(_record);
         if (!_sampler.emitter->samplePosition(state.sampler, record.point))
             return false;
 
@@ -46,7 +46,7 @@ bool PathVertex::sampleRootVertex(TraceState &state)
         _mediumState = std::make_shared<Medium::MediumState>(state.mediumState);
         return true;
     } case CameraVertex: {
-        CameraRecord &record = _record.camera;
+        CameraRecord &record = std::get<CameraRecord>(_record);
         if (!_sampler.camera->samplePosition(state.sampler, record.point))
             return false;
 
@@ -67,7 +67,7 @@ bool PathVertex::sampleNextVertex(const TraceableScene &scene, TraceBase &tracer
 
     switch (_type) {
     case EmitterVertex: {
-        EmitterRecord &record = _record.emitter;
+        EmitterRecord &record = std::get<EmitterRecord>(_record);
 
         if (_sampler.emitter->isInfinite()) {
             weight = record.point.weight;
@@ -83,7 +83,7 @@ bool PathVertex::sampleNextVertex(const TraceableScene &scene, TraceBase &tracer
         state.ray = Ray(record.point.p, record.direction.d);
         break;
     } case CameraVertex: {
-        CameraRecord &record = _record.camera;
+        CameraRecord &record = std::get<CameraRecord>(_record);
         if (record.hasPixel) {
             if (!_sampler.camera->sampleDirection(state.sampler, record.point, record.pixel, record.direction))
                 return false;
@@ -99,7 +99,7 @@ bool PathVertex::sampleNextVertex(const TraceableScene &scene, TraceBase &tracer
         state.ray.setPrimaryRay(true);
         break;
     } case SurfaceVertex: {
-        SurfaceRecord &record = _record.surface;
+        SurfaceRecord &record = std::get<SurfaceRecord>(_record);
 
         if (record.info.primitive->isInfinite())
             return false;
@@ -128,7 +128,7 @@ bool PathVertex::sampleNextVertex(const TraceableScene &scene, TraceBase &tracer
 
         break;
     } case MediumVertex: {
-        MediumRecord &record = _record.medium;
+        MediumRecord &record = std::get<MediumRecord>(_record);
 
         if (!record.mediumSample.phase->sample(state.sampler, state.ray.dir(), record.mediumSample, record.phaseSample))
             return false;
@@ -214,13 +214,13 @@ bool PathVertex::invertRootVertex(WritablePathSampleGenerator &sampler, const Pa
     PositionSample point;
     switch (next._type) {
     case EmitterVertex:
-        point = next._record.emitter.point;
+        point = std::get<EmitterRecord>(next._record).point;
         break;
     case CameraVertex:
-        point = next._record.camera.point;
+        point = std::get<CameraRecord>(next._record).point;
         break;
     case SurfaceVertex:
-        point = PositionSample(next._record.surface.info);
+        point = PositionSample(std::get<SurfaceRecord>(next._record).info);
         break;
     default:
         return false;
@@ -252,24 +252,24 @@ bool PathVertex::invertVertex(WritablePathSampleGenerator &sampler, const PathEd
         else
             return _sampler.emitter->invertDirection(sampler, PositionSample(), DirectionSample(nextEdge.d));
     } case CameraVertex: {
-        return _sampler.camera->invertDirection(sampler, _record.camera.point, DirectionSample(nextEdge.d));
+        return _sampler.camera->invertDirection(sampler, std::get<CameraRecord>(_record).point, DirectionSample(nextEdge.d));
     } case SurfaceVertex: {
         if (isInfiniteSurface())
             return false;
 
-        Vec3f transparency = _sampler.bsdf->eval(_record.surface.event.makeForwardEvent(), false);
+        Vec3f transparency = _sampler.bsdf->eval(std::get<SurfaceRecord>(_record).event.makeForwardEvent(), false);
         float transparencyScalar = transparency.avg();
         sampler.putBoolean(transparencyScalar, isForward());
 
         if (isForward()) {
             return true;
         } else {
-            Vec3f wi = _record.surface.event.frame.toLocal(-prevEdge->d);
-            Vec3f wo = _record.surface.event.frame.toLocal( nextEdge. d);
-            return _sampler.bsdf->invert(sampler, _record.surface.event.makeWarpedQuery(wi, wo));
+            Vec3f wi = std::get<SurfaceRecord>(_record).event.frame.toLocal(-prevEdge->d);
+            Vec3f wo = std::get<SurfaceRecord>(_record).event.frame.toLocal( nextEdge. d);
+            return _sampler.bsdf->invert(sampler, std::get<SurfaceRecord>(_record).event.makeWarpedQuery(wi, wo));
         }
     } case MediumVertex: {
-        return _sampler.phase->invert(sampler, prevEdge->d, nextEdge.d, _record.medium.mediumSample);
+        return _sampler.phase->invert(sampler, prevEdge->d, nextEdge.d, std::get<MediumRecord>(_record).mediumSample);
     } default:
         return false;
     }
@@ -281,18 +281,18 @@ Vec3f PathVertex::eval(const Vec3f &d, bool adjoint) const
     switch (_type) {
     case EmitterVertex:
         if (_sampler.emitter->isInfinite())
-            return _sampler.emitter->evalPositionalEmission(_record.emitter.point);
+            return _sampler.emitter->evalPositionalEmission(std::get<EmitterRecord>(_record).point);
         else
-            return _sampler.emitter->evalDirectionalEmission(_record.emitter.point, DirectionSample(d));
+            return _sampler.emitter->evalDirectionalEmission(std::get<EmitterRecord>(_record).point, DirectionSample(d));
     case CameraVertex:
         return Vec3f(0.0f);
     case SurfaceVertex:
-        return _sampler.bsdf->eval(_record.surface.event.makeWarpedQuery(
-                _record.surface.event.wi,
-                _record.surface.event.frame.toLocal(d)),
+        return _sampler.bsdf->eval(std::get<SurfaceRecord>(_record).event.makeWarpedQuery(
+                std::get<SurfaceRecord>(_record).event.wi,
+                std::get<SurfaceRecord>(_record).event.frame.toLocal(d)),
                 adjoint);
     case MediumVertex:
-        return _sampler.phase->eval(_record.medium.wi, d, _record.medium.mediumSample);
+        return _sampler.phase->eval(std::get<MediumRecord>(_record).wi, d, std::get<MediumRecord>(_record).mediumSample);
     default:
         return Vec3f(0.0f);
     }
@@ -306,17 +306,17 @@ void PathVertex::evalPdfs(const PathVertex *prev, const PathEdge *prevEdge, cons
         if (_sampler.emitter->isInfinite())
             // Positional pdf is constant for a fixed direction, which is the case
             // for connections to a point on an infinite emitter
-            *forward = nextEdge.pdfForward*_record.emitter.point.pdf*next.cosineFactor(nextEdge.d);
+            *forward = nextEdge.pdfForward*std::get<EmitterRecord>(_record).point.pdf*next.cosineFactor(nextEdge.d);
         else
             *forward = nextEdge.pdfForward*next.cosineFactor(nextEdge.d)/nextEdge.rSq*
-                    _sampler.emitter->directionalPdf(_record.emitter.point, DirectionSample(nextEdge.d));
+                    _sampler.emitter->directionalPdf(std::get<EmitterRecord>(_record).point, DirectionSample(nextEdge.d));
         break;
     case CameraVertex:
         *forward = nextEdge.pdfForward*next.cosineFactor(nextEdge.d)/nextEdge.rSq*
-                _sampler.camera->directionPdf(_record.camera.point, DirectionSample(nextEdge.d));
+                _sampler.camera->directionPdf(std::get<CameraRecord>(_record).point, DirectionSample(nextEdge.d));
         break;
     case SurfaceVertex: {
-        const SurfaceScatterEvent &event = _record.surface.event;
+        const SurfaceScatterEvent &event = std::get<SurfaceRecord>(_record).event;
         Vec3f dPrev = event.frame.toLocal(-prevEdge->d);
         Vec3f dNext = event.frame.toLocal(nextEdge.d);
         *forward  = nextEdge .pdfForward *_sampler.bsdf->pdf(event.makeWarpedQuery(dPrev, dNext));
@@ -325,8 +325,8 @@ void PathVertex::evalPdfs(const PathVertex *prev, const PathEdge *prevEdge, cons
         if (!prev->isInfiniteEmitter()) *backward *= prev->cosineFactor(prevEdge->d)/prevEdge->rSq;
         break;
     } case MediumVertex: {
-        *forward  = nextEdge .pdfForward *_sampler.phase->pdf(prevEdge->d,   nextEdge.d, _record.medium.mediumSample);
-        *backward = prevEdge->pdfBackward*_sampler.phase->pdf(-nextEdge.d, -prevEdge->d, _record.medium.mediumSample);
+        *forward  = nextEdge .pdfForward *_sampler.phase->pdf(prevEdge->d,   nextEdge.d, std::get<MediumRecord>(_record).mediumSample);
+        *backward = prevEdge->pdfBackward*_sampler.phase->pdf(-nextEdge.d, -prevEdge->d, std::get<MediumRecord>(_record).mediumSample);
         if (!next .isInfiniteEmitter()) *forward  *= next .cosineFactor(nextEdge .d)/nextEdge .rSq;
         if (!prev->isInfiniteEmitter()) *backward *= prev->cosineFactor(prevEdge->d)/prevEdge->rSq;
         break;
@@ -347,20 +347,20 @@ void PathVertex::pointerFixup()
     // A combination of MSVC limitations and poor design decisions
     // have lead to this ugliness. Once the BSDF interface gets refactored
     // we can hopefully get rid of this.
-    _record.surface.event.info = &_record.surface.info;
+    std::get<SurfaceRecord>(_record).event.info = &std::get<SurfaceRecord>(_record).info;
 }
 
 Vec3f PathVertex::pos() const
 {
     switch (_type) {
     case EmitterVertex:
-        return _record.emitter.point.p;
+        return std::get<EmitterRecord>(_record).point.p;
     case CameraVertex:
-        return _record.camera.point.p;
+        return std::get<CameraRecord>(_record).point.p;
     case SurfaceVertex:
-        return _record.surface.info.p;
+        return std::get<SurfaceRecord>(_record).info.p;
     case MediumVertex:
-        return _record.medium.mediumSample.p;
+        return std::get<MediumRecord>(_record).mediumSample.p;
     default:
         return Vec3f(0.0f);
     }
@@ -370,11 +370,11 @@ float PathVertex::cosineFactor(const Vec3f &d) const
 {
     switch (_type) {
     case EmitterVertex:
-        return std::abs(_record.emitter.point.Ng.dot(d));
+        return std::abs(std::get<EmitterRecord>(_record).point.Ng.dot(d));
     case CameraVertex:
-        return std::abs(_record.camera.point.Ng.dot(d));
+        return std::abs(std::get<CameraRecord>(_record).point.Ng.dot(d));
     case SurfaceVertex:
-        return std::abs(_record.surface.info.Ng.dot(d));
+        return std::abs(std::get<SurfaceRecord>(_record).info.Ng.dot(d));
     case MediumVertex:
         return 1.0f;
     default:
@@ -390,8 +390,8 @@ const Medium *PathVertex::selectMedium(const Vec3f &d) const
     case CameraVertex:
         return _sampler.camera->medium().get();
     case SurfaceVertex: {
-        const Primitive *p = _record.surface.info.primitive;
-        return p->overridesMedia() ? p->selectMedium(_medium, d.dot(_record.surface.info.Ng) < 0.0f) : _medium;
+        const Primitive *p = std::get<SurfaceRecord>(_record).info.primitive;
+        return p->overridesMedia() ? p->selectMedium(_medium, d.dot(std::get<SurfaceRecord>(_record).info.Ng) < 0.0f) : _medium;
     } case MediumVertex:
         return _medium;
     default:

@@ -2,6 +2,7 @@
 #define SDFFUNCTIONS_HPP_
 
 #include <math/Vec.hpp>
+#include "SdfQueries.hpp"
 
 namespace Tungsten {
 	double fbm(Vec3d uv, int octaves);
@@ -19,6 +20,14 @@ namespace Tungsten {
 
 		static std::string functionToString(Function val);
 		static Function stringToFunction(const std::string& name);
+
+        static bool supportsQueries(Function fn);
+        static SdfJet evaluateJet(Function fn, const Eigen::Vector3d &p);
+        static double valueDifference(Function fn, const Eigen::Vector3d &p, const Eigen::Vector3d &d);
+        static SdfBounds bounds(Function fn, const Eigen::Vector3d &minimum, const Eigen::Vector3d &maximum);
+        static SdfRayBounds rayBounds(Function fn, const Eigen::Vector3d &origin,
+                                     const Eigen::Vector3d &direction, double begin, double end,
+                                     const SdfRayQueryOptions &options = {});
 
 		static float knob(Vec3f p, int& mat);
 		static float knob_inner(Vec3f p, int& mat);

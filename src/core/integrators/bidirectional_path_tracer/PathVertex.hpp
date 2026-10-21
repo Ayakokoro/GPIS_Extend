@@ -13,6 +13,7 @@
 #include "bsdfs/Bsdf.hpp"
 
 #include "media/Medium.hpp"
+#include <variant>
 
 namespace Tungsten {
 
@@ -31,19 +32,9 @@ class PathVertex
         MediumVertex
     };
 
-    union VertexRecord
-    {
-        CameraRecord camera;
-        EmitterRecord emitter;
-        SurfaceRecord surface;
-        MediumRecord medium;
-
-        VertexRecord() = default;
-        VertexRecord(const  CameraRecord &  camera_) :  camera( camera_) {}
-        VertexRecord(const EmitterRecord & emitter_) : emitter(emitter_) {}
-        VertexRecord(const  MediumRecord &  medium_) :  medium( medium_) {}
-        VertexRecord(const SurfaceRecord & surface_) : surface(surface_) {}
-    };
+    // Medium/phase records now own immutable branch contexts. A variant gives
+    // those non-trivial records correct copy and destruction semantics.
+    using VertexRecord = std::variant<CameraRecord, EmitterRecord, SurfaceRecord, MediumRecord>;
     union VertexSampler
     {
         const Camera *camera;
@@ -99,7 +90,7 @@ public:
       _dirac(camera->isFilterDirac()),
       _connectable(!_dirac)
     {
-        _record.camera.hasPixel = false;
+        std::get<CameraRecord>(_record).hasPixel = false;
     }
     PathVertex(const Bsdf *bsdf, const SurfaceRecord &surface, const Vec3f &throughput_)
     : _type(SurfaceVertex),
@@ -157,22 +148,22 @@ public:
 
     const CameraRecord &cameraRecord() const
     {
-        return _record.camera;
+        return std::get<CameraRecord>(_record);
     }
 
     const EmitterRecord &emitterRecord() const
     {
-        return _record.emitter;
+        return std::get<EmitterRecord>(_record);
     }
 
     const SurfaceRecord &surfaceRecord() const
     {
-        return _record.surface;
+        return std::get<SurfaceRecord>(_record);
     }
 
     const MediumRecord &mediumRecord() const
     {
-        return _record.medium;
+        return std::get<MediumRecord>(_record);
     }
 
     const Camera *camera() const
@@ -242,7 +233,7 @@ public:
 
     bool isInfiniteSurface() const
     {
-        return _type == SurfaceVertex && _record.surface.info.primitive->isInfinite();
+        return _type == SurfaceVertex && std::get<SurfaceRecord>(_record).info.primitive->isInfinite();
     }
 
     bool onSurface() const

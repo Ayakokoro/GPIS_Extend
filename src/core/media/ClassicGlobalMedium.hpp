@@ -7,14 +7,15 @@
 namespace Tungsten {
 class MeanFunction;
 class CovarianceFunction;
+struct GpisSdfGrid;
 
 // Memoryless global_pointwise Gaussian microfacet medium. Only the SDF is
 // spatially tabulated; density and directional extinction are evaluated online.
-class ClassicGlobalMedium final : public Medium {
-    struct SdfGrid;
+class ClassicGlobalMedium : public Medium {
+protected:
     std::shared_ptr<MeanFunction> _mean;
     std::shared_ptr<CovarianceFunction> _covariance;
-    std::unique_ptr<SdfGrid> _sdfGrid;
+    std::unique_ptr<GpisSdfGrid> _sdfGrid;
     std::unique_ptr<ClassicGlobal::GaussianNdf> _ndf;
     std::string _materialType;
     Vec3d _mirrorAlbedo;
