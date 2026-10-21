@@ -119,6 +119,11 @@ GlobalConditionalMedium::GlobalConditionalMedium() {
 void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     ClassicGlobalMedium::fromJson(value,scene);
     _tracking=cg::ConditionalTrackingSettings{};
+    std::string majorantMode="adaptive";
+    value.getField("tracking_majorant",majorantMode);
+    if(majorantMode=="two_constants") _tracking.majorantMode=cg::ConditionalMajorantMode::TwoConstants;
+    else if(majorantMode!="adaptive") value.parseError("tracking_majorant must be adaptive or two_constants");
+    value.getField("tracking_constant_birth_length",_tracking.constantBirthLength);
     _tracking.step=_trackingStep;
     value.getField("tracking_step_scale",_tracking.stepScale);
     value.getField("tracking_age_scale",_tracking.ageScale);
@@ -132,6 +137,9 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
 rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     auto value=ClassicGlobalMedium::toJson(allocator);
     value["type"].SetString("global_conditional",allocator);
+    value.AddMember("tracking_majorant",rapidjson::Value(
+        _tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants ? "two_constants" : "adaptive",allocator),allocator);
+    value.AddMember("tracking_constant_birth_length",_tracking.constantBirthLength,allocator);
     value.AddMember("tracking_step_scale",_tracking.stepScale,allocator);
     value.AddMember("tracking_age_scale",_tracking.ageScale,allocator);
     value.AddMember("tracking_max_expected_events",_tracking.maxExpectedEvents,allocator);
@@ -149,7 +157,7 @@ void GlobalConditionalMedium::prepareForRender() {
     if(_sdfGrid) {
 #if OPENVDB_AVAILABLE
         // The base medium owns the immutable SDF for the whole render lifetime.
-        _sdfGrid->buildMacrocells(_tracking.macrocellSize);
+        _sdfGrid->buildMacrocells(_tracking.majorantMode==cg::ConditionalMajorantMode::Adaptive ? _tracking.macrocellSize : 0);
         _field.mean=std::shared_ptr<const cg::MeanField>(_sdfGrid.get(),[](const cg::MeanField *){});
 #endif
     } else if(auto sphere=dynamic_cast<SphericalMean *>(_mean.get()))
@@ -161,6 +169,8 @@ void GlobalConditionalMedium::prepareForRender() {
     else if(_mean->sdfQueries())
         _field.mean=std::make_shared<cg::SdfMeanField>(_mean);
     else throw std::runtime_error("global_conditional: this scene mean does not provide certified SDF queries");
+    if(_tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants && !_field.mean->globalMagnitudeBounds())
+        throw std::runtime_error("tracking_majorant two_constants requires a clamped VDB SDF or constant mean with global bounds");
 }
 std::shared_ptr<const ConditionalPathContext> GlobalConditionalMedium::context(
         PathSampleGenerator &sampler,const Ray &ray,const MediumState &s) const

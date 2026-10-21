@@ -46,6 +46,9 @@ public:
     FlightState samplePositiveEndpoint(double age, Random& rng) const;
     ConditionalScalarStatistics scalarStatistics(double age) const;
     ConditionalBirthMajorant birthMajorant(double end) const;
+    // One constant for every age >= begin, using precomputed global mean bounds.
+    // Unlike twoSegmentMajorants(), this does not query any tail intervals.
+    double constantTailMajorant(double begin) const;
     double birthAdjacentMajorant(double begin, double end,
                                 const ConditionalBirthMajorant& birth) const;
     ConditionalMajorants twoSegmentMajorants(double end) const;

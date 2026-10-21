@@ -247,6 +247,7 @@ void stage2() {
 #include "ConditionalSdfChecks.hpp"
 #include "ConditionalBoundChecks.hpp"
 #include "ConditionalTrackingChecks.hpp"
+#include "ConditionalTrackingProbe.hpp"
 struct Moments {
     double sum=0,sum2=0;int n=0;
     void add(double v) {sum+=v;sum2+=v*v;++n;}
@@ -363,6 +364,8 @@ int main(int argc,char **argv)
         if(stage=="knob"||stage=="all") knobChecks();
         if(stage=="bounds"||stage=="all") boundChecks();
         if(stage=="tracking"||stage=="all") trackingChecks();
+        if(stage=="tracking_probe") { check(argc>2,"missing probe scene");trackingProbe(argv[2]); }
+        if(stage=="tracking_split_probe") { check(argc>2,"missing probe scene");trackingProbe(argv[2],true); }
         if(stage=="image"||stage=="furnace") {check(argc>2,"missing image");imageCheck(argv[2],stage=="furnace");}
         return 0;
     }

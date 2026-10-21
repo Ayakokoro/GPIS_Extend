@@ -28,6 +28,12 @@ struct MeanRaySample {
     double value, derivative;
 };
 
+// Optional finite bounds for the entire mean, including its exterior/clamp.
+// An unbounded analytic SDF must not advertise this capability.
+struct MeanMagnitudeBounds {
+    double maximumAbsoluteValue, maximumGradientNorm;
+};
+
 // Optional per-flight query state. The field remains immutable and shared;
 // cursors belong to one ray and may seek backwards for interval refinement.
 class MeanRayCursor {
@@ -86,6 +92,7 @@ public:
         return evaluate(x + displacement).value - evaluate(x).value;
     }
     virtual BoundsSummary bounds(const Bounds3& domain) const = 0;
+    virtual std::optional<MeanMagnitudeBounds> globalMagnitudeBounds() const { return std::nullopt; }
     virtual MeanRayBounds rayBounds(const Point3& origin, const Vector3& direction,
                                     double begin, double end,
                                     const SdfRayQueryOptions& options = {}) const;
@@ -156,6 +163,9 @@ public:
     explicit ConstantMean(double value) : value_(value) {}
     MeanJet evaluate(const Point3&) const override { return {value_, Vector3::Zero()}; }
     BoundsSummary bounds(const Bounds3&) const override { return {value_, 0.0, true}; }
+    std::optional<MeanMagnitudeBounds> globalMagnitudeBounds() const override {
+        return MeanMagnitudeBounds{std::abs(value_),0.0};
+    }
     std::optional<Vector3> affineGradient() const override { return Vector3::Zero(); }
 private:
     double value_;

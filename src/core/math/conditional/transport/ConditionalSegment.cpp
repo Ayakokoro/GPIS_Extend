@@ -15,6 +15,10 @@ FlightState alongDirection(FlightState birth,const Vector3 &direction)
 }
 void ConditionalTrackingSettings::validate() const
 {
+    if(majorantMode!=ConditionalMajorantMode::Adaptive && majorantMode!=ConditionalMajorantMode::TwoConstants)
+        throw NumericError(NumericStatus::InvalidInput,"invalid conditional majorant mode");
+    if(!(constantBirthLength>=0) || !std::isfinite(constantBirthLength))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_constant_birth_length must be finite and nonnegative");
     if(!(step>=0) || !std::isfinite(step))
         throw NumericError(NumericStatus::InvalidInput,"tracking_step must be finite and nonnegative");
     if(!(stepScale>0) || !std::isfinite(stepScale))
@@ -47,7 +51,20 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         throw NumericError(NumericStatus::InvalidInput,
             "conditional segment requires an updated observation before changing direction");
     _age=std::max(0.0,_age);
-    _birthBound=_straight.birthMajorant(_age+length);
+    if(!std::isfinite(_age+length) || _age+length>_straight.maximumAgeInDomain())
+        throw NumericError(NumericStatus::InvalidInput,"conditional segment exceeds the field domain");
+    if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants && _tracking.constantBirthLength>0) {
+        const double split=std::min(_age+length,_tracking.constantBirthLength);
+        // Keep the certified analytic birth interval, then bound its extension
+        // before sampling. The maximum of the covering intervals is one valid
+        // constant for the entire prefix; a Taylor certificate cannot simply
+        // be extrapolated through grid knots. No observation is renewed here.
+        const auto prefix=_straight.twoSegmentMajorants(split);
+        _birthBound.split=split;
+        _birthBound.maximum=std::max(prefix.nearMaximum,prefix.farMaximum);
+    } else _birthBound=_straight.birthMajorant(_age+length);
+    if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants && _age+length>_birthBound.split)
+        _tailMaximum=_straight.constantTailMajorant(_birthBound.split);
 }
 Gaussian<3> ConditionalSegment::gradient(double t) const
 {
@@ -67,6 +84,11 @@ double ConditionalSegment::hazard(double t) const
 double ConditionalSegment::majorant(double lo,double hi,double parentMaximum) const
 {
     const double a=_age+lo,b=_age+hi;
+    if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants) {
+        if(b<=_birthBound.split) return _birthBound.maximum;
+        if(a>=_birthBound.split) return _tailMaximum;
+        return std::max(_birthBound.maximum,_tailMaximum);
+    }
     if(b<=_birthBound.split*(1+1e-14)) return std::min(parentMaximum,_birthBound.maximum);
     if(b>_birthBound.smoothEnd)
         return _straight.intervalMajorant(a,b,_tracking.tightenExpectedEvents,parentMaximum);
@@ -88,10 +110,18 @@ FlightState ConditionalSegment::samplePositiveEndpoint(Random &rng) const
     endpoint.birthPosition=_origin+_length*_w;
     return endpoint;
 }
-double ConditionalSegment::track(Random &rng,bool collision,double &hit) const
+double ConditionalSegment::track(Random &rng,bool collision,double &hit,ConditionalTrackingWork *diagnostics) const
 {
     Profile::Scope profile(Profile::Stage::Track);
     Profile::FlightWork work;
+    double traversed=0;
+    struct CaptureWork {
+        ConditionalTrackingWork *output;
+        const Profile::FlightWork &work;
+        const double &distance;
+        ~CaptureWork() { if(output) *output={work.candidates,work.intervals,distance}; }
+    } capture{diagnostics,work,traversed};
+    const bool twoConstants=_tracking.majorantMode==ConditionalMajorantMode::TwoConstants;
     hit=_length;
     const double ell=1/std::sqrt(_w.dot(_field.kernel.precision()*_w));
     const double maximumStep=_tracking.step>0 ? _tracking.step : _tracking.stepScale*ell;
@@ -105,6 +135,17 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit) const
     std::vector<PendingInterval> pending;
     for(double lo=0;lo<_length;) {
         double hi;
+        if(pending.empty() && twoConstants) {
+            // Both constants were computed at construction. Never walk cells,
+            // tighten, or subdivide this proposal, even when it is very loose.
+            // When the prefix covers the endpoint, avoid subtracting age back
+            // out of age+length: that can leave a one-ulp, zero-rate tail.
+            const double split=_birthBound.split>=_age+_length ? _length :
+                std::max(0.0,_birthBound.split-_age);
+            hi=lo<split ? std::min(_length,split) : _length;
+            pending.push_back({lo,hi,lo<split ? _birthBound.maximum : _tailMaximum,false});
+            Profile::count(Profile::Counter::ProposedIntervals);
+        }
         if(pending.empty()) {
             Profile::count(Profile::Counter::ProposedIntervals);
             hi=std::min(_length,lo+std::min(maximumStep,_tracking.ageScale*(_age+lo)));
@@ -148,7 +189,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit) const
         lo=b.begin;
         hi=b.end;
         if(b.tighten) b.maximum=majorant(lo,hi,b.maximum);
-        while(b.maximum*(hi-lo)>_tracking.maxExpectedEvents) {
+        while(!twoConstants && b.maximum*(hi-lo)>_tracking.maxExpectedEvents) {
             Profile::count(Profile::Counter::Splits);
             const double mid=0.5*(lo+hi);
             if(!(mid>lo&&mid<hi)) throw NumericError(NumericStatus::InvalidMajorant,"cannot refine conditional interval");
@@ -167,6 +208,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit) const
             double next;
             if(!opticalDepth.advance(rng,b.maximum,t,hi,next)) break;
             t=next;
+            traversed=t;
             ++work.candidates;++intervalWork.candidates;
             Profile::count(Profile::Counter::CandidateEvents);
             const double h=hazard(t);
@@ -186,6 +228,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit) const
             }
         }
         lo=hi;
+        traversed=hi;
     }
     Profile::count(Profile::Counter::Escapes);
     return weight;

@@ -13,6 +13,7 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
     Eigen::Matrix3d worldToIndex;
     Eigen::Vector3d translation;
     double scale, offset, gradientBound;
+    double magnitudeBound = std::numeric_limits<double>::quiet_NaN();
 
     struct Macrocell {
         double minimumValue,maximumValue,maximumNodeMagnitude;
@@ -45,25 +46,41 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
             throw std::runtime_error("classic_global: invalid SDF transform/scale");
         for (float value : data.values)
             if (!std::isfinite(value)) throw std::runtime_error("classic_global: non-finite SDF voxel");
+        initializeMagnitudeBounds();
+        return gradientBound;
+    }
+    void initializeMagnitudeBounds()
+    {
         Vec3i lo, hi;
         for (int i = 0; i < 3; ++i) {
             lo[i] = int(std::floor(data.clampMin[i])) - data.origin[i];
             hi[i] = int(std::floor(data.clampMax[i])) - data.origin[i] + 1;
         }
         Eigen::Vector3d edge = Eigen::Vector3d::Zero();
+        double magnitude=0, arithmeticScale=0;
         // Ignore the unused padding/background discontinuity outside the
         // clamped interpolation domain; it cannot affect any field query.
         for (int z = lo.z(); z <= hi.z(); ++z)
             for (int y = lo.y(); y <= hi.y(); ++y)
                 for (int x = lo.x(); x <= hi.x(); ++x) {
                     const double v = at(x, y, z);
+                    magnitude=std::max(magnitude,std::abs((v+offset)*scale));
+                    arithmeticScale=std::max(arithmeticScale,(std::abs(v)+std::abs(offset))*std::abs(scale));
                     if (x < hi.x()) edge.x() = std::max(edge.x(), std::abs(at(x+1, y, z) - v));
                     if (y < hi.y()) edge.y() = std::max(edge.y(), std::abs(at(x, y+1, z) - v));
                     if (z < hi.z()) edge.z() = std::max(edge.z(), std::abs(at(x, y, z+1) - v));
                 }
         // Each partial derivative of a trilinear field is a convex combination
         // of edge differences. Include mean scale and the complete world map.
-        return gradientBound = std::abs(scale)*(worldToIndex.cwiseAbs().transpose()*edge).norm();
+        gradientBound = std::abs(scale)*(worldToIndex.cwiseAbs().transpose()*edge).norm();
+        // Include roundoff from the value/gradient interpolants and transforms.
+        const double pad=128*std::numeric_limits<double>::epsilon();
+        magnitudeBound=std::nextafter(magnitude+pad*arithmeticScale,std::numeric_limits<double>::infinity());
+        // The direct gradient query sums signed node contributions. Its
+        // cancellation error depends on node magnitude even for a flat grid.
+        const double gradientPad=pad*arithmeticScale*
+            (worldToIndex.cwiseAbs().transpose()*Eigen::Vector3d::Ones()).norm();
+        gradientBound=std::nextafter(gradientBound*(1+pad)+gradientPad,std::numeric_limits<double>::infinity());
     }
     double evaluate(const Vec3d &p, Vec3d *gradient) const
     {
@@ -96,6 +113,9 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
         return (value + offset)*scale;
     }
     const char *typeName() const override { return "vdb_sdf"; }
+    std::optional<ConditionalGpis::MeanMagnitudeBounds> globalMagnitudeBounds() const override {
+        return ConditionalGpis::MeanMagnitudeBounds{magnitudeBound,gradientBound};
+    }
     ConditionalGpis::MeanJet evaluate(const Eigen::Vector3d &p) const override;
     std::unique_ptr<ConditionalGpis::MeanRayCursor> createRayCursor(
         const Eigen::Vector3d &origin,const Eigen::Vector3d &direction) const override;

@@ -461,6 +461,28 @@ double ConditionalFlightKernel::birthAdjacentMajorant(
         birth.slope-slopeRem*hi,sigma2_,a,lo,hi);
 }
 
+double ConditionalFlightKernel::constantTailMajorant(double begin) const {
+    if (!(begin>0) || !std::isfinite(begin))
+        throw NumericError(NumericStatus::InvalidInput,"constant tail requires a finite positive birth split");
+    const auto meanBounds=field_.mean->globalMagnitudeBounds();
+    if (!meanBounds || !(meanBounds->maximumAbsoluteValue>=0) ||
+            !std::isfinite(meanBounds->maximumAbsoluteValue) ||
+            !(meanBounds->maximumGradientNorm>=0) || !std::isfinite(meanBounds->maximumGradientNorm))
+        throw NumericError(NumericStatus::InvalidMajorant,
+            "two_constants requires finite global mean bounds (a clamped VDB SDF or constant mean)");
+    const double a=inverseLength2_, inverseSqrtE=std::exp(-0.5);
+    const double valueMaximum=upward(meanBounds->maximumAbsoluteValue+std::abs(deltaValue_)+
+        std::abs(deltaSlope_)*inverseSqrtE/std::sqrt(a));
+    const double derivativeMaximum=upward(meanBounds->maximumGradientNorm+std::abs(deltaSlope_)+
+        std::sqrt(a)*inverseSqrtE*std::abs(deltaValue_));
+    // The series in seFactors preserves 1-(1+a*h*h)*exp(-a*h*h) near birth.
+    const double minimumSd=std::sqrt(sigma2_*seFactors(a,begin).valueVariance)/boundGuard;
+    if (!(minimumSd>0) || !std::isfinite(minimumSd))
+        throw NumericError(NumericStatus::NeedHigherPrecision,"constant tail variance underflow");
+    return upward((std::sqrt(2.0/kPi)+valueMaximum/minimumSd)*
+        (std::sqrt(a)*kInvSqrtTwoPi+(derivativeMaximum+2*valueMaximum/begin)/minimumSd));
+}
+
 ConditionalMajorants ConditionalFlightKernel::twoSegmentMajorants(double end) const {
     const ConditionalBirthMajorant birth=birthMajorant(end);
     ConditionalMajorants result;

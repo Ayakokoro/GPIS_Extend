@@ -18,6 +18,25 @@ inline void sdfChecks()
     grid->gradientBound=20;
     for(int z=0;z<6;++z) for(int y=0;y<6;++y) for(int x=0;x<6;++x)
         grid->data.values.push_back(float(0.1*x*y*z+0.03*x*x-0.2*y+0.3*z));
+    grid->initializeMagnitudeBounds();
+    const auto global=grid->globalMagnitudeBounds();
+    cg::Random globalRng(926);
+    for(int i=0;i<3000;++i) {
+        const V p(20*globalRng.uniform01()-10,20*globalRng.uniform01()-10,20*globalRng.uniform01()-10);
+        const auto jet=grid->evaluate(p);
+        check(std::abs(jet.value)<=global->maximumAbsoluteValue && jet.gradient.norm()<=global->maximumGradientNorm,
+            "cached global bounds cover transformed negative-scale field, clamp and exterior");
+    }
+    auto nearlyConstant=*grid;
+    for(auto &node:nearlyConstant.data.values) node=1e20f;
+    nearlyConstant.initializeMagnitudeBounds();
+    const auto constantBounds=nearlyConstant.globalMagnitudeBounds();
+    for(int i=0;i<100;++i) {
+        const V p(globalRng.uniform01(),globalRng.uniform01(),globalRng.uniform01());
+        const auto jet=nearlyConstant.evaluate(p);
+        check(jet.gradient.norm()<=constantBounds->maximumGradientNorm,
+            "global gradient certificate includes roundoff in cancelling node contributions");
+    }
     gridCursorChecks(grid);
     macrocellChecks(grid);
     for(const V &o : {V(-0.4,-0.2,-0.5),V(-3,-1,-2),V(2.1,0.1,0.4)}) {
@@ -110,6 +129,27 @@ inline void sdfChecks()
     for(const V &w:std::array<V,3>{{V(0,0,1),V(0.4,-0.3,0.8).normalized(),V(-1,0,0)}}) {
         auto observation=birth;observation.direction=w;observation.birthValue=0.1;
         const cg::ConditionalFlightKernel kernel(f,observation);
+        const auto constantBirth=kernel.birthMajorant(3);
+        const double constantTail=kernel.constantTailMajorant(constantBirth.split);
+        for(int j=0;j<=200;++j) {
+            const double t=constantBirth.split*std::pow(3/constantBirth.split,double(j)/200);
+            check(kernel.evaluate(t).hazard.value<=constantTail*(1+1e-10),
+                "global tail covers transformed grid cells and clamped exterior");
+        }
+        for(double requested : {0.6,1.5,4.0}) {
+            cg::ConditionalTrackingSettings options;
+            options.majorantMode=cg::ConditionalMajorantMode::TwoConstants;
+            options.constantBirthLength=requested;
+            const cg::ConditionalSegment extended(f,observation,x,w,3,options);
+            const double split=std::min(requested,3.0);
+            const double first=extended.majorant(0,split);
+            const double last=split<3 ? extended.majorant(split,3):first;
+            for(int i=1;i<=600;++i) {
+                const double t=3.0*i/600;
+                check(extended.hazard(t)<=(t<=split ? first:last)*(1+1e-10),
+                    "extended prefix crosses nonlinear grid cells and clamps conservatively");
+            }
+        }
         for(const auto &span:std::array<std::pair<double,double>,3>{{{0.1,0.2},{0.2,1.5},{1.5,3.0}}}) {
             const double cheap=kernel.cheapIntervalMajorant(span.first,span.second);
             const double fine=kernel.intervalMajorant(span.first,span.second);

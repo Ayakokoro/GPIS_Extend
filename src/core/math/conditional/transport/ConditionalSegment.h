@@ -2,7 +2,11 @@
 #include "ConditionalFlightKernel.h"
 
 namespace Tungsten::ConditionalGpis {
+enum class ConditionalMajorantMode { Adaptive, TwoConstants };
+
 struct ConditionalTrackingSettings {
+    ConditionalMajorantMode majorantMode = ConditionalMajorantMode::Adaptive;
+    double constantBirthLength = 0.0;  // two_constants: world distance to switch; 0 uses analytic birth split
     double step = 0.0;                 // world distance; 0 selects stepScale*ell
     double stepScale = 0.5;            // multiple of the directional GP length
     double ageScale = 0.25;            // maximum step / distance from birth
@@ -11,6 +15,12 @@ struct ConditionalTrackingSettings {
     int macrocellSize = 0;             // 0 disables; power-of-two cell width, 2..64
     double macrocellMaxExpectedEvents = 1.0; // otherwise descend to fine cells
     void validate() const;
+};
+
+// Optional per-call diagnostics, including partial work if sampling throws.
+struct ConditionalTrackingWork {
+    std::uint64_t candidates=0, intervals=0;
+    double distance=0;
 };
 
 // A finite, forward part of a straight conditional flight. Geometry endpoints
@@ -23,6 +33,7 @@ class ConditionalSegment {
     ConditionalTrackingSettings _tracking;
     ConditionalFlightKernel _straight;
     ConditionalBirthMajorant _birthBound;
+    double _tailMaximum=0;
 public:
     ConditionalSegment(const GPSSField &field, const FlightState &birth,
                        const Point3 &origin, const Vector3 &direction, double length,
@@ -36,6 +47,6 @@ public:
     FlightState samplePositiveEndpoint(Random &rng) const;
     // Collision tracking returns survival 0/1; ratio tracking returns a weight.
     // hit is the physical distance from this segment's origin.
-    double track(Random &rng, bool collision, double &hit) const;
+    double track(Random &rng, bool collision, double &hit, ConditionalTrackingWork *work=nullptr) const;
 };
 }

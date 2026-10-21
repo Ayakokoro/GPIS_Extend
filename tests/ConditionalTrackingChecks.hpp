@@ -2,16 +2,19 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include "ConditionalOpticalDepthChecks.hpp"
+#include "ConditionalRayConstantChecks.hpp"
 
 inline void trackingChecks()
 {
     using namespace Tungsten;
     using Settings = cg::ConditionalTrackingSettings;
     opticalDepthChecks();
+    rayConstantChecks();
     const auto defaults=makeMedium()->trackingSettings();
     check(defaults.step==0 && defaults.stepScale==0.5 && defaults.ageScale==0.25 &&
         defaults.maxExpectedEvents==64 && defaults.tightenExpectedEvents==4 &&
-        defaults.macrocellSize==0 && defaults.macrocellMaxExpectedEvents==1,
+        defaults.macrocellSize==0 && defaults.macrocellMaxExpectedEvents==1 &&
+        defaults.majorantMode==cg::ConditionalMajorantMode::Adaptive && defaults.constantBirthLength==0,
         "omitted tracking options preserve defaults");
     auto medium=makeMedium(R"("tracking_step":0.2,"tracking_step_scale":2,
         "tracking_age_scale":0.6,"tracking_max_expected_events":0.5,"tracking_tighten_expected_events":0.1,
@@ -35,18 +38,58 @@ inline void trackingChecks()
         restored.macrocellSize==settings.macrocellSize &&
         restored.macrocellMaxExpectedEvents==settings.macrocellMaxExpectedEvents,
         "tracking settings survive scene serialization");
+    // A bounded mean supports the opt-in mode; an unbounded plane must fail
+    // explicitly at scene preparation instead of failing on its first ray.
+    JsonDocument constantModeDocument(Path("two-constants-test.json"),
+        R"({"type":"global_conditional","tracking_majorant":"two_constants","tracking_constant_birth_length":0.9,
+        "gaussian_process":{"type":"standard","mean":{"type":"homogeneous","offset":0},
+        "covariance":{"type":"squared_exponential","sigma":1,"lengthScale":1}}})");
+    const auto constantMedium=std::dynamic_pointer_cast<GlobalConditionalMedium>(scene.fetchMedium(constantModeDocument));
+    check(constantMedium->trackingSettings().majorantMode==cg::ConditionalMajorantMode::TwoConstants,
+        "two-constant JSON mode reaches tracking settings");
+    auto constantJson=constantMedium->toJson(serialized.GetAllocator());
+    check(std::string(constantJson["tracking_majorant"].GetString())=="two_constants","two-constant mode serializes");
+    check(constantMedium->trackingSettings().constantBirthLength==0.9 &&
+        constantJson["tracking_constant_birth_length"].GetDouble()==0.9,"explicit constant birth length loads and serializes");
+    constantMedium->loadResources();constantMedium->prepareForRender();
+    auto constantContext=std::make_shared<ConditionalPathContext>();
+    constantContext->owner=constantMedium.get();constantContext->position=V::Zero();
+    constantContext->rayOrigin=Vec3f(0.0f);constantContext->birth.birthGradient=V::UnitZ();
+    const Ray constantRay(Vec3f(0.0f),Vec3f(0.0f,0.0f,1.0f),0,1.5f);
+    const cg::ConditionalSegment constantReference(constantMedium->field(),constantContext->birth,
+        V::Zero(),V::UnitZ(),1.5,constantMedium->trackingSettings());
+    IndependentPathSampler directConstant(955,false),routedConstant(955,false);
+    for(int i=0;i<32;++i) for(bool collision : {false,true}) {
+        directConstant.startPath(0,i);routedConstant.startPath(0,i);
+        cg::Random random(directConstant);double hit;
+        const double expected=constantReference.track(random,collision,hit);
+        Medium::MediumState state{};state.reset();state.pathContext=constantContext;
+        if(collision) {
+            MediumSample sample{};
+            check(constantMedium->sampleDistance(routedConstant,constantRay,state,sample) &&
+                sample.exited==(expected!=0) && sample.t==float(hit),"two-constant medium collision routing");
+        } else {
+            check(constantMedium->transmittance(routedConstant,constantRay,true,true,&state)==Vec3f(float(expected)),
+                "two-constant medium shadow routing");
+        }
+    }
+    bool unsupported=false;
+    try { makeMedium(R"("tracking_majorant":"two_constants")"); }
+    catch(const std::runtime_error &) { unsupported=true; }
+    check(unsupported,"unbounded mean rejects the global-bound mode before rendering");
     check(makeMedium(R"("tracking_tighten_expected_events":0)")->trackingSettings().tightenExpectedEvents==0,
         "zero tightening threshold is a supported fine-bound reference mode");
-    for(const char *invalid : {R"("tracking_step":-1)",R"("tracking_step_scale":0)",
+    for(const char *invalid : {R"("tracking_constant_birth_length":-1)",R"("tracking_step":-1)",R"("tracking_step_scale":0)",
             R"("tracking_age_scale":-1)",R"("tracking_max_expected_events":0)",
             R"("tracking_tighten_expected_events":-1)",R"("tracking_macrocell_size":3)",
             R"("tracking_macrocell_size":1)",R"("tracking_macrocell_size":128)",
-            R"("tracking_macrocell_size":-8)",R"("tracking_macrocell_max_expected_events":0)"}) {
+            R"("tracking_macrocell_size":-8)",R"("tracking_macrocell_max_expected_events":0)",
+            R"("tracking_majorant":"invalid")"}) {
         bool rejected=false;
         try { makeMedium(invalid); } catch(const std::exception &) { rejected=true; }
         check(rejected,"invalid tracking configuration must fail during loading");
     }
-    for(auto member : {&Settings::step,&Settings::stepScale,&Settings::ageScale,
+    for(auto member : {&Settings::constantBirthLength,&Settings::step,&Settings::stepScale,&Settings::ageScale,
             &Settings::maxExpectedEvents,&Settings::tightenExpectedEvents,&Settings::macrocellMaxExpectedEvents})
         for(double invalid : {-1.0,std::numeric_limits<double>::infinity(),
                 std::numeric_limits<double>::quiet_NaN()}) {

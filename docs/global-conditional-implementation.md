@@ -94,6 +94,153 @@ bound on deferred right halves and tightens them only when reached, avoiding
 queries past a collision. These changes do not alter the tracking settings or
 renew the birth observation at numerical subdivisions.
 
+## Experimental two-constant tracking
+
+Set `"tracking_majorant": "two_constants"` on the `global_conditional` medium
+to compute one birth majorant and one tail majorant at the beginning of a
+free flight. The default is `"adaptive"`. Both collision and shadow tracking
+use the selected mode, with one exponential clock carried across the switch.
+The two-constant sampling loop does not refine or query interval bounds, and
+the medium does not build macrocell bounds. The ordinary step, tightening and
+macrocell controls have no effect in this mode.
+Candidate points still evaluate the exact conditional hazard using the grid's
+ray cursor. There is no automatic fallback or event-count cutoff in the renderer.
+
+This mode currently requires a clamped VDB SDF or a constant mean. Unbounded
+analytic/procedural means do not expose finite global magnitude certificates
+and are rejected during scene preparation. VDB initialization caches
+`S0 = max |(node + offset) * scale|` over the interpolation domain and a
+world-space gradient bound `S1` from maximum absolute grid-edge differences,
+the absolute world-to-index matrix, and mean scale. Clamping cannot increase
+either bound. Numerical guards are included; `S1` is not assumed to be one.
+
+For each normalized ray, write `a = w^T P w`,
+`deltaF = birthValue - mean(birthPosition)` and
+`deltaG = w dot (birthGradient - gradientMean(birthPosition))`. The code uses
+
+```text
+B0 = S0 + abs(deltaF) + abs(deltaG) / sqrt(a * e)
+B1 = S1 + abs(deltaG) + sqrt(a / e) * abs(deltaF)
+s_h = sigma * sqrt(1 - (1 + a*h*h) * exp(-a*h*h))
+M_tail = (sqrt(2/pi) + B0/s_h)
+       * (sqrt(a/(2*pi)) + (B1 + 2*B0/h)/s_h)
+```
+
+By default, `h` and `M_birth` come from the existing certified birth envelope, limited by
+the first smooth cell and positive-side separation. The SE variance uses its
+stable small-distance series, not a subtraction of nearly equal numbers.
+Only `M_birth` is used before `h`, and only `M_tail` afterwards. This is the
+constant-majorant null-scattering construction described in
+[PBRT's transmittance section](https://pbr-book.org/4ed/Volume_Scattering/Transmittance),
+applied separately to the two parts of the conditioned flight.
+
+Measured on the baked knob, sigma = ell = 0.02, dx = 0.01, Release CPU,
+32x32, 1 spp, 8 threads, seed 12345 (2026-10-21):
+
+| Mode | Render time | Entire process wall time |
+| --- | --- | --- |
+| Adaptive, 3 runs after warmup | 0.22 / 0.23 / 0.22 s | median 1.774 s |
+| Two constants | no completed frame | stopped at the 45 s timeout |
+
+The two modes used the same executable, asset, camera, lights, path settings
+and sample count. Timeout is not a completed-render timing. The missing input
+`knob-mean-0.01.vdb` was rebuilt with `bake_sdf_mean` before both runs; it has
+307 cubed nodes. Its renderer bounds are `S0 = 1.7423921823502084` and
+`S1 = 1.7320560383183847`.
+
+A separate fixed-flight probe explains the result:
+
+| Flight | h | M_tail | Adaptive delta candidates | Two-constant delta candidates |
+| --- | --- | --- | --- | --- |
+| Front entry, length 3 | 0.00999999987 | 5.90673e7 | 3, hit at 0.946497 | 250,000, only reached 0.0142325 |
+| Reflected collision, length 0.5 | 0.00179358 | 2.85140e11 | 3, hit at 0.389481 | 250,000, only reached 0.00179446 |
+
+The probe stops at 500,000 random draws and reports partial work explicitly;
+it does not treat these interrupted flights as completed samples. Ratio
+tracking also hit this diagnostic limit, with 500,000 candidates in each
+two-constant flight. These are controlled flight examples, not aggregate
+render counters. For small h and nonzero B0, `M_tail` grows approximately as
+`4 * B0^2 / (sigma^2 * a^2 * h^5)`. The saved interval queries are outweighed by
+null events; keep adaptive tracking for this knob scene.
+
+Reproduce with:
+
+```powershell
+python -B tools/benchmark_conditional_majorants.py gpis-scenes/shaderball/shaderball-stationary-27-global-conditional-baked.json --output build/two-constants-new-run --size 32 --spp 1 --threads 8 --timeout 45
+.\build\Release\global_conditional_test.exe tracking_probe gpis-scenes/shaderball/shaderball-stationary-27-global-conditional-baked.json
+```
+
+Evidence is in `build/two-constants-review/results.json` and `final/`: the benchmark records scene and
+binary hashes, logs and unfinished runs. Regression coverage includes global
+grid bounds with negative scale and nontrivial transforms, anisotropic hazard
+coverage, small-distance variance, zero/positive births, resumed flights,
+delta/ratio survival against numerical quadrature, JSON mode selection,
+medium/shadow routing and absence of tail interval queries. All 14 conditional
+CTest checks passed, including NEE/MIS, wavefront and furnace rendering, as did
+both classic_global checks (16 checks total for the initial implementation).
+
+### Extending the constant prefix
+
+The medium now accepts an absolute world-space switch distance:
+
+```json
+"tracking_majorant": "two_constants",
+"tracking_constant_birth_length": 3.0
+```
+
+The default length is zero, which retains the original analytic birth split.
+A positive value selects `H = min(requested length, total flight age at exit)`;
+the distance is measured from the observation's birth position. The setting
+does not change adaptive tracking. If the prefix covers the entire segment,
+sampling uses one constant and there is no tail.
+
+Increasing H does **not** extrapolate the small Taylor birth envelope across
+grid cells. `twoSegmentMajorants(H)` first certifies its original analytic
+birth interval `(0,h0]`, then covers `[h0,H]` with ordinary certified interval
+majorants. At initialization their maximum becomes the first constant:
+
+```text
+M_prefix(H) = max(M_birth(h0), maximum of all interval bounds covering [h0,H])
+M_tail(H)   = the global tail formula above, evaluated at H
+```
+
+The interval list is discarded after constructing the prefix bound; tracking
+still switches at most once. No new field observation is sampled at H. This
+adds upfront interval queries, including regions that an early collision may
+never reach. Increasing H lowers the tail bound and shortens its support,
+while the larger prefix can require a larger constant and more initialization
+work. `H*M_prefix(H) + (L-H)*M_tail(H)` is the proposal optical depth of a full
+flight of length L; early termination can reduce the actual candidate count.
+
+On the same 0.5-long reflected-flight diagnostic, extending the switch from
+0.00179358 to 0.1 lowers `M_tail` from 2.8514e11 to 1.8987e5. Extending it to
+0.5 removes the tail and gives `M_prefix = 119.18`: delta tracking completes
+with 41 candidates, versus reaching the 250,000-candidate diagnostic limit
+with the original split. Adaptive tracking completes with 3 candidates. This
+is one controlled flight, not an aggregate render counter.
+
+Final-build knob renders (32x32, 1 spp, 8 threads, seed 12345, same VDB):
+
+| Mode / requested H | Render seconds, three runs | Median process wall seconds |
+| --- | --- | --- |
+| Adaptive | 0.23 / 0.24 / 0.25 | 1.882 |
+| Two constants, H = 3 | 1.67 / 1.73 / 1.71 | 3.122 |
+| Two constants, H = 6 | 2.49 / 2.66 / 2.76 | 4.188 |
+
+Exploratory H = 0.1, 0.5 and 1 runs each timed out after 20 seconds of process
+wall time without a completed image. H = 3 makes this experiment usable, but
+the current adaptive tracker remains faster. Increasing H further to 6 was
+slower in this test; H is not a monotonic performance control. Completed images
+are finite and nonnegative; the low-spp renders are not a convergence test.
+
+Run the same comparison with `--birth-lengths 3,6` added to the benchmark
+command, or use `global_conditional_test tracking_split_probe <scene.json>`
+for the split sweep. Results and hashes are under
+`build/two-constants-split-review/{explore,final}/report.json`. Regression
+coverage additionally checks extended prefixes across grid cells and clamps,
+empty and resumed flights, full-prefix endpoint rounding, full-domain
+validation, medium/shadow routing, and no interval queries during sampling.
+
 ## Shared procedural SDF interface
 
 `math/SdfQueries.hpp` defines optional geometry queries without depending on a
