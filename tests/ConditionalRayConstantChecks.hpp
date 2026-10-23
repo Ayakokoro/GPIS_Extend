@@ -84,10 +84,10 @@ inline void rayConstantChecks()
             const auto b=k.birthMajorant(4);
             const double maximum=k.constantTailMajorant(b.split);
             for(int i=0;i<=600;++i) {
-                const double near=b.split*std::pow(10.0,-8.0+8.0*i/600);
-                const double far=b.split*std::pow(4/b.split,double(i)/600);
-                check(k.evaluate(near).hazard.value<=b.maximum*(1+1e-10),"constant birth covers tiny ages");
-                check(k.evaluate(far).hazard.value<=maximum*(1+1e-10),"global constant covers anisotropic tail");
+                const double birthAge=b.split*std::pow(10.0,-8.0+8.0*i/600);
+                const double tailAge=b.split*std::pow(4/b.split,double(i)/600);
+                check(k.evaluate(birthAge).hazard.value<=b.maximum*(1+1e-10),"constant birth covers tiny ages");
+                check(k.evaluate(tailAge).hazard.value<=maximum*(1+1e-10),"global constant covers anisotropic tail");
             }
             const double tiny=1e-10;
             const double tinyMaximum=k.constantTailMajorant(tiny);

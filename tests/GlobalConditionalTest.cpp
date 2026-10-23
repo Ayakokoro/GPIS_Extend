@@ -245,6 +245,7 @@ void stage2() {
 }
 #include "ConditionalKnobChecks.hpp"
 #include "ConditionalSdfChecks.hpp"
+#include "ConditionalSurfaceBirthChecks.hpp"
 #include "ConditionalBoundChecks.hpp"
 #include "ConditionalTrackingChecks.hpp"
 #include "ConditionalTrackingProbe.hpp"
@@ -360,6 +361,7 @@ int main(int argc,char **argv)
         if(stage=="stage1"||stage=="all") stage1();
         if(stage=="stage2"||stage=="all") stage2();
         if(stage=="stage3"||stage=="all") stage3();
+        if(stage=="surface_births"||stage=="all") surfaceBirthChecks();
         if(stage=="sdf"||stage=="all") sdfChecks();
         if(stage=="knob"||stage=="all") knobChecks();
         if(stage=="bounds"||stage=="all") boundChecks();

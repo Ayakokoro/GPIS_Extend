@@ -5,6 +5,7 @@
 #include "math/conditional/transport/DirectionalGradient.h"
 #include "math/ConditionalProfile.hpp"
 #include "io/JsonObject.hpp"
+#include <iostream>
 
 namespace Tungsten {
 namespace cg = ConditionalGpis;
@@ -149,6 +150,8 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     return value;
 }
 void GlobalConditionalMedium::prepareForRender() {
+    _discardedSurfacePaths.store(0,std::memory_order_relaxed);
+    _discardedSurfaceConnections.store(0,std::memory_order_relaxed);
     if(!dynamic_cast<SquaredExponentialCovariance *>(_covariance.get()))
         throw std::runtime_error("global_conditional requires a stationary squared_exponential covariance");
     ClassicGlobalMedium::prepareForRender();
@@ -172,6 +175,11 @@ void GlobalConditionalMedium::prepareForRender() {
     if(_tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants && !_field.mean->globalMagnitudeBounds())
         throw std::runtime_error("tracking_majorant two_constants requires a clamped VDB SDF or constant mean with global bounds");
 }
+void GlobalConditionalMedium::teardownAfterRender() {
+    std::cout<<"GPIS conditional discarded surface births: {\"paths\":"<<discardedSurfacePaths()
+             <<",\"shadow_connections\":"<<discardedSurfaceConnections()<<"}\n";
+    ClassicGlobalMedium::teardownAfterRender();
+}
 std::shared_ptr<const ConditionalPathContext> GlobalConditionalMedium::context(
         PathSampleGenerator &sampler,const Ray &ray,const MediumState &s) const
 {
@@ -187,6 +195,7 @@ std::shared_ptr<const ConditionalPathContext> GlobalConditionalMedium::context(
     return c;
 }
 bool GlobalConditionalMedium::sampleDistance(PathSampleGenerator &sampler,const Ray &ray,MediumState &state,MediumSample &sample) const
+try
 {
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Path);
     if(state.bounce>_maxBounce) return false;
@@ -222,8 +231,16 @@ bool GlobalConditionalMedium::sampleDistance(PathSampleGenerator &sampler,const 
     }
     state.pathContext=next;
     return true;
+} catch(const cg::NumericError &error) {
+    if(error.status()!=cg::NumericStatus::NonPositiveSurfaceBirth) throw;
+    // A deliberate absorbing approximation at unsupported surface births.
+    // Returning false preserves radiance already accumulated by the integrator;
+    // do not resample, move the ray, or swallow unrelated numerical failures.
+    _discardedSurfacePaths.fetch_add(1,std::memory_order_relaxed);
+    return false;
 }
 Vec3f GlobalConditionalMedium::transmittance(PathSampleGenerator &sampler,const Ray &ray,bool,bool,MediumState *state) const
+try
 {
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Shadow);
     if(!state) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional transmittance requires path state");
@@ -240,6 +257,11 @@ Vec3f GlobalConditionalMedium::transmittance(PathSampleGenerator &sampler,const 
     if(tr>0) next->birth=segment.samplePositiveEndpoint(rng);
     state->pathContext=next;
     return Vec3f(float(tr));
+} catch(const cg::NumericError &error) {
+    if(error.status()!=cg::NumericStatus::NonPositiveSurfaceBirth) throw;
+    // Apply the same termination rule to NEE/visibility branches.
+    _discardedSurfaceConnections.fetch_add(1,std::memory_order_relaxed);
+    return Vec3f(0.0f);
 }
 float GlobalConditionalMedium::pdf(PathSampleGenerator &,const Ray &,bool,bool) const {
     throw std::runtime_error("global_conditional supports unidirectional path tracing; a state-free distance PDF is undefined");

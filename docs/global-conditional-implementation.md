@@ -9,6 +9,15 @@ the old observation through ordinary geometry. It is neither a GP conditioned
 on every previous path observation nor one conditioned on survival along the
 complete path.
 
+Surface births with a finite nonpositive forward conditional slope are discarded
+by the renderer. `sampleDistance` returns false, preserving radiance already
+accumulated on the path; `transmittance` returns zero for the corresponding light
+connection. Neither case resamples or skips a ray interval. The kernel reports a
+dedicated `NonPositiveSurfaceBirth` status so other numerical failures still
+propagate. Render teardown logs separate path and shadow-connection counts.
+This is an absorbing approximation for unsupported contacts (including sharp
+creases), not an unbiased solution of sharp-edge scattering.
+
 The input is a directly evaluated procedural/analytic SDF or an existing SDF
 grid. Extinction, conditional covariance and tracking bounds are evaluated
 online. Supported means are homogeneous, linear (including its clamp),

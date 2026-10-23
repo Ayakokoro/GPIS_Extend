@@ -21,6 +21,7 @@ enum class NumericStatus {
     SamplingNotConverged,
     InvalidMajorant,
     UnsupportedSingularFlight,
+    NonPositiveSurfaceBirth,
     UnsupportedDegenerateNdf,
     UnresolvedRareEvent
 };
@@ -39,6 +40,7 @@ inline const char* toString(NumericStatus s) {
     case NumericStatus::SamplingNotConverged: return "sampling_not_converged";
     case NumericStatus::InvalidMajorant: return "invalid_majorant";
     case NumericStatus::UnsupportedSingularFlight: return "unsupported_singular_flight";
+    case NumericStatus::NonPositiveSurfaceBirth: return "nonpositive_surface_birth";
     case NumericStatus::UnsupportedDegenerateNdf: return "unsupported_degenerate_ndf";
     case NumericStatus::UnresolvedRareEvent: return "unresolved_rare_event";
     }

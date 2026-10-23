@@ -401,8 +401,10 @@ ConditionalBirthMajorant ConditionalFlightKernel::birthMajorant(double end) cons
     if(!birth.certified)
         throw NumericError(NumericStatus::InvalidMajorant,"mean lacks certified conditional birth bounds");
     const double k=birth.beginDerivative+deltaSlope_;
+    if (!std::isfinite(k))
+        throw NumericError(NumericStatus::InvalidMajorant,"nonfinite conditional birth slope");
     if (f0==0.0 && !(k>0.0))
-        throw NumericError(NumericStatus::UnsupportedSingularFlight,"surface birth must enter the positive side");
+        throw NumericError(NumericStatus::NonPositiveSurfaceBirth,"surface birth must enter the positive side");
     const double curvature=birth.maximumSecondDerivative;
     result.smoothEnd=smoothEnd;
     result.slope=k;
