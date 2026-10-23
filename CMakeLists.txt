@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED On)
 set(CMAKE_CXX_EXTENSIONS Off)
 
 option(TUNGSTEN_ENABLE_CUDA "Build the optional GPIS CUDA backend" OFF)
+option(TUNGSTEN_ENABLE_NEURAL_RENEWAL "Build the scalar neural GPIS medium using macrofacet" OFF)
 option(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE "Compile detailed conditional GP transport diagnostics" OFF)
 
 # Disable annoying boost warning
@@ -291,6 +292,9 @@ if (nanovdb_FOUND)
         COMPILE_DEFINITIONS TUNGSTEN_NANOVDB_AVAILABLE=1)
 endif()
 option(TUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS "Build stationary classic_local tests" OFF)
+if (TUNGSTEN_ENABLE_NEURAL_RENEWAL)
+    include(cmake/NeuralRenewal.cmake)
+endif()
 if (TUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS)
     if (NOT nanovdb_FOUND)
         message(FATAL_ERROR "classic_local tests require NanoVDB")

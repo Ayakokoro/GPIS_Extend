@@ -2,6 +2,9 @@
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
+#ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
+#include "media/NeuralRenewalMedium.hpp"
+#endif
 
 namespace Tungsten {
 
@@ -26,7 +29,11 @@ TraceBase::TraceBase(TraceableScene *scene, const TraceSettings &settings, uint3
         auto *cube = dynamic_cast<Cube *>(prim.get());
         if (cube && (dynamic_cast<const GaussianProcessMedium *>(cube->intMedium().get()) ||
                      dynamic_cast<const ClassicLocalMedium *>(cube->intMedium().get()) ||
-                     dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get())) &&
+                     dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get())
+#ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
+                     || dynamic_cast<const NeuralRenewalMedium *>(cube->intMedium().get())
+#endif
+                     ) &&
             cube->bsdf(0)->lobes().isForward())
             _gpisBoundaryCubes.push_back(cube);
     }

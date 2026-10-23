@@ -10,6 +10,12 @@
 #include "ClassicGlobalMedium.hpp"
 #include "ClassicLocalMedium.hpp"
 #include "GlobalConditionalMedium.hpp"
+#ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
+#include "NeuralRenewalMedium.hpp"
+#define NEURAL_RENEWAL_FACTORY_ENTRY {"neural_causal_renewal", std::make_shared<NeuralRenewalMedium>},
+#else
+#define NEURAL_RENEWAL_FACTORY_ENTRY
+#endif
 
 namespace Tungsten {
 
@@ -25,6 +31,9 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"classic_global", std::make_shared<ClassicGlobalMedium>},
     {"classic_local", std::make_shared<ClassicLocalMedium>},
     {"global_conditional", std::make_shared<GlobalConditionalMedium>},
+    NEURAL_RENEWAL_FACTORY_ENTRY
 }))
+
+#undef NEURAL_RENEWAL_FACTORY_ENTRY
 
 }
