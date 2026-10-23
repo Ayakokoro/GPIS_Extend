@@ -1,8 +1,8 @@
 {
   "media": [{
     "name": "neural_bunny", "type": "neural_causal_renewal", "backend": "scalar",
-    "model": "@MACROFACET_DIR@/outputs/models/renewal_shader_ball_sigma002_r05_joint/renewal_model.json",
-    "field": {"file": "@MACROFACET_DIR@/outputs/fields/bunny-64-sigma005.nvdb"},
+    "model": "@NEURAL_MODEL@",
+    "field": {"file": "@NEURAL_FIELD@"},
     "covariance": {"type": "squared_exponential", "sigma": 0.05, "lengthScale": 0.14142135623730953},
     "material": {"type": "conductor"}, "max_bounces": 128
   }],

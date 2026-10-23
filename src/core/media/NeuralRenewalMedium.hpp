@@ -5,8 +5,8 @@
 
 namespace Tungsten {
 
-// CPU adapter for macrofacet's exported A/B causal Renewal model. Geometry,
-// textures, lights and scheduling remain ordinary Tungsten path tracing.
+// Neural GP medium with native A/B causal Renewal inference. Geometry,
+// textures, lights and scheduling use ordinary Tungsten path tracing.
 class NeuralRenewalMedium final : public Medium {
     struct Impl;
     std::unique_ptr<Impl> _impl;

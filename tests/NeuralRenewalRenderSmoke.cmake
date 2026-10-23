@@ -1,5 +1,6 @@
 file(MAKE_DIRECTORY "${OUTPUT_DIR}")
-file(TO_CMAKE_PATH "${MACROFACET_DIR}" MACROFACET_DIR)
+file(TO_CMAKE_PATH "${NEURAL_MODEL}" NEURAL_MODEL)
+file(TO_CMAKE_PATH "${NEURAL_FIELD}" NEURAL_FIELD)
 file(READ "${SCENE}" scene_template)
 string(CONFIGURE "${scene_template}" scene @ONLY)
 string(JSON scene SET "${scene}" camera resolution "[16,16]")

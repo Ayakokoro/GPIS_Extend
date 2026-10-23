@@ -3,8 +3,8 @@
 #include "io/Scene.hpp"
 #include "io/ImageIO.hpp"
 #include "sampling/IndependentPathSampler.hpp"
-#include "macrofacet/fields/NanoVdbMean.h"
-#include "macrofacet/transport/RenewalMedium.h"
+#include "media/NeuralSdfGrid.hpp"
+#include "math/neural/RenewalSampler.hpp"
 #include <nlohmann/json.hpp>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -13,7 +13,7 @@
 
 using namespace Tungsten;
 namespace {
-using V=mf::Vector3;
+using V=ConditionalGpis::Vector3;
 V eigen(const Vec3f &v) { return V(v.x(),v.y(),v.z()); }
 void require(bool condition,const char *message) { if (!condition) throw std::runtime_error(message); }
 void near(double a,double b,double tolerance,const char *message) {
@@ -66,12 +66,12 @@ int main(int argc,char **argv) {
         auto adapter=parseMedium(spec);
         require(bool(adapter),"neural factory registration");
         adapter->loadResources(); adapter->prepareForRender();
-        auto mean=mf::NanoVdbMean::openSdf(argv[2]);
+        auto mean=NeuralSdfGrid::open(argv[2]);
         require(!mean->intrinsicSigma(),"neural SDF has no intrinsic sigma");
-        mf::GPSSField field; field.mean=mean; field.activeDomain=mean->activeNodeBounds();
-        field.kernel=mf::CovarianceKernel::fromCorrelationLengths(sigma,V::Constant(lengthScale));
-        const auto model=mf::CausalRenewalModel::load(argv[1]);
-        const mf::RenewalMedium medium(field,model);
+        ConditionalGpis::GPSSField field; field.mean=mean; field.activeDomain=mean->activeNodeBounds();
+        field.kernel=ConditionalGpis::CovarianceKernel::fromCorrelationLengths(sigma,V::Constant(lengthScale));
+        const auto model=NeuralGpis::CausalRenewalModel::load(argv[1]);
+        const NeuralGpis::RenewalSampler medium(field,model);
         std::cout<<"SDF domain "<<field.activeDomain.minimum.transpose()<<" to "
             <<field.activeDomain.maximum.transpose()<<", sigma="<<sigma<<", lengthScale="<<lengthScale<<"\n";
         const Vec3f origin(0.01f,-3.f,2.27f);
@@ -105,7 +105,7 @@ int main(int argc,char **argv) {
         for (int i=0;i<12;++i) {
             sampler.startPath(0,i); reference.startPath(0,i);
             const auto high=reference.uniformGenerator().nextI(),low=reference.uniformGenerator().nextI();
-            mf::Random rng((std::uint64_t(high)<<32)|low);
+            ConditionalGpis::Random rng((std::uint64_t(high)<<32)|low);
             const auto expected=medium.sample(*flight,rng);
             Medium::MediumState state{}; state.reset(); MediumSample actual{};
             require(adapter->sampleDistance(sampler,ray,state,actual),"adapter flight succeeded");
@@ -156,8 +156,8 @@ int main(int argc,char **argv) {
             auto changed=spec; changed["covariance"]["sigma"]=s; changed["covariance"]["lengthScale"]=ell;
             auto configured=parseMedium(changed); configured->loadResources(); configured->prepareForRender();
             auto referenceField=field;
-            referenceField.kernel=mf::CovarianceKernel::fromCorrelationLengths(s,V::Constant(ell));
-            const mf::RenewalMedium configuredReference(referenceField,model);
+            referenceField.kernel=ConditionalGpis::CovarianceKernel::fromCorrelationLengths(s,V::Constant(ell));
+            const NeuralGpis::RenewalSampler configuredReference(referenceField,model);
             const auto configuredFlight=configuredReference.beginFlight({entry,w});
             require(bool(configuredFlight),"configured reference flight");
             const double expected=configuredReference.transmittance(*configuredFlight,

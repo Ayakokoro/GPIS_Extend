@@ -1,31 +1,70 @@
 # Neural causal Renewal medium
 
-`neural_causal_renewal` loads the existing macrofacet `export-joint` JSON bundle
-and original full-domain NanoVDB SDF. This adapter uses scalar CPU inference,
-shared cubic ray profiles and full-gradient reconstruction. No LibTorch,
-training, or converted OpenVDB field is required.
+`neural_causal_renewal` is a native Tungsten medium that directly loads the same
+`export-joint` model JSON and full-domain NanoVDB SDF used by macrofacet. It
+implements the same float32 MLP/GRU inference, cubic ray profiles, and
+full-gradient reconstruction inside `core`. No retraining, LibTorch, or
+converted OpenVDB field is required. Neural rendering is enabled by default.
 
-Build from this repository with the neighboring macrofacet checkout:
+Build entirely from this repository, with the normal Tungsten dependencies
+installed (see [the build instructions](../README.md#building-without-macrofacet)):
+
+```powershell
+cmake -S . -B build -DTUNGSTEN_ENABLE_NEURAL_RENEWAL=ON -DTUNGSTEN_BUILD_NEURAL_RENEWAL_TESTS=OFF
+cmake --build build --config Release --target tungsten --parallel 4
+```
+
+The native implementation consists of:
+
+- `src/core/math/neural/CausalRenewalModel.{hpp,cpp}`: validates and loads the
+  exported JSON, evaluates the MLPs and PyTorch-compatible GRU, integrates the
+  corrected hazard, and samples a positive crossing speed.
+- `src/core/math/neural/RayMeanProfile.{hpp,cpp}`: recovers the exact ray cubic
+  in each trilinear SDF cell.
+- `src/core/math/neural/RenewalSampler.{hpp,cpp}`: constructs A/B flights and
+  reconstructs full collision gradients using the existing covariance and
+  Gaussian utilities in `math/conditional`.
+- `src/core/media/NeuralSdfGrid.{hpp,cpp}`: reads only the full-domain SDF and
+  evaluates its interpolant and one-sided gradient.
+
+These files are built directly into `core`, with no separate macrofacet
+library, include paths, backend declarations, field factories, or baking code.
+The `macrofacet.causal_renewal` format string in the JSON reader is retained
+for model compatibility. Network weights are shared and immutable; each ray
+query owns its recurrent state. The arithmetic follows the macrofacet working
+tree based on commit `f8b6514cbcc49772760be579a60bd221b982caf8`, including its
+then-uncommitted bounded-flight sampling and SDF-only loading changes, ported
+on 2026-10-23. GPU inference is not part of this CPU implementation.
+
+Neural builds require NanoVDB and nlohmann_json in addition to the normal
+Tungsten dependencies. Compilation does not require model weights, SDF assets,
+LibTorch, or a CUDA toolkit. `TUNGSTEN_MACROFACET_SOURCE_DIR` is not used.
+
+Rendering still needs an exported joint JSON model and a full-domain NanoVDB
+SDF. Scene resource paths are relative to the scene file. The medium is
+unavailable when `TUNGSTEN_ENABLE_NEURAL_RENEWAL` is off.
+
+The optional tests default to this repository's local assets:
+
+- `models/renewal_shader_ball_sigma002_r05_joint/renewal_model.json`
+- `gpis-scenes/bunny/bunny-64-sigma005.nvdb`
+
+These folders are gitignored, so a fresh clone does not include the test data.
+After placing the files there, enable and run the tests:
 
 ```powershell
 cmake -S . -B build -DTUNGSTEN_ENABLE_NEURAL_RENEWAL=ON -DTUNGSTEN_BUILD_NEURAL_RENEWAL_TESTS=ON
 cmake --build build --config Release --target tungsten neural_renewal_test --parallel 4
 ctest --test-dir build -C Release -R neural_renewal --output-on-failure
-New-Item -ItemType Directory -Force outputs/neural-bunny | Out-Null
-.\build\Release\tungsten.exe gpis-scenes/bunny/bunny.json --spp 4 -t 8 -d outputs/neural-bunny
 ```
 
-Set `TUNGSTEN_MACROFACET_SOURCE_DIR` when macrofacet is not at `../macrofacet`.
-That checkout must include `CausalRenewalModel::sampleInterval` and
-`NanoVdbMean::openSdf`. These provide bounded flights preserving GRU history and
-an SDF-only import independent of baked statistical parameters. Keep the changes
-in both repositories together.
-The optional tests use that checkout's existing joint checkpoint and bunny SDF;
-both must exist. Scene resource paths are relative to the scene file. The
-medium is unavailable when the build option is off. Existing media and the
-sparse-convolution CUDA backend retain their previous behavior.
+For another asset location, set `TUNGSTEN_NEURAL_RENEWAL_TEST_MODEL` and
+`TUNGSTEN_NEURAL_RENEWAL_TEST_FIELD` to the respective file paths during CMake
+configuration. The field must be the bunny fixture in its original coordinates
+because the test rays and camera use that geometry. Missing files produce a
+configuration error only when these optional tests are enabled.
 
-The four CTest cases cover shared-sampler parity, finite geometry cutoffs, B
+The four CTest cases cover medium/sampler consistency, finite geometry cutoffs, B
 gradient state, forward-surface conditional survival, shadow-branch isolation,
 manual sigma/lengthScale, JSON round trips, and white-furnace energy with direct
 lighting on/off and the CPU path pool. Render tests use their own scene template.
@@ -54,10 +93,17 @@ or adding a sigma grid. The loader verifies full active-node coverage directly,
 and ray queries still check that interpolation nodes are present and finite.
 
 The example contains the neural bunny, a two-triangle UV checker ground and an
-environment light. A camera medium is sufficient: the adapter clips path and
+environment light. A camera medium is sufficient: the medium clips path and
 shadow queries to the SDF active-node domain, treating outside space as vacuum.
 Forward cubes with `int_medium` also work. Medium transforms are not supported;
 use the baked field's world coordinates.
+
+With the local bunny scene and its assets available:
+
+```powershell
+New-Item -ItemType Directory -Force outputs/neural-bunny | Out-Null
+.\build\Release\tungsten.exe gpis-scenes/bunny/bunny.json --spp 4 -t 8 -d outputs/neural-bunny
+```
 
 Materials are `conductor` (RGB `eta`, `k`) or `mirror` (`albedo`). The sampled
 full GP gradient supplies the microscopic normal. Delta reflection applies
@@ -80,7 +126,7 @@ surface light sampling for ground shadows. If volume light sampling is enabled,
 Tungsten's UNI estimator traces the phase-sampled delta direction to a light and
 suppresses the corresponding continuation emission to avoid counting it twice.
 
-The CPU adapter can run in Tungsten's resumable CPU path pool. Selecting
+The neural medium can run in Tungsten's resumable CPU path pool. Selecting
 `backend: "cuda_wavefront"` is rejected: integration of the neural CUDA sampler
 with `GpRayBatchBackend` is separate work. Image noise differs from macrofacet
 because Tungsten owns the camera and path random streams.
@@ -109,7 +155,7 @@ uses explicit covariance (sigma 0.05, lengthScale 0.14142135623730953) to preser
 its previous statistical scale.
 
 The original bake's placement includes a Z reflection and half-voxel shift.
-Because the neural adapter reads the native NVDB coordinates, this scene
+Because the neural medium reads the native NVDB coordinates, this scene
 transforms the camera, floor and light into those coordinates. The camera's
 negative X scale preserves image handedness; the light's rotation preserves
 its emitting side. The medium uses the camera-medium mode and its own active

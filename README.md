@@ -27,6 +27,31 @@ The core logic of sparse convolution noise is implemented in `src/core/math/spar
 
 Finally, `src/core/math/GPFunctions.cpp` contains the implementation of various stationary and non-stationary convolution kernels and their corresponding covariance functions.
 
+# Building without macrofacet
+
+`neural_causal_renewal` is a native Tungsten medium, enabled by default. Its
+float32 MLP/GRU inference and flight sampler live in `src/core/math/neural/`,
+and `src/core/media/NeuralSdfGrid.cpp` reads the SDF. These compile directly
+into `core`, using the same exported model JSON and network equations as
+macrofacet. No macrofacet source package or neighboring checkout is needed.
+Initialize this repository's existing submodules and install the normal
+Tungsten dependencies (including Boost, OpenEXR, OpenVDB, and TBB), plus
+NanoVDB and nlohmann_json for neural rendering.
+
+For Windows with an existing vcpkg installation, adjust the toolchain path:
+
+```powershell
+git submodule update --init --recursive
+cmake -S . -B build "-DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake" -DBUILD_EDITOR=OFF -DTUNGSTEN_ENABLE_NEURAL_RENEWAL=ON -DTUNGSTEN_BUILD_NEURAL_RENEWAL_TESTS=OFF
+cmake --build build --config Release --target tungsten --parallel 4
+```
+
+Model weights and SDF files are runtime inputs, not compile-time dependencies.
+The gitignored `models/` and `gpis-scenes/` directories must be supplied
+separately for scenes that use them. See [neural renewal](docs/neural-renewal.md)
+for asset paths and optional tests. Set `TUNGSTEN_ENABLE_NEURAL_RENEWAL=OFF`
+to build only the other medium implementations.
+
 # Scene Files
 
 We provide the JSON scene files on [Google Drive](https://drive.google.com/file/d/1nzmRUxxPsP5bIgX6SrOjjc0_664KtQgQ/view?usp=sharing) that reproduce the results presented in the paper. Some scene files include multiple rendering configurations, where only one is active while the others are commented out and annotated for clarity.
@@ -104,7 +129,7 @@ python tools/generate_contact_experiments.py --output outputs/contact_experiment
 The four branches share camera, process box, area light, dim environment,
 mirror albedo 0.85, and bounce limits. NEE is disabled in this initial comparison
 so all use path sampling; increasing spp is necessary for quantitative contact
-brightness comparisons. Tungsten neural currently uses the scalar CPU adapter.
+brightness comparisons. Tungsten neural uses native scalar CPU inference.
 The runner checks completion, internal-error logs, and finite linear PFM output;
 PNG previews use filmic tonemapping. Small renders only verify the scene setup,
 not statistical agreement. Changing length scale at fixed sigma also changes

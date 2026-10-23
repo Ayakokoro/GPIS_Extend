@@ -1,7 +1,7 @@
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
 #include "NeuralRenewalMedium.hpp"
-#include "macrofacet/fields/NanoVdbMean.h"
-#include "macrofacet/transport/RenewalMedium.h"
+#include "media/NeuralSdfGrid.hpp"
+#include "math/neural/RenewalSampler.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
 #include <algorithm>
@@ -9,7 +9,7 @@
 
 namespace Tungsten {
 namespace {
-using V = mf::Vector3;
+using V = ConditionalGpis::Vector3;
 V eigen(const Vec3f &p) { return V(p.x(),p.y(),p.z()); }
 Vec3f vec(const V &p) { return Vec3f(float(p.x()),float(p.y()),float(p.z())); }
 
@@ -18,7 +18,7 @@ struct NeuralPathContext final : MediumPathContext {
     V position = V::Zero();
     Vec3f rayOrigin = Vec3f(0.f);
     std::optional<V> gradient;
-    std::shared_ptr<const mf::RenewalFlight> flight;
+    std::shared_ptr<const NeuralGpis::RenewalFlight> flight;
     double distance = 0;
 };
 struct NeuralEventContext final : MediumEventContext {
@@ -39,7 +39,7 @@ public:
         const auto event = std::dynamic_pointer_cast<const NeuralEventContext>(s.eventContext);
         if (!event || event->owner != &_medium) throw std::runtime_error("neural_causal_renewal: missing collision context");
         const V w = eigen(wi).normalized(), n = event->gradient.normalized();
-        r.w = vec(mf::reflectTravelDirection(w,n)).normalized();
+        r.w = vec(ConditionalGpis::reflectTravelDirection(w,n)).normalized();
         if (!(eigen(r.w).dot(event->gradient)>0)) return false;
         r.weight = _medium.reflectance(-w.dot(n)); r.pdf = 1;
         auto next = std::make_shared<NeuralPathContext>();
@@ -51,7 +51,7 @@ public:
 };
 
 struct Segment {
-    std::shared_ptr<const mf::RenewalFlight> flight;
+    std::shared_ptr<const NeuralGpis::RenewalFlight> flight;
     V origin, direction;
     double speed = 1, entry = 0, begin = 0, end = 0;
     bool blocked = false;
@@ -59,9 +59,9 @@ struct Segment {
 }
 
 struct NeuralRenewalMedium::Impl {
-    mf::GPSSField field;
-    std::optional<mf::CausalRenewalModel> model;
-    std::unique_ptr<mf::RenewalMedium> medium;
+    ConditionalGpis::GPSSField field;
+    std::optional<NeuralGpis::CausalRenewalModel> model;
+    std::unique_ptr<NeuralGpis::RenewalSampler> medium;
 
     Segment segment(const NeuralRenewalMedium *owner, const Ray &ray, const MediumState *state) const {
         if (!medium) throw std::runtime_error("neural_causal_renewal: prepareForRender must precede tracing");
@@ -91,7 +91,7 @@ struct NeuralRenewalMedium::Impl {
         const auto gradient = old && old->gradient && s.entry==0 ? old->gradient : std::nullopt;
         auto flight = medium->beginFlight({entry,s.direction},gradient);
         if (!flight) return s;
-        s.flight = std::make_shared<mf::RenewalFlight>(std::move(*flight));
+        s.flight = std::make_shared<NeuralGpis::RenewalFlight>(std::move(*flight));
         s.end = std::min(length-s.entry,s.flight->maximumDistance());
         return s;
     }
@@ -167,16 +167,16 @@ rapidjson::Value NeuralRenewalMedium::toJson(Allocator &allocator) const {
 
 void NeuralRenewalMedium::loadResources() {
     const auto file=_gridFile->absolute().asString();
-    auto mean=mf::NanoVdbMean::openSdf(file);
+    auto mean=NeuralSdfGrid::open(file);
     _impl->medium.reset();
     _impl->field.mean=mean; _impl->field.activeDomain=mean->activeNodeBounds();
-    _impl->field.kernel=mf::CovarianceKernel::fromCorrelationLengths(
-        mf::CovarianceKernelType::SquaredExponential,_sigma,V::Constant(_lengthScale));
-    _impl->model=mf::CausalRenewalModel::load(_modelFile->absolute().asString());
+    _impl->field.kernel=ConditionalGpis::CovarianceKernel::fromCorrelationLengths(
+        ConditionalGpis::CovarianceKernelType::SquaredExponential,_sigma,V::Constant(_lengthScale));
+    _impl->model=NeuralGpis::CausalRenewalModel::load(_modelFile->absolute().asString());
 }
 void NeuralRenewalMedium::prepareForRender() {
     if (!_impl->model || !_impl->field.mean) throw std::runtime_error("neural_causal_renewal: resources not loaded");
-    _impl->medium=std::make_unique<mf::RenewalMedium>(_impl->field,*_impl->model,_profileStep,"cubic");
+    _impl->medium=std::make_unique<NeuralGpis::RenewalSampler>(_impl->field,*_impl->model,_profileStep);
 }
 
 bool NeuralRenewalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray &ray,
@@ -193,7 +193,7 @@ bool NeuralRenewalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray
     if (segment.flight && segment.end>segment.begin) {
         // Use the path-owned supplemental generator; no global/thread RNG state.
         const auto high=sampler.uniformGenerator().nextI(), low=sampler.uniformGenerator().nextI();
-        mf::Random rng((std::uint64_t(high)<<32)|low);
+        ConditionalGpis::Random rng((std::uint64_t(high)<<32)|low);
         const auto &f=*segment.flight;
         const std::array<double,3> u{rng.openUniform01(),rng.openUniform01(),rng.openUniform01()};
         const auto hit=_impl->model->sampleInterval(f.mean,f.start,u,segment.begin/f.ell,
@@ -206,7 +206,7 @@ bool NeuralRenewalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray
             if (part==parts.end()) part=std::prev(parts.end());
             const auto interior=f.ray.origin+(0.5*(part->begin+part->end)*f.ell)*f.ray.direction;
             const V meanGradient=_impl->field.mean->evaluateInCell(e->position,interior).gradient;
-            e->gradient=mf::sampleRenewalGradient(_impl->field.kernel,f.ray.direction,hit.q,
+            e->gradient=NeuralGpis::sampleRenewalGradient(_impl->field.kernel,f.ray.direction,hit.q,
                 -f.sigma/f.ell*hit.speed,meanGradient,f.birthMeanGradient,f.birthGradient,rng);
             if (!e->gradient.allFinite() || !(e->gradient.dot(f.ray.direction)<0))
                 throw std::runtime_error("neural_causal_renewal: invalid collision gradient");

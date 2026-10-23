@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED On)
 set(CMAKE_CXX_EXTENSIONS Off)
 
 option(TUNGSTEN_ENABLE_CUDA "Build the optional GPIS CUDA backend" OFF)
-option(TUNGSTEN_ENABLE_NEURAL_RENEWAL "Build the scalar neural GPIS medium using macrofacet" OFF)
+option(TUNGSTEN_ENABLE_NEURAL_RENEWAL "Build native neural GPIS rendering" ON)
 option(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE "Compile detailed conditional GP transport diagnostics" OFF)
 
 # Disable annoying boost warning
@@ -201,6 +201,9 @@ if(Ceres_FOUND)
 endif()
 
 file(GLOB_RECURSE Core_SOURCES "src/core/*.cpp")
+if (NOT TUNGSTEN_ENABLE_NEURAL_RENEWAL)
+    list(FILTER Core_SOURCES EXCLUDE REGEX "/math/neural/|/media/NeuralSdfGrid\\.cpp$")
+endif()
 add_library(core STATIC ${Core_SOURCES})
 if (TUNGSTEN_ENABLE_CONDITIONAL_PROFILE)
     target_compile_definitions(core PUBLIC TUNGSTEN_ENABLE_CONDITIONAL_PROFILE=1)
