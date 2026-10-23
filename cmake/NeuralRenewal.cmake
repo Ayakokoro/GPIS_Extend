@@ -40,7 +40,7 @@ if (TUNGSTEN_BUILD_NEURAL_RENEWAL_TESTS)
     foreach(mode furnace furnace_no_nee furnace_wavefront)
         add_test(NAME neural_renewal_${mode} COMMAND ${CMAKE_COMMAND}
             "-DRENDERER=$<TARGET_FILE:tungsten>" "-DCHECKER=$<TARGET_FILE:neural_renewal_test>"
-            "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/neural-renewal/bunny.json"
+            "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/tests/NeuralRenewalRenderScene.json.in"
             "-DMACROFACET_DIR=${TUNGSTEN_MACROFACET_SOURCE_DIR}"
             "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/neural-renewal-${mode}-test"
             "-DMODE=${mode}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/NeuralRenewalRenderSmoke.cmake")

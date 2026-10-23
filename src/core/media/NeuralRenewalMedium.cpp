@@ -6,8 +6,6 @@
 #include "io/Scene.hpp"
 #include <algorithm>
 #include <complex>
-#include <fstream>
-#include <nlohmann/json.hpp>
 
 namespace Tungsten {
 namespace {
@@ -127,20 +125,29 @@ void NeuralRenewalMedium::fromJson(JsonPtr value, const Scene &scene) {
     _modelFile=scene.fetchResource(value.getRequiredMember("model"));
     const auto field=value.getRequiredMember("field");
     _gridFile=scene.fetchResource(field.getRequiredMember("file"));
-    if (field["transform"] || field["alpha_grid"] || field["use_alpha_grid"])
-        field.parseError("neural_causal_renewal uses the NVDB world transform and scalar material.roughness");
-    field.getField("sigma",_sigmaOverride);
-    if (field["sigma"] && !(_sigmaOverride>0 && std::isfinite(_sigmaOverride)))
-        field.parseError("field.sigma must be finite and positive when supplied");
+    if (field["transform"])
+        field.parseError("neural_causal_renewal uses the native NVDB world transform");
+    for (const char *key : {"sigma","sigma_grid","alpha_grid","use_alpha_grid"})
+        if (field[key]) field.parseError("neural_causal_renewal loads only the SDF; set covariance.sigma and covariance.lengthScale");
+    const auto covariance=value.getRequiredMember("covariance");
+    const auto kernelType=covariance.getRequiredMember("type").cast<std::string>();
+    if (kernelType!="squared_exponential")
+        covariance.parseError("neural_causal_renewal requires a stationary squared_exponential covariance");
+    _sigma=covariance.getRequiredMember("sigma").cast<double>();
+    _lengthScale=covariance.getRequiredMember("lengthScale").cast<double>();
+    if (!(_sigma>0 && std::isfinite(_sigma)) || !(_lengthScale>0 && std::isfinite(_lengthScale)))
+        covariance.parseError("covariance.sigma and covariance.lengthScale must be finite positive scalars");
     if (auto material=value["material"]) {
-        material.getField("type",_materialType); material.getField("roughness",_roughness);
+        if (material["roughness"] || material["alpha"])
+            material.parseError("neural_causal_renewal takes gradient covariance from covariance.sigma and covariance.lengthScale");
+        material.getField("type",_materialType);
         material.getField("eta",_eta); material.getField("k",_k);
         material.getField("albedo",_albedo); material.getField("force_unit_fresnel",_unitFresnel);
     }
     value.getField("profile_maximum_step",_profileStep);
     value.getField("distance_tolerance",_tolerance); value.getField("max_bounces",_maxBounce);
     if ((_materialType!="mirror" && _materialType!="conductor") || _maxBounce<0 ||
-        !(_roughness>0 && std::isfinite(_roughness)) || !(_profileStep>0 && std::isfinite(_profileStep)) ||
+        !(_profileStep>0 && std::isfinite(_profileStep)) ||
         !(_tolerance>0 && std::isfinite(_tolerance))) value.parseError("invalid neural_causal_renewal settings");
     for (int i=0;i<3;++i)
         if (!std::isfinite(_eta[i]) || _eta[i]<=0 || !std::isfinite(_k[i]) || _k[i]<0 ||
@@ -149,29 +156,22 @@ void NeuralRenewalMedium::fromJson(JsonPtr value, const Scene &scene) {
 
 rapidjson::Value NeuralRenewalMedium::toJson(Allocator &allocator) const {
     JsonObject field{allocator,"file",*_gridFile};
-    if (_sigmaOverride>0) field.add("sigma",_sigmaOverride);
     return JsonObject{JsonSerializable::toJson(allocator),allocator,
         "type","neural_causal_renewal","backend","scalar","model",*_modelFile,
         "field",rapidjson::Value(field),
-        "material",JsonObject{allocator,"type",_materialType,"roughness",_roughness,
+        "covariance",JsonObject{allocator,"type","squared_exponential","sigma",_sigma,"lengthScale",_lengthScale},
+        "material",JsonObject{allocator,"type",_materialType,
             "eta",_eta,"k",_k,"albedo",_albedo,"force_unit_fresnel",_unitFresnel},
         "profile_maximum_step",_profileStep,"distance_tolerance",_tolerance,"max_bounces",_maxBounce};
 }
 
 void NeuralRenewalMedium::loadResources() {
     const auto file=_gridFile->absolute().asString();
-    std::ifstream sidecar(file+".json");
-    if (sidecar) {
-        nlohmann::json meta; sidecar>>meta;
-        if (meta.value("coverage","")!="full_domain")
-            throw std::runtime_error("neural_causal_renewal requires a full_domain NanoVDB SDF");
-    }
-    auto mean=mf::NanoVdbMean::open(file,_sigmaOverride);
+    auto mean=mf::NanoVdbMean::openSdf(file);
     _impl->medium.reset();
     _impl->field.mean=mean; _impl->field.activeDomain=mean->activeNodeBounds();
-    _impl->field.kernel=mf::CovarianceKernel::fromGradientCovariance(
-        mf::CovarianceKernelType::SquaredExponential,mean->sigma(),
-        mf::Matrix3::Identity()*(_roughness*_roughness/2));
+    _impl->field.kernel=mf::CovarianceKernel::fromCorrelationLengths(
+        mf::CovarianceKernelType::SquaredExponential,_sigma,V::Constant(_lengthScale));
     _impl->model=mf::CausalRenewalModel::load(_modelFile->absolute().asString());
 }
 void NeuralRenewalMedium::prepareForRender() {

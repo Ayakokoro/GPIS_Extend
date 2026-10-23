@@ -1,0 +1,28 @@
+{
+  "media": [{
+    "name": "neural_bunny", "type": "neural_causal_renewal", "backend": "scalar",
+    "model": "@MACROFACET_DIR@/outputs/models/renewal_shader_ball_sigma002_r05_joint/renewal_model.json",
+    "field": {"file": "@MACROFACET_DIR@/outputs/fields/bunny-64-sigma005.nvdb"},
+    "covariance": {"type": "squared_exponential", "sigma": 0.05, "lengthScale": 0.14142135623730953},
+    "material": {"type": "conductor"}, "max_bounces": 128
+  }],
+  "primitives": [
+    {"type": "quad", "transform": {"position": [0,0,-0.2], "rotation": [90,0,0], "scale": 6},
+      "bsdf": {"type": "lambert", "albedo": 1}},
+    {"type": "infinite_sphere", "emission": 1, "sample": true}
+  ],
+  "camera": {
+    "type": "pinhole", "medium": "neural_bunny", "resolution": [16,16], "fov": 25,
+    "transform": {"position": [0.01,-3,2.27], "look_at": [0,0,0.35], "up": [0,0,1]},
+    "tonemap": "filmic", "reconstruction_filter": "box"
+  },
+  "integrator": {
+    "type": "path_tracer", "max_bounces": 128,
+    "enable_light_sampling": true, "enable_volume_light_sampling": true,
+    "use_cuda_gpis": false, "independent_path_sampling": true
+  },
+  "renderer": {
+    "spp": 8, "spp_step": 8, "adaptive_sampling": false,
+    "output_file": "neural-bunny.png", "hdr_output_file": "neural-bunny.exr", "overwrite_output_files": true
+  }
+}

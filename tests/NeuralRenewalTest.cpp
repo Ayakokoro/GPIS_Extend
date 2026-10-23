@@ -6,6 +6,8 @@
 #include "macrofacet/fields/NanoVdbMean.h"
 #include "macrofacet/transport/RenewalMedium.h"
 #include <nlohmann/json.hpp>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <iostream>
 #include <cmath>
 
@@ -18,6 +20,10 @@ void near(double a,double b,double tolerance,const char *message) {
     if (!(std::abs(a-b)<=tolerance)) {
         std::cerr<<message<<": "<<a<<" vs "<<b<<"\n"; throw std::runtime_error(message);
     }
+}
+std::shared_ptr<NeuralRenewalMedium> parseMedium(const nlohmann::json &spec) {
+    Scene scene; JsonDocument doc(Path("neural-test.json"),spec.dump());
+    return std::dynamic_pointer_cast<NeuralRenewalMedium>(scene.fetchMedium(doc));
 }
 void checkImage(const char *file, bool furnace) {
     int width=0,height=0;
@@ -40,20 +46,34 @@ int main(int argc,char **argv) {
         if (std::string(argv[1])=="--image" || std::string(argv[1])=="--furnace") {
             checkImage(argv[2],std::string(argv[1])=="--furnace"); return 0;
         }
+        const double sigma=0.05,lengthScale=std::sqrt(2.)*sigma/0.5;
         nlohmann::json spec={{"type","neural_causal_renewal"},{"name","neural"},{"model",argv[1]},
-            {"field",{{"file",argv[2]}}},{"material",{{"roughness",0.5},{"force_unit_fresnel",true}}}};
-        Scene scene; JsonDocument doc(Path("neural-test.json"),spec.dump());
-        auto adapter=std::dynamic_pointer_cast<NeuralRenewalMedium>(scene.fetchMedium(doc));
+            {"field",{{"file",argv[2]}}},
+            {"covariance",{{"type","squared_exponential"},{"sigma",sigma},{"lengthScale",lengthScale}}},
+            {"material",{{"force_unit_fresnel",true}}}};
+        for (int invalid=0;invalid<6;++invalid) {
+            auto bad=spec;
+            if (invalid==0) bad.erase("covariance");
+            if (invalid==1) bad["covariance"]["sigma"]=0;
+            if (invalid==2) bad["covariance"]["lengthScale"]=-1;
+            if (invalid==3) bad["covariance"]["type"]="matern32";
+            if (invalid==4) bad["material"]["roughness"]=0.5;
+            if (invalid==5) bad["field"]["sigma"]=0.05;
+            bool rejected=false;
+            try { parseMedium(bad); } catch (const std::exception &) { rejected=true; }
+            require(rejected,"invalid or obsolete covariance configuration rejected");
+        }
+        auto adapter=parseMedium(spec);
         require(bool(adapter),"neural factory registration");
         adapter->loadResources(); adapter->prepareForRender();
-        auto mean=mf::NanoVdbMean::open(argv[2]);
+        auto mean=mf::NanoVdbMean::openSdf(argv[2]);
+        require(!mean->intrinsicSigma(),"neural SDF has no intrinsic sigma");
         mf::GPSSField field; field.mean=mean; field.activeDomain=mean->activeNodeBounds();
-        field.kernel=mf::CovarianceKernel::fromGradientCovariance(
-            mf::CovarianceKernelType::SquaredExponential,mean->sigma(),mf::Matrix3::Identity()*0.125);
+        field.kernel=mf::CovarianceKernel::fromCorrelationLengths(sigma,V::Constant(lengthScale));
         const auto model=mf::CausalRenewalModel::load(argv[1]);
         const mf::RenewalMedium medium(field,model);
         std::cout<<"SDF domain "<<field.activeDomain.minimum.transpose()<<" to "
-            <<field.activeDomain.maximum.transpose()<<", sigma="<<mean->sigma()<<"\n";
+            <<field.activeDomain.maximum.transpose()<<", sigma="<<sigma<<", lengthScale="<<lengthScale<<"\n";
         const Vec3f origin(0.01f,-3.f,2.27f);
         const Vec3f direction=(Vec3f(0.f,0.f,0.35f)-origin).normalized();
         const Ray ray(origin,direction,0.f,10.f);
@@ -123,6 +143,29 @@ int main(int argc,char **argv) {
         const double back=adapter->transmittance(sampler,tail,true,true,&split).x();
         near(front*back,full,3e-6,"forward geometry preserves conditional survival");
         near(full,0.5,2e-5,"median visibility");
+        rapidjson::Document serialized; auto value=adapter->toJson(serialized.GetAllocator());
+        rapidjson::StringBuffer buffer; rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        value.Accept(writer);
+        const auto roundTripSpec=nlohmann::json::parse(buffer.GetString());
+        require(!roundTripSpec["field"].contains("sigma") && !roundTripSpec["material"].contains("roughness"),
+            "serialization contains only explicit stationary covariance settings");
+        auto roundTrip=parseMedium(roundTripSpec); roundTrip->loadResources(); roundTrip->prepareForRender();
+        near(roundTrip->transmittance(sampler,wholeRay,false,true,nullptr).x(),full,0,"covariance JSON round trip");
+        for (int parameter=0;parameter<2;++parameter) {
+            const double s=parameter==0 ? 0.08 : sigma, ell=parameter==1 ? 0.07 : lengthScale;
+            auto changed=spec; changed["covariance"]["sigma"]=s; changed["covariance"]["lengthScale"]=ell;
+            auto configured=parseMedium(changed); configured->loadResources(); configured->prepareForRender();
+            auto referenceField=field;
+            referenceField.kernel=mf::CovarianceKernel::fromCorrelationLengths(s,V::Constant(ell));
+            const mf::RenewalMedium configuredReference(referenceField,model);
+            const auto configuredFlight=configuredReference.beginFlight({entry,w});
+            require(bool(configuredFlight),"configured reference flight");
+            const double expected=configuredReference.transmittance(*configuredFlight,
+                double(endT)*eigen(direction).norm()-domain.entry);
+            const double actual=configured->transmittance(sampler,wholeRay,false,true,nullptr).x();
+            near(actual,expected,2e-6,"manual sigma/lengthScale agrees with independent transport");
+            require(std::abs(actual-full)>1e-4,"changing each covariance parameter affects transport");
+        }
         int escaped=0; constexpr int count=128;
         for (int i=0;i<count;++i) {
             sampler.startPath(1,i); Medium::MediumState state{}; state.reset(); MediumSample s{};
