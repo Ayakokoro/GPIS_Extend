@@ -55,6 +55,93 @@ Here we list the key parameters for our sparse convolution noise implementation,
 ### Function Space
 - **sample\_points**: `int`; number of points sampled along the ray per batch, conditioned on the previous batch.
 
+# Prebaked contact experiments
+
+Run from this project root to generate unit-scale two-sphere and V-groove fields,
+matched scene configs, and four-branch render comparisons:
+
+```powershell
+cmake --build build --config Release --target bake_contact_fields --parallel 4
+python tools/generate_contact_experiments.py
+python tools/generate_contact_experiments.py --skip-bake --render --render-cases two_spheres_g0p02 v_groove_a90 --render-size 64 --render-spp 16
+```
+
+All generated files stay in this project: `outputs/contact_experiments/fields/`
+contains NVDB/VDB models, `outputs/contact_experiments/configs/<case>/` contains
+four matched scene configs, `outputs/contact_experiments/renders/` contains
+images, logs and the configs actually rendered, and
+`outputs/contact_experiments/comparison.html` shows the comparisons.
+The defaults find `tungsten` and `bake_contact_fields` under this project's
+`build/` (including `build/Release/`), and the joint checkpoint at
+`models/renewal_shader_ball_sigma002_r05_joint/renewal_model.json`.
+Override `--tungsten`, `--model`, or `--baker` for other layouts. Relative CLI paths
+are resolved from this repository root. Generated resource paths are absolute. The default
+configs use 256 x 256 at 128 spp; `--render-size` / `--render-spp` override only
+the copies saved with each render. Omit those overrides for the full run.
+`--render-cases` selects geometry names and `--modes` selects rendering branches.
+All outputs stay under `--output`; rerunning replaces the selected outputs.
+
+The two spheres have radius 0.25 and centers at `x=+/- (0.25 + gap/2)`, so the
+overall extent is `(1+gap) x 0.5 x 0.5`. Default `--gaps 0 0.02 0.06` includes
+tangency and two separated cases. Both spheres belong to **one field and one
+medium**. The finite V groove is a closed extruded polygon with outer dimensions
+`1 x 0.4 x 1`, notch depth 0.25, and default `--angles 45 90 120` (opening angles
+in degrees). Y is up; all geometry is baked in native world coordinates, with
+no `field.transform`. Each process box encloses the geometry plus 6 sigma;
+another four grid nodes keep interpolation and VDB boundary clamps outside it.
+
+The baker writes the same analytic SDF float samples into NVDB and VDB and
+checks their saved values and coordinate maps. NVDB also stores density for
+`classic_local`, constant alpha, and sigma. Every grid node in the bake box is
+sampled, including the interior; these are not truncated narrow-band fields.
+Default `sigma=0.02`, `length_scale=0.02`, and `dx=0.005` give four voxels per
+correlation length. Refine selected cases before interpreting model differences:
+
+```powershell
+python tools/generate_contact_experiments.py --output outputs/contact_experiments_dx0025 --voxel-size 0.0025 --gaps 0.02 --angles 90
+```
+
+The four branches share camera, process box, area light, dim environment,
+mirror albedo 0.85, and bounce limits. NEE is disabled in this initial comparison
+so all use path sampling; increasing spp is necessary for quantitative contact
+brightness comparisons. Tungsten neural currently uses the scalar CPU adapter.
+The runner checks completion, internal-error logs, and finite linear PFM output;
+PNG previews use filmic tonemapping. Small renders only verify the scene setup,
+not statistical agreement. Changing length scale at fixed sigma also changes
+roughness (`alpha = sqrt(2)*sigma/length_scale`), and is not an isolated correlation
+test. These four branches do not provide a full-history GPIS reference.
+
+
+## Sparse convolution reference for the contact close-up
+
+After generating the matched close-up configs in `outputs/contact_contrast/configs/`,
+compare them against sparse convolution GPIS in the same scene:
+
+```powershell
+python tools/compare_contact_gpis.py --render
+python tools/compare_contact_gpis.py --render --name validation --size 32 --spp 128 --seeds 314159 271828 161803 --modes sparse_3d_global global_conditional neural sparse_1d_renewal
+```
+
+Outputs stay under `outputs/contact_contrast/sparse_convolution/<name>/`:
+`configs/` contains runnable scenes, each mode/seed directory contains its actual
+scene, images and log, and `comparison.html`, `summary.json`, and
+`horizontal_profile.csv` compare linear radiance. Completed, matching prior
+renders are reused. Without `--render`, the script generates configs and reports
+already completed renders. Use `--base` for another directory with the four
+matched template configs. This preset expects sigma=0.02, lengthScale=0.1 and
+mirror albedo=0.85, and verifies the shared camera, lighting and covariance.
+
+`sparse_3d_global` uses world-space 3D noise, `correlation_context="global"`, and
+`single_realization=false`: a camera path retains the same realization across
+all bounces, while different camera samples draw independent realizations.
+`sparse_1d_renewal` uses 1D `renewal+` with `1D_gradient_correlationXY=false`;
+it retains the last contact rather than the whole path. The default sparse
+settings are `impulse_density=10` and `step_size=0.005`; both are configurable.
+Finite impulse density and marching resolution make these numerical references,
+not exact GP ground truth. Multi-seed statistics average linear images;
+displayed PNGs show the first seed with the same filmic mapping. Pixel/profile
+errors still include Monte Carlo noise.
+
 # Citation
 
 If you find this code useful in your academic research, please cite the original paper:

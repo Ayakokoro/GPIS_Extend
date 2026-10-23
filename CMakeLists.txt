@@ -291,6 +291,21 @@ if (nanovdb_FOUND)
     set_source_files_properties(src/core/media/ClassicLocalGrid.cpp PROPERTIES
         COMPILE_DEFINITIONS TUNGSTEN_NANOVDB_AVAILABLE=1)
 endif()
+# Analytic contact fixtures use this checkout's math implementation and write
+# matching full-domain NanoVDB / OpenVDB fields for all four medium branches.
+if (OpenVDB_FOUND AND TBB_FOUND AND nanovdb_FOUND)
+    find_package(nlohmann_json CONFIG REQUIRED)
+    add_executable(bake_contact_fields EXCLUDE_FROM_ALL
+        tools/contact_experiments/bake.cpp
+        src/core/math/conditional/mathutility/Gaussian1D.cpp)
+    target_compile_definitions(bake_contact_fields PRIVATE NANOVDB_USE_OPENVDB)
+    target_link_libraries(bake_contact_fields PRIVATE
+        nanovdb::nanovdb OpenVDB::openvdb nlohmann_json::nlohmann_json Eigen3::Eigen)
+    if (MSVC)
+        target_compile_options(bake_contact_fields PRIVATE /EHsc /utf-8 /bigobj)
+    endif()
+endif()
+
 option(TUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS "Build stationary classic_local tests" OFF)
 if (TUNGSTEN_ENABLE_NEURAL_RENEWAL)
     include(cmake/NeuralRenewal.cmake)
