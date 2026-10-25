@@ -3,6 +3,7 @@
 
 #include "Medium.hpp"
 #include "math/ClassicGlobalMath.hpp"
+#include "math/ClassicGlobalNonstationary.hpp"
 
 namespace Tungsten {
 class MeanFunction;
@@ -17,6 +18,7 @@ protected:
     std::shared_ptr<CovarianceFunction> _covariance;
     std::unique_ptr<GpisSdfGrid> _sdfGrid;
     std::unique_ptr<ClassicGlobal::GaussianNdf> _ndf;
+    std::unique_ptr<ClassicGlobal::NonstationaryKernel> _nonstationary;
     std::string _materialType;
     Vec3d _mirrorAlbedo;
     Vec3d _eta, _k;
@@ -47,8 +49,11 @@ public:
     double meanValue(const Vec3d &p) const;
     Vec3d meanGradient(const Vec3d &p) const;
     double extinction(const Vec3d &p, const Vec3d &travelDirection) const;
-    double fieldSigma() const { return _sigma; }
-    const ClassicGlobal::GaussianNdf &ndf() const { return *_ndf; }
+    ClassicGlobal::PointStatistics pointStatistics(const Vec3d &p) const;
+    double phasePdf(const Vec3d &p, const Eigen::Vector3d &wi, const Eigen::Vector3d &wo) const;
+    Eigen::Vector3d sampleVisibleNormal(const Vec3d &p, const Eigen::Vector3d &w, PathSampleGenerator &sampler) const;
+    double fieldSigma() const;
+    const ClassicGlobal::GaussianNdf &ndf() const;
     Vec3f reflectance(double cosine) const;
     bool hasDiffuseMicroMaterial() const { return _materialType == "lambert"; }
 };

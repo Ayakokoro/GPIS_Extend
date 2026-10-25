@@ -1636,6 +1636,7 @@ rapidjson::Value ProceduralNonstationaryCovariance::toJson(Allocator& allocator)
 }
 
 void ProceduralNonstationaryCovariance::loadResources() {
+    if (_stationaryCov) _stationaryCov->loadResources();
     if (_variance) _variance->loadResources();
     if (_ls) _ls->loadResources();
     if (_anisoField) _anisoField->loadResources();

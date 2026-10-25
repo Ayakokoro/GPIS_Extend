@@ -12,6 +12,8 @@
 
 #include <math/SdfFunctions.hpp>
 #include <math/GPNeuralNetwork.hpp>
+#include <math/ProceduralParameter.hpp>
+#include <stdexcept>
 
 #include <autodiff/forward/real/real.hpp>
 #include <autodiff/forward/real/eigen.hpp>
@@ -403,12 +405,18 @@ namespace Tungsten {
     public:
         virtual double operator()(Vec3d p) const = 0;
         virtual const SdfQueries *sdfQueries() const { return nullptr; }
+        virtual bool parameterBounds(ParameterBounds &) const { return false; }
+        virtual ParameterJet parameterJet(Vec3d) const {
+            throw std::runtime_error("parameter field has no analytic gradient");
+        }
     };
 
     class ConstantScalar : public ProceduralScalar {
         double _v;
     public:
         ConstantScalar(double v = 0) : _v(v) { }
+        bool parameterBounds(ParameterBounds &b) const override { b = {_v, _v, 0.0}; return true; }
+        ParameterJet parameterJet(Vec3d) const override { return {_v, Vec3d(0.0)}; }
         virtual double operator()(Vec3d p) const override {
             return _v;
         }
@@ -472,6 +480,10 @@ namespace Tungsten {
     class ProceduralVector : public JsonSerializable {
     public:
         virtual Vec3d operator()(Vec3d p) const = 0;
+        virtual bool parameterBounds(VectorParameterBounds &) const { return false; }
+        virtual VectorParameterJet parameterJet(Vec3d) const {
+            throw std::runtime_error("parameter field has no analytic gradient");
+        }
         virtual float maxVal() const {
             std::cout << "maxVal() not implemented!\n";
             return 0.f;
@@ -482,6 +494,15 @@ namespace Tungsten {
         Vec3d _v;
     public:
         ConstantVector(Vec3d v = Vec3d(0.)) : _v(v) { }
+        bool parameterBounds(VectorParameterBounds &b) const override {
+            for (int i = 0; i < 3; ++i) b[i] = {_v[i], _v[i], 0.0};
+            return true;
+        }
+        VectorParameterJet parameterJet(Vec3d) const override {
+            VectorParameterJet j;
+            for (int i = 0; i < 3; ++i) j[i] = {_v[i], Vec3d(0.0)};
+            return j;
+        }
         virtual Vec3d operator()(Vec3d p) const override {
             return _v;
         }
@@ -670,6 +691,8 @@ namespace Tungsten {
 
     public:
         ProceduralNoise() {}
+        bool parameterBounds(ParameterBounds &b) const override;
+        ParameterJet parameterJet(Vec3d p) const override;
 
         virtual rapidjson::Value toJson(Allocator& allocator) const override {
             return JsonObject{ ProceduralScalar::toJson(allocator), allocator,
@@ -759,6 +782,8 @@ namespace Tungsten {
 
     public:
         ProceduralNoiseVec() {}
+        bool parameterBounds(VectorParameterBounds &b) const override;
+        VectorParameterJet parameterJet(Vec3d p) const override;
 
         virtual rapidjson::Value toJson(Allocator& allocator) const override {
             return JsonObject{ ProceduralVector::toJson(allocator), allocator,
@@ -2323,6 +2348,7 @@ namespace Tungsten {
         virtual Eigen::Matrix3f localToWorldInvTransposeMatrix(const Vec3f& p) const override;
 
         virtual bool useMultiResolutionGrid() const { return _multiResolutionGrid; }
+        const std::shared_ptr<StationaryCovariance> &stationaryCovariance() const { return _stationaryCov; }
 
     protected:
         std::shared_ptr<StationaryCovariance> _stationaryCov;
@@ -2458,6 +2484,8 @@ namespace Tungsten {
             if (_anisoField) return true;
             return false;
         }
+        const std::shared_ptr<ProceduralScalar> &amplitudeField() const { return _variance; }
+        const std::shared_ptr<ProceduralVector> &lengthScaleField() const { return _ls; }
     private:
         virtual std::tuple<Eigen::MatrixXd, double> computeAnisoFactor(Vec3d a, Vec3d b) const override;
         virtual FloatD cov(Vec3Diff a, Vec3Diff b) const override;

@@ -273,6 +273,15 @@ if (TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS)
     add_executable(classic_global_test tests/ClassicGlobalTest.cpp)
     target_link_libraries(classic_global_test PRIVATE ${core_libs})
     add_test(NAME classic_global COMMAND classic_global_test "${CMAKE_CURRENT_BINARY_DIR}/classic-global-test")
+    add_executable(classic_global_nonstationary_test tests/ClassicGlobalNonstationaryTest.cpp)
+    target_link_libraries(classic_global_nonstationary_test PRIVATE ${core_libs})
+    add_test(NAME classic_global_nonstationary COMMAND classic_global_nonstationary_test)
+    add_test(NAME classic_global_nonstationary_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:classic_global_nonstationary_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global/shaderball-nonstationary.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/classic-global-nonstationary-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalNonstationaryRenderSmoke.cmake")
     add_test(NAME classic_global_render COMMAND ${CMAKE_COMMAND}
         "-DRENDERER=$<TARGET_FILE:tungsten>"
         "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global/scene.json"

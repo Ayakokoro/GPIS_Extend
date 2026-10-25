@@ -10,7 +10,7 @@ majorant 网格，不依赖相邻的 macrofacet 工程。当前接入 CPU `path_
 
 ```powershell
 cmake -S . -B build -DTUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS=ON
-cmake --build build --config Release --target tungsten classic_global_test --parallel 4
+cmake --build build --config Release --target tungsten classic_global_test classic_global_nonstationary_test --parallel 4
 ctest --test-dir build -C Release -R "^classic_global" --output-on-failure
 .\build\Release\tungsten.exe -t 4 --spp 32 -d build/classic-global-image data/example-scenes/classic-global/scene.json
 ```
@@ -48,6 +48,106 @@ Gaussian VNDF、消光和自由程模型保持 classic_global 的定义，直接
 ```
 
 原文件保持不变；新配置的 PNG/EXR 文件名也独立于原场景。
+
+## shaderball 的非平稳 cov / var / ls
+
+可直接运行的配置是 `data/example-scenes/classic-global/shaderball-nonstationary.json`。
+工作区另提供同内容的 `gpis-scenes/shaderball/shaderball-nonstationary-classic-global.json`；
+`gpis-scenes` 被仓库忽略，因此可追踪的示例保存在 `data/example-scenes`。
+它保留 shaderball 的 knob SDF、相机、灯光和绿色 mirror 材质，默认 256×256、32 spp。
+covariance 块与 `statue-sparse-conv-ensemble.json` 的第一组 GP 完全相同：
+
+```json
+"covariance": {
+  "type": "proc_nonstationary",
+  "multiResolutionGrid": true,
+  "cov": {"type": "squared_exponential", "sigma": 1, "lengthScale": 1},
+  "var": {"type": "noise", "noise": "bottom_top",
+          "min": 0.05, "max": 0.0016, "start": 0, "end": 0.6},
+  "ls": {"type": "noise", "noise": "bottom_top",
+         "min": 0.1, "max": 0.032, "start": 0, "end": 0.6}
+}
+```
+
+```powershell
+.\build\Release\tungsten.exe -t 4 -d outputs/shaderball_nonstationary_classic_global data/example-scenes/classic-global/shaderball-nonstationary.json
+```
+
+`var` 是振幅乘子 `a(x)`，不是方差本身：`sigma(x) = cov.sigma * a(x)`。
+`ls` 是基础长度尺度的乘子，可以是三个轴的正值。当前支持：
+
+- `cov`：各向同性 `squared_exponential`，具有正场方差与正 `lengthScale`。
+- `var`：`constant`（如 `{"type":"constant","val":0.02}`），或
+  `noise` 的 `bottom_top` / `left_right` / `front_back`。
+- `ls`：`constant`（如 `{"type":"constant","val":[0.05,0.08,0.1]}`），或上述轴向 `noise`；
+  noise 的标量结果广播到三轴。省略 `var` 或 `ls` 时对应乘子为 1。
+
+沿用 GPIS 的渐变定义：`f(t)=exp((1-t)log(min+1)+t log(max+1))-1`，
+`t=clamp((x_axis-start)/(end-start),0,1)`；`min` 和 `max` 是两端的值，允许递减。
+参数在世界坐标查询，不随 mean 的物体变换移动。示例在 `y<=0`、`y>=0.6` 各自保持端点值。
+区间内部使用解析导数；clamp 外导数为零，端点折面采用外侧零导数约定。
+整个参数场必须严格为正；零振幅、零长度尺度、无穷值或无效渐变区间会在准备阶段报错。
+首版不支持额外的 `aniso` 字段、`rust` / `sandstone` / 双轴乘积噪声、网格参数场。
+`multiResolutionGrid` 保留并可往返保存；它是 sparse-convolution 的采样选项，
+classic_global 直接使用解析 covariance 的局部统计，不构建多分辨率噪声网格。
+
+令 `s_k(x)` 为三个长度尺度乘子，`m(x)` 为均值 SDF，`ell0=cov.lengthScale`。
+对 `proc_nonstationary` 的两点核完整求导并条件于 `F(x)=0`，得到：
+
+```text
+sigma = sigma0 * a
+u     = m / sigma
+mu    = (grad m - m * grad log(a)) / sigma
+B     = diag(1 / (ell0² * s_k²)) + 0.5 * sum_k [grad log(s_k) grad log(s_k)^T]
+G | F=0 = sigma * Z,     Z ~ Normal(mu, B)
+sigmaT(x,w) = phi(u) / Phi(u) * E[max(-w.Z, 0)]
+```
+
+标量 `ls=s` 广播时，额外协方差项为 `1.5 * grad log(s) grad log(s)^T`。
+振幅导数改变条件梯度均值，长度尺度导数改变条件梯度协方差；二者都进入消光与 VNDF。
+镜面/导体的 `eval`、`pdf`、`sample` 使用同一局部高斯，Lambert 的 NEE 与 continuation
+共享碰撞时抽取的可见法线。现有 GP covariance 的 AD 路径会冻结程序化参数，
+因此此处直接使用参数场的解析导数，不调用该冻结参数的混合导数。
+常量 `var`、`ls` 会退化到对应的 stationary 结果。
+
+上界先采用保守解析值。shaderball 配置 `sdf_lipschitz=1.1`、`gradient_bound=2.0`。
+每段用 Lipschitz 常数得到 `[m_lo,m_hi]`；参数场提供全局值域和全局梯度范数上界。
+振幅值域再与段中点的 Lipschitz 球相交，避免每小段都混用整个渐变的两个端点。
+若所得范围为 `[a_min,a_max]`，全局参数梯度界为 `A`、`S_k`，则：
+
+```text
+sigma_min = sigma0 * a_min; sigma_max = sigma0 * a_max
+u_min = m_lo / (m_lo >= 0 ? sigma_max : sigma_min)
+M = (gradient_bound + max(abs(m_lo),abs(m_hi))*A/a_min) / sigma_min
+V = max_k 1/(ell0²*s_k,min²) + 0.5*sum_k (S_k/s_k,min)²
+majorant = phi(u_min)/Phi(u_min) * E[max(-X,0)] * (1+1e-5), X ~ Normal(-M,V)
+```
+
+`V` 使用全局尺度下界，每段的 majorant 为常数。delta tracking 和 ratio tracking
+共用该上界；不烘焙网格，不用抽样最大值代替上界，违反上界时仍报错。
+这版优先保证保守性；极小 `var` 或 `ls` 会增加 tracking 成本。
+
+`classic_global_nonstationary` 测试通过原始两点 covariance 的有限差分独立核对条件统计，
+并覆盖参数导数、常量退化、JSON 往返、上界、有限射线生存概率与 ratio tracking、
+VNDF/PDF 归一化及 Lambert 共享法线。`classic_global_nonstationary_render` 使用该 shaderball
+场景做 64×64、2 spp 渲染，检查内部异常以及 EXR 像素有限、非负且非全黑。
+
+与当前 GPIS 渲染器的对照配置为 `data/example-scenes/classic-global/shaderball-nonstationary-gpis.json`。
+使用 3D global ensemble（`single_realization=false`、`1D_sampling=false`），
+mean、covariance、绿色镜面材质及其余场景元素与 classic_global 相同。
+以下工作流统一随机种子、分辨率和 spp，并记录线性 HDR、半样本噪声及步长敏感性：
+
+```powershell
+python -B tools/surface_compare/nonstationary_shaderball.py render --stage final
+python -B tools/surface_compare/nonstationary_shaderball.py render --stage step_base --size 64 --spp 64 --modes sparse_3d_global
+python -B tools/surface_compare/nonstationary_shaderball.py render --stage step_half --size 64 --spp 64 --step .005 --modes sparse_3d_global
+& C:/Users/user/miniconda3/envs/gaussian_splatting/python.exe -B tools/surface_compare/nonstationary_shaderball.py report
+```
+
+报告位于 `outputs/shaderball_nonstationary_compare/comparison.html`。出图使用现有
+`figures.py` 的 Matplotlib/Pillow 环境。32 spp 图用于外观比较，不代表收敛真值。
+GPIS 的多分辨率稀疏卷积近似与当前省略参数导数的法线求值也会影响图像，
+因此相同 cov/var/ls 配置下的差异不能全部归因于路径历史相关性。
 
 ## 使用已有 VDB SDF
 
@@ -185,9 +285,10 @@ sigmaT(x,w)= rho(x) * A(x,w)
   额外内存与 SDF 包围盒中的体素数成正比，目前尚未优化为稀疏访问。
 - 其他均值需显式提供 `sdf_lipschitz` 和 `gradient_bound`（世界坐标单位），
   分别约束均值变化和实际梯度求值器。不能直接假定变换后的 SDF 梯度长度为 1。
-- 协方差必须平稳、可微，且得到有限正场方差与正定梯度协方差。
-  已验证 squared-exponential；允许满足上述条件的其他核。
-  不支持 `conditioning_data`、`embed_cov`、非平稳核、退化梯度分布或 `volume: true`。
+- 平稳协方差必须可微，且得到有限正场方差与正定梯度协方差。
+  已验证 squared-exponential；允许满足上述条件的其他平稳核。
+  非平稳协方差支持上文列出的 `proc_nonstationary` cov/var/ls 配置。
+  不支持 `conditioning_data`、`embed_cov`、其他非平稳核、退化梯度分布或 `volume: true`。
 - 必须有有限介质边界；到无限环境的射线需要先经过包围盒出口。
   VDB 超出采样域沿用已有 Grid 的 clamp 语义，介质的空间范围由包围盒确定。
 - 当前不提供边缘化的自由程 PDF、BDPT/MLT 路径反演或 CUDA kernel。
