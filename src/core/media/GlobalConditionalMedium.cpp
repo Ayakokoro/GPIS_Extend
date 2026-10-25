@@ -5,6 +5,7 @@
 #include "math/conditional/transport/DirectionalGradient.h"
 #include "math/ConditionalProfile.hpp"
 #include "io/JsonObject.hpp"
+#include "phasefunctions/ObservedNormalScattering.hpp"
 #include <iostream>
 
 namespace Tungsten {
@@ -69,6 +70,7 @@ class ConditionalPhase : public PhaseFunction {
 public:
     explicit ConditionalPhase(const GlobalConditionalMedium &m):_medium(m) {}
     float pdf(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
+        if(_medium.hasDiffuseMicroMaterial()) return observedCosinePdf(wo,s);
         cg::Profile::Scope profile(cg::Profile::Stage::PhasePdf,cg::Profile::Domain::Phase);
         const auto &e=event(s);
         try {
@@ -81,6 +83,7 @@ public:
         }
     }
     Vec3f eval(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
+        if(_medium.hasDiffuseMicroMaterial()) return _medium.reflectance(1)*pdf(wi,wo,s);
         cg::Profile::Scope profile(cg::Profile::Stage::PhaseEval,cg::Profile::Domain::Phase);
         const Eigen::Vector3d h=eigen(wo).normalized()-eigen(wi).normalized();
         if(h.squaredNorm()==0) return Vec3f(0.0f);
@@ -92,6 +95,10 @@ public:
         const auto &e=event(s);
         const Vec3f value=eval(wi,wo,s);
         if(value==0.0f) return value;
+        if(_medium.hasDiffuseMicroMaterial()) {
+            state=successor(e,eigen(s.aniso),wo,s.p);
+            return value;
+        }
         const Eigen::Vector3d h=(eigen(wo).normalized()-eigen(wi).normalized()).normalized();
         cg::Random rng(sampler);
         const Eigen::Vector3d g=cg::sampleDirectionalGradient(e.gradient,h,rng);
@@ -101,6 +108,13 @@ public:
     bool sample(PathSampleGenerator &sampler,const Vec3f &wi,const MediumSample &s,PhaseSample &r) const override {
         cg::Profile::Scope profile(cg::Profile::Stage::PhaseSample,cg::Profile::Domain::Phase);
         const auto &e=event(s); cg::Random rng(sampler);
+        if(_medium.hasDiffuseMicroMaterial()) {
+            r.w=sampleObservedCosine(sampler,s);
+            r.pdf=pdf(wi,r.w,s);
+            r.weight=_medium.reflectance(1);
+            r.pathContext=successor(e,eigen(s.aniso),r.w,s.p);
+            return r.pdf>0 && eigen(r.w).dot(eigen(s.aniso))>0;
+        }
         const Eigen::Vector3d w=eigen(wi).normalized();
         const Eigen::Vector3d g=cg::sampleFluxWeightedGradient(e.gradient,w,rng);
         const Eigen::Vector3d n=g.normalized();
@@ -223,10 +237,18 @@ try
         // A geometry hit is an exterior GP point, not a zero crossing. Renew
         // before surface NEE and BSDF continuation copy this observation.
         next->birth=segment.samplePositiveEndpoint(rng);
+        // The segment normalizes its direction. Recomputing this endpoint
+        // separately can differ by an ulp, especially after cancellation near
+        // the world origin, and falsely look like a turn without renewal.
+        next->position=next->birth.birthPosition;
     } else {
         auto e=std::make_shared<ConditionalEventContext>();
         e->owner=this; e->position=p; e->gradient=segment.gradient(t);
         sample.eventContext=e;
+        if(hasDiffuseMicroMaterial()) {
+            const auto g=cg::sampleFluxWeightedGradient(e->gradient,w,rng);
+            sample.aniso=Vec3d(g.x(),g.y(),g.z());
+        }
         state.advance();
     }
     state.pathContext=next;
@@ -254,7 +276,10 @@ try
     next->position=c->position+double(ray.farT())*speed*w; next->rayOrigin=ray.hitpoint();
     // Shadow traversal uses the same endpoint renewal as distance sampling,
     // including forward surfaces inside the same medium.
-    if(tr>0) next->birth=segment.samplePositiveEndpoint(rng);
+    if(tr>0) {
+        next->birth=segment.samplePositiveEndpoint(rng);
+        next->position=next->birth.birthPosition;
+    }
     state->pathContext=next;
     return Vec3f(float(tr));
 } catch(const cg::NumericError &error) {

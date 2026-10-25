@@ -24,6 +24,7 @@ if (TUNGSTEN_BUILD_NEURAL_RENEWAL_TESTS)
     enable_testing()
     add_executable(neural_renewal_test tests/NeuralRenewalTest.cpp)
     target_link_libraries(neural_renewal_test PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    add_test(NAME neural_renewal_scattering COMMAND neural_renewal_test --scattering)
     add_test(NAME neural_renewal COMMAND neural_renewal_test
         "${TUNGSTEN_NEURAL_RENEWAL_TEST_MODEL}"
         "${TUNGSTEN_NEURAL_RENEWAL_TEST_FIELD}")

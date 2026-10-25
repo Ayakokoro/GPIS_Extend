@@ -285,6 +285,59 @@ void requireQueries(SdfFunctions::Function fn) {
     if(!SdfFunctions::supportsQueries(fn))
         throw std::invalid_argument("procedural SDF does not provide certified differential queries");
 }
+
+// Signed distance inside an upward-open U channel, extruded along Z.
+// The unit semicircle at y <= 0 joins x = +/-1 with a continuous normal.
+// Only the empty-space medial axis (x = 0, y >= 0) is nondifferentiable.
+SdfJet roundedUJet(const V &p) {
+    const V q(p.x(),std::min(p.y(),0.0),0);
+    const double r=q.norm();
+    return {1-r,r>0 ? (-q/r).eval() : V::Zero().eval()};
+}
+double roundedUDifference(const V &p,const V &d) {
+    const double y=std::min(p.y(),0.0);
+    const double dy=p.y()<=0 && p.y()+d.y()<=0 ? d.y() : std::min(p.y()+d.y(),0.0)-y;
+    const V q(p.x(),y,0),delta(d.x(),dy,0);
+    const double denominator=q.norm()+(q+delta).norm();
+    return denominator>0 ? -(2*q.dot(delta)+delta.squaredNorm())/denominator : 0;
+}
+SdfBounds roundedUBounds(const V &lo,const V &hi) {
+    const double xmin=lo.x()>0 ? lo.x() : hi.x()<0 ? -hi.x() : 0;
+    const double xmax=std::max(std::abs(lo.x()),std::abs(hi.x()));
+    const double rmin=std::hypot(xmin,std::max(0.0,-hi.y()));
+    const double rmax=std::hypot(xmax,std::max(0.0,-lo.y()));
+    return {1-rmax-guard(rmax),1-rmin+guard(rmin),1.0,true};
+}
+SdfRayBounds roundedURayBounds(const V &o,const V &w,double lo,double hi,
+                               const SdfRayQueryOptions &options) {
+    const V rayMid=o+(0.5*lo+0.5*hi)*w;
+    const V mid=options.midpoint.value_or(rayMid);
+    const double speed=w.head<2>().norm(),half=0.5*(hi-lo);
+    const double shift=(mid-rayMid).head<2>().norm();
+    const double radius=(half*speed+shift)*(1+1e-12);
+    const auto j=roundedUJet(mid);
+    const double r=std::hypot(mid.x(),std::min(mid.y(),0.0));
+    const double lower=r-radius-guard(r);
+    double curvature=lower>0 ? (1+1e-12)/lower : infinity;
+    // Either vertical wall has a constant gradient, even for long flights.
+    if(mid.y()-radius>=0 && std::abs(mid.x())>radius+guard(mid.x())) curvature=0;
+    const double derivative=j.gradient.dot(w);
+    SdfRayBounds b;
+    b.minimumValue=j.value-radius-guard(j.value);
+    b.maximumValue=j.value+radius+guard(j.value);
+    b.minimumDerivative=-speed-guard(speed);
+    b.maximumDerivative=speed+guard(speed);
+    if(std::isfinite(curvature)) {
+        const double error=curvature*radius*speed+guard(derivative);
+        b.minimumDerivative=std::max(b.minimumDerivative,derivative-error);
+        b.maximumDerivative=std::min(b.maximumDerivative,derivative+error);
+    }
+    b.maximumSecondDerivative=speed==0 ? 0 : curvature*speed*speed;
+    if(options.computeBeginDerivative) b.beginDerivative=roundedUJet(o+lo*w).gradient.dot(w);
+    b.midpointValue=j.value; b.midpointError=guard(std::abs(j.value)+mid.norm());
+    b.certified=true;
+    return b;
+}
 }
 
 float SdfFunctions::knob(Vec3f p,int &) {
@@ -296,16 +349,21 @@ float SdfFunctions::knob_inner(Vec3f p,int &) {
 float SdfFunctions::knob_outer(Vec3f p,int &) {
     return float(knobGeometry(P<double>{p.x(),p.y(),p.z()},Function::KnobOuter));
 }
-bool SdfFunctions::supportsQueries(Function fn) { return fn==Function::Knob; }
+float SdfFunctions::rounded_u_groove(Vec3f p,int &) {
+    return float(roundedUJet(V(p.x(),p.y(),p.z())).value);
+}
+bool SdfFunctions::supportsQueries(Function fn) { return fn==Function::Knob || fn==Function::RoundedUGroove; }
 SdfJet SdfFunctions::evaluateJet(Function fn,const V &x) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfJet);
     requireQueries(fn);
+    if(fn==Function::RoundedUGroove) return roundedUJet(x);
     const auto q=queryPoint(x);
     return {q.value,q.gradient};
 }
 double SdfFunctions::valueDifference(Function fn,const V &x,const V &d) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfDifference);
     requireQueries(fn);
+    if(fn==Function::RoundedUGroove) return roundedUDifference(x,d);
     P<Difference> inputs;
     for(int i=0;i<3;++i) { inputs[i]=Difference(x[i]); inputs[i].delta=d[i]; }
     return knobGeometry(inputs).delta;
@@ -313,6 +371,7 @@ double SdfFunctions::valueDifference(Function fn,const V &x,const V &d) {
 SdfBounds SdfFunctions::bounds(Function fn,const V &lo,const V &hi) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfBounds);
     requireQueries(fn);
+    if(fn==Function::RoundedUGroove) return roundedUBounds(lo,hi);
     const auto q=query(0.5*lo+0.5*hi,0.5*(hi-lo).norm()*(1+1e-12));
     return {q.value-q.error(),q.value+q.error(),q.lip*(1+1e-12),true};
 }
@@ -320,6 +379,7 @@ SdfRayBounds SdfFunctions::rayBounds(Function fn,const V &o,const V &w,double lo
                                     const SdfRayQueryOptions &options) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfRayBounds);
     requireQueries(fn);
+    if(fn==Function::RoundedUGroove) return roundedURayBounds(o,w,lo,hi,options);
     const V rayMidpoint=o+(0.5*lo+0.5*hi)*w;
     const V midpoint=options.midpoint.value_or(rayMidpoint);
     // A transformed midpoint can differ from a reconstructed local-ray

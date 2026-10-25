@@ -50,6 +50,7 @@ public:
     double fieldSigma() const { return _sigma; }
     const ClassicGlobal::GaussianNdf &ndf() const { return *_ndf; }
     Vec3f reflectance(double cosine) const;
+    bool hasDiffuseMicroMaterial() const { return _materialType == "lambert"; }
 };
 }
 #endif

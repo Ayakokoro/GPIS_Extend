@@ -21,11 +21,15 @@ creases), not an unbiased solution of sharp-edge scattering.
 The input is a directly evaluated procedural/analytic SDF or an existing SDF
 grid. Extinction, conditional covariance and tracking bounds are evaluated
 online. Supported means are homogeneous, linear (including its clamp),
-spherical, procedural `func: "knob"`, and linearly interpolated VDB SDFs. Covariance must be a
+spherical, procedural `func: "knob"` or `"rounded_u_groove"`, and linearly interpolated VDB SDFs. Covariance must be a
 stationary squared exponential; its full positive definite world-space metric is
 obtained from the covariance derivatives. Procedural means without certified
 SDF queries and nonstationary kernels are rejected. Materials reuse
-classic_global's tinted mirror and conductor Fresnel implementations.
+classic_global's tinted mirror, conductor Fresnel, and Lambert micro-reflection implementations.
+For Lambert reflection, the full flux-weighted gradient is drawn with the collision.
+NEE and cosine-hemisphere continuation keep that same gradient observation and
+use the conditional cosine PDF for MIS. Mirror/conductor scattering retains its
+existing marginalized Gaussian VNDF evaluation and directional-gradient sampling.
 
 The shaderball preset is
 `gpis-scenes/shaderball/shaderball-stationary-27-global-conditional.json`.

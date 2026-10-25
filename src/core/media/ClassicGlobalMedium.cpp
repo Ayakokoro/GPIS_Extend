@@ -3,6 +3,7 @@
 #include "GpisSdfGrid.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
+#include "phasefunctions/ObservedNormalScattering.hpp"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -19,11 +20,13 @@ public:
     explicit ClassicGlobalPhase(const ClassicGlobalMedium &medium) : _medium(medium) {}
     float pdf(const Vec3f &wi, const Vec3f &wo, const MediumSample &s) const override
     {
+        if(_medium.hasDiffuseMicroMaterial()) return observedCosinePdf(wo,s);
         return float(_medium.ndf().phasePdf(eigen(_medium.meanGradient(Vec3d(s.p))),
                        eigen(Vec3d(wi)).normalized(), eigen(Vec3d(wo)).normalized()));
     }
     Vec3f eval(const Vec3f &wi, const Vec3f &wo, const MediumSample &s) const override
     {
+        if(_medium.hasDiffuseMicroMaterial()) return _medium.reflectance(1)*pdf(wi,wo,s);
         const Eigen::Vector3d a = eigen(Vec3d(wi)).normalized();
         const Eigen::Vector3d b = eigen(Vec3d(wo)).normalized();
         if ((b - a).squaredNorm() == 0.0) return Vec3f(0.0f);
@@ -32,6 +35,12 @@ public:
     bool sample(PathSampleGenerator &sampler, const Vec3f &wi,
                 const MediumSample &s, PhaseSample &result) const override
     {
+        if(_medium.hasDiffuseMicroMaterial()) {
+            result.w=sampleObservedCosine(sampler,s);
+            result.pdf=pdf(wi,result.w,s);
+            result.weight=_medium.reflectance(1);
+            return result.pdf>0;
+        }
         const Eigen::Vector3d w = eigen(Vec3d(wi)).normalized();
         const Eigen::Vector3d n = _medium.ndf().sampleVisibleNormal(
             eigen(_medium.meanGradient(Vec3d(s.p))), w, sampler);
@@ -80,17 +89,17 @@ void ClassicGlobalMedium::fromJson(JsonPtr value, const Scene &scene)
     _covariance = scene.fetchCovarianceFunction(gp.getRequiredMember("covariance"));
     if (auto material = value["material"]) {
         material.getField("type", _materialType);
-        if (_materialType == "mirror") {
+        if (_materialType == "mirror" || _materialType == "lambert") {
             material.getField("albedo", _mirrorAlbedo);
             for (int i = 0; i < 3; ++i)
                 if (!std::isfinite(_mirrorAlbedo[i]) || _mirrorAlbedo[i] < 0.0 || _mirrorAlbedo[i] > 1.0)
-                    material.parseError("classic_global: mirror albedo must be finite and in [0,1]");
+                    material.parseError("classic_global: albedo must be finite and in [0,1]");
         } else if (_materialType == "conductor") {
             material.getField("eta", _eta);
             material.getField("k", _k);
             material.getField("force_unit_fresnel", _forceUnitFresnel);
         } else {
-            material.parseError("classic_global material type must be conductor or mirror");
+            material.parseError("classic_global material type must be conductor, mirror or lambert");
         }
     }
     value.getField("max_bounces", _maxBounce);
@@ -111,7 +120,7 @@ void ClassicGlobalMedium::fromJson(JsonPtr value, const Scene &scene)
 rapidjson::Value ClassicGlobalMedium::toJson(Allocator &allocator) const
 {
     JsonObject material{allocator, "type", _materialType};
-    if (_materialType == "mirror")
+    if (_materialType == "mirror" || _materialType == "lambert")
         material.add("albedo", _mirrorAlbedo);
     else
         material.add("eta", _eta, "k", _k, "force_unit_fresnel", _forceUnitFresnel);
@@ -285,7 +294,12 @@ bool ClassicGlobalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray
     sample.pdf = 1.0f;
     sample.sparseConv1DSamplingScheme = SparseConv1DSamplingScheme::UNI;
     sample.rayInfo = state.info;
-    if (!sample.exited) state.advance();
+    if (!sample.exited) {
+        if(hasDiffuseMicroMaterial())
+            sample.aniso=vec(_ndf->sampleVisibleNormal(eigen(meanGradient(Vec3d(sample.p))),
+                            eigen(Vec3d(ray.dir())).normalized(),sampler));
+        state.advance();
+    }
     return true;
 }
 
@@ -306,9 +320,9 @@ Vec3f ClassicGlobalMedium::sigmaT(Vec3f) const { throw std::runtime_error("class
 
 Vec3f ClassicGlobalMedium::reflectance(double cosine) const
 {
-    // The exact same VNDF is used for both materials. A tinted ideal mirror
-    // returns constant albedo at every angle, matching Tungsten's MirrorBsdf.
-    if (_materialType == "mirror") return Vec3f(_mirrorAlbedo);
+    // Mirror and Lambert micro-materials return constant albedo. Their angular
+    // scattering differs; the conductor retains its angle-dependent Fresnel.
+    if (_materialType == "mirror" || _materialType == "lambert") return Vec3f(_mirrorAlbedo);
     if (_forceUnitFresnel) return Vec3f(1.0f);
     const double c = std::clamp(std::abs(cosine), 0.0, 1.0);
     if (c == 0.0) return Vec3f(1.0f);

@@ -46,6 +46,52 @@ struct Shape {
     double radius = 0.25, gap = 0.02, angle = 90;
     Vec lo{}, hi{};
     std::vector<std::array<double, 2>> polygon;
+    // A smooth meridian is densely sampled once. Distance to its revolved
+    // polyline is a genuine signed distance (not a scaled radial implicit).
+    using Point2 = std::array<double,2>;
+    struct Node { Point2 lo,hi; int begin,end,left=-1,right=-1; };
+    std::vector<Point2> meridian;
+    std::vector<Node> nodes;
+    static double ballRadius(double theta) {
+        return .5-.07*std::exp(-std::pow((theta-1.25)/.16,2))
+                  -.13*std::exp(-std::pow(theta/.28,2));
+    }
+    int buildNode(int begin,int end) {
+        Node n{{1e30,1e30},{-1e30,-1e30},begin,end};
+        for(int i=begin;i<=end;++i) for(int k=0;k<2;++k) {
+            n.lo[k]=std::min(n.lo[k],meridian[i][k]);
+            n.hi[k]=std::max(n.hi[k],meridian[i][k]);
+        }
+        int index=int(nodes.size()); nodes.push_back(n);
+        if(end-begin>8) {
+            const int middle=(begin+end)/2;
+            const int left=buildNode(begin,middle),right=buildNode(middle,end);
+            nodes[index].left=left; nodes[index].right=right;
+        }
+        return index;
+    }
+    double boxDistance(int index,const Point2 &p) const {
+        double d=0;
+        for(int k=0;k<2;++k) {
+            const double v=std::max({nodes[index].lo[k]-p[k],p[k]-nodes[index].hi[k],0.});
+            d+=v*v;
+        }
+        return d;
+    }
+    void nearest(int index,const Point2 &p,double &best) const {
+        const auto &n=nodes[index];
+        if(boxDistance(index,p)>=best) return;
+        if(n.left>=0) {
+            int a=n.left,b=n.right;
+            if(boxDistance(a,p)>boxDistance(b,p)) std::swap(a,b);
+            nearest(a,p,best); nearest(b,p,best);
+        } else for(int i=n.begin;i<n.end;++i) {
+            const auto &a=meridian[i],&b=meridian[i+1];
+            const double x=b[0]-a[0],y=b[1]-a[1];
+            const double t=std::clamp(((p[0]-a[0])*x+(p[1]-a[1])*y)/(x*x+y*y),0.,1.);
+            best=std::min(best,std::pow(p[0]-a[0]-t*x,2)+std::pow(p[1]-a[1]-t*y,2));
+        }
+    }
 
     explicit Shape(const Json& spec) : type(spec.at("shape")) {
         if (type == "two_spheres") {
@@ -64,10 +110,36 @@ struct Shape {
                        {0,-.05}, {-a,.2}, {-.5,.2}};
             lo = {-.5,-.2,-.5};
             hi = { .5, .2, .5};
+        } else if(type=="plane") {
+            const double extent=spec.value("half_extent",1.5);
+            require(std::isfinite(extent) && extent>0,"plane half_extent must be positive");
+            lo={-extent,0,-extent}; hi={extent,0,extent};
+        } else if(type=="rounded_shaderball") {
+            constexpr int segments=2048;
+            for(int i=0;i<=segments;++i) {
+                const double theta=Pi*i/segments,r=ballRadius(theta);
+                meridian.push_back({r*std::sin(theta),r*std::cos(theta)});
+            }
+            meridian.front()[0]=meridian.back()[0]=0;
+            buildNode(0,segments);
+            lo={-.5,-.5,-.5}; hi={.5,.5,.5};
         } else throw std::runtime_error("unknown shape: " + type);
     }
 
     double sdf(const Vec& p) const {
+        if(type=="plane") return p[1];
+        if(type=="rounded_shaderball") {
+            const Point2 q{std::hypot(p[0],p[2]),p[1]};
+            double best=1e30; nearest(0,q,best);
+            const double theta=std::atan2(q[0],q[1]);
+            const double index=theta/Pi*(meridian.size()-1);
+            const int i=std::min(int(index),int(meridian.size())-2);
+            const auto &a=meridian[i],&b=meridian[i+1];
+            const double ux=std::sin(theta),uy=std::cos(theta);
+            const double ex=b[0]-a[0],ey=b[1]-a[1];
+            const double radial=(a[0]*ey-a[1]*ex)/(ux*ey-uy*ex);
+            return (std::hypot(q[0],q[1])<radial?-1.:1.)*std::sqrt(best);
+        }
         if (type == "two_spheres") {
             const double cx = radius + gap / 2;
             const auto sphere = [&](double center) {
@@ -100,7 +172,14 @@ struct Shape {
             require(std::abs(actual - expected) < 1e-12, "analytic geometry probe failed");
             result.push_back({{"position", p}, {"expected", expected}, {"actual", actual}});
         };
-        if (type == "two_spheres") {
+        if(type=="plane") {
+            check({0,0,0},0); check({.3,.02,-.4},.02); check({-.2,-.03,.5},-.03);
+        } else if(type=="rounded_shaderball") {
+            check({0,ballRadius(0),0},0);
+            check({0,-.5,0},0);
+            check({0,-.6,0},.1);
+            for(int i:{200,600,900,1500}) check({meridian[i][0],meridian[i][1],0},0);
+        } else if (type == "two_spheres") {
             check({0,0,0}, gap/2);
             check({radius+gap/2,0,0}, -radius);
             check({-radius-gap/2,0,0}, -radius);
@@ -125,6 +204,9 @@ void bake(const Json& spec, const Json& settings, const fs::path& directory) {
     const double ell = settings.at("length_scale"), pad = settings.at("padding");
     for (double value : {dx, sigma, ell, pad})
         require(std::isfinite(value) && value > 0, "bake settings must be positive and finite");
+    const Vec spacing=settings.value("voxel_spacing",Vec{dx,dx,dx});
+    for(double value:spacing)
+        require(std::isfinite(value) && value>0,"voxel spacing must be positive and finite");
     require(pad >= 4*sigma, "padding must be at least 4 sigma");
     const double alpha = std::sqrt(2.0) * sigma / ell;
     constexpr int halo = 4;
@@ -136,15 +218,16 @@ void bake(const Json& spec, const Json& settings, const fs::path& directory) {
         // VDB's boundary clamp and NanoVDB's domain boundary outside the box.
         boxLo[i] = shape.lo[i] - pad;
         boxHi[i] = shape.hi[i] + pad;
-        origin[i] = boxLo[i] - halo*dx;
-        const double n = std::ceil((boxHi[i]-boxLo[i])/dx) + 2*halo + 1;
+        origin[i] = boxLo[i] - halo*spacing[i];
+        const double n = std::ceil((boxHi[i]-boxLo[i])/spacing[i]) + 2*halo + 1;
         require(n >= 2 && n <= 4096, "invalid grid dimensions; increase voxel_size");
         dims[i] = int(n);
         count *= dims[i];
     }
     require(count <= 250000000, "bake exceeds 250 million nodes; increase voxel_size");
     const openvdb::CoordBBox bbox(openvdb::Coord(0), openvdb::Coord(dims[0]-1,dims[1]-1,dims[2]-1));
-    auto transform = openvdb::math::Transform::createLinearTransform(dx);
+    auto transform = openvdb::math::Transform::createLinearTransform(1.0);
+    transform->postScale(openvdb::Vec3d(spacing[0],spacing[1],spacing[2]));
     transform->postTranslate(openvdb::Vec3d(origin[0],origin[1],origin[2]));
     auto makeGrid = [&](const char* gridName, float background) {
         auto grid = openvdb::FloatGrid::create(background);
@@ -161,7 +244,7 @@ void bake(const Json& spec, const Json& settings, const fs::path& directory) {
     leaves.foreach([&](openvdb::FloatTree::LeafNodeType& leaf, std::size_t) {
         for (auto it = leaf.beginValueOn(); it; ++it) {
             const auto p = it.getCoord();
-            it.setValue(float(shape.sdf({origin[0]+dx*p.x(), origin[1]+dx*p.y(), origin[2]+dx*p.z()})));
+            it.setValue(float(shape.sdf({origin[0]+spacing[0]*p.x(), origin[1]+spacing[1]*p.y(), origin[2]+spacing[2]*p.z()})));
         }
     });
     require(sdf->activeVoxelCount() == count, "SDF is not fully active");
@@ -212,7 +295,7 @@ void bake(const Json& spec, const Json& settings, const fs::path& directory) {
         std::array<int,3> ijk{};
         for (int a=0; a<3; ++a) {
             ijk[a] = std::uniform_int_distribution<int>(0,dims[a]-1)(rng);
-            world[a] = origin[a] + dx*ijk[a];
+            world[a] = origin[a] + spacing[a]*ijk[a];
         }
         const openvdb::Coord o(ijk[0],ijk[1],ijk[2]);
         const nanovdb::Coord c(ijk[0],ijk[1],ijk[2]);
@@ -232,9 +315,10 @@ void bake(const Json& spec, const Json& settings, const fs::path& directory) {
     const auto* ng = handles[0].grid<float>();
     const double sdfMin = ng->tree().root().minimum(), sdfMax = ng->tree().root().maximum();
     const double gradientBound = std::sqrt(3.0)*(1+4*std::numeric_limits<float>::epsilon()*
-                                       std::max(std::abs(sdfMin),std::abs(sdfMax))/dx);
+                         std::max(std::abs(sdfMin),std::abs(sdfMax))/
+                         std::min({spacing[0],spacing[1],spacing[2]}));
     Json metadata = {
-        {"version",2}, {"sigma",sigma}, {"alpha",alpha}, {"dx",dx}, {"origin",origin},
+        {"version",2}, {"sigma",sigma}, {"alpha",alpha}, {"dx",dx}, {"voxel_spacing",spacing}, {"origin",origin},
         {"coverage","full_domain"}, {"sign_mode","analytic"},
         {"grids",{"sdf","density","alpha","sigma"}}, {"voxels",dims}, {"resolution",dims},
         {"mesh",name}, {"band",pad/sigma},
@@ -249,8 +333,12 @@ void bake(const Json& spec, const Json& settings, const fs::path& directory) {
         {"verification",{{"saved_node_checks",4096},{"analytic_max_float_error",maxError},
                           {"sdf_formats_identical",true},{"density_verified",true},
                           {"analytic_probes",shape.probes()}}},
-        {"note","Exact analytic SDF at nodes; trilinear between nodes. Bounds apply inside the full grid."
-                " Both spheres share one field; V groove is a finite extruded closed polygon."}
+        {"note",shape.type=="plane"
+            ? "Mean is y everywhere, not a finite solid slab. The process box truncates the stochastic half-space. Tangential coarsening is exact for this mean and density; only normal density interpolation needs refinement."
+            : shape.type=="rounded_shaderball"
+            ? "Signed distance at nodes; trilinear between nodes. Rounded shaderball uses a 2048-segment smooth meridian approximation. Both formats contain identical SDF samples."
+            : "Exact analytic SDF at nodes; trilinear between nodes. Bounds apply inside the full grid."
+              " Both spheres share one field; V groove is a finite extruded closed polygon."}
     };
     writeJson(nvdbPath.string()+".json", metadata);
     std::cout << name << ": verified and saved " << nvdbPath.string() << std::endl;

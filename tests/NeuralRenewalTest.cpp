@@ -16,7 +16,7 @@ namespace {
 using V=ConditionalGpis::Vector3;
 V eigen(const Vec3f &v) { return V(v.x(),v.y(),v.z()); }
 void require(bool condition,const char *message) { if (!condition) throw std::runtime_error(message); }
-void near(double a,double b,double tolerance,const char *message) {
+void checkNear(double a,double b,double tolerance,const char *message) {
     if (!(std::abs(a-b)<=tolerance)) {
         std::cerr<<message<<": "<<a<<" vs "<<b<<"\n"; throw std::runtime_error(message);
     }
@@ -35,13 +35,15 @@ void checkImage(const char *file, bool furnace) {
         sum+=data[i]; minimum=std::min(minimum,double(data[i])); maximum=std::max(maximum,double(data[i]));
     }
     require(maximum>0,"rendered image must not be black");
-    if (furnace) near(sum/(width*height*3),1,0.025,"white furnace energy");
+    if (furnace) checkNear(sum/(width*height*3),1,0.025,"white furnace energy");
     std::cout<<"image "<<file<<": mean "<<sum/(width*height*3)<<", range ["
         <<minimum<<", "<<maximum<<"]\n";
 }
 }
+#include "NeuralScatteringChecks.hpp"
 int main(int argc,char **argv) {
     try {
+        if (argc==2 && std::string(argv[1])=="--scattering") { scatteringChecks(); return 0; }
         require(argc==3,"usage: neural_renewal_test model.json field.nvdb");
         if (std::string(argv[1])=="--image" || std::string(argv[1])=="--furnace") {
             checkImage(argv[2],std::string(argv[1])=="--furnace"); return 0;
@@ -93,7 +95,7 @@ int main(int argc,char **argv) {
         const auto interval=model.sampleInterval(flight->mean,flight->start,
             {std::exp(-optical),0.3,0.7},beginQ,endQ);
         require(interval.hit,"conditional interval event");
-        near(interval.q,targetQ,2e-6,"bounded inverse matches conditional cumulative hazard");
+        checkNear(interval.q,targetQ,2e-6,"bounded inverse matches conditional cumulative hazard");
         require(!model.sampleInterval(flight->mean,flight->start,{0.5,0.3,0.7},beginQ,beginQ).hit,
             "empty interval exits");
         bool rejected=false;
@@ -112,25 +114,47 @@ int main(int argc,char **argv) {
             require(actual.exited==!expected.hit,"adapter/reference event parity");
             if (!expected.hit) continue;
             ++hits;
-            near(actual.t,(domain.entry+expected.distance)/eigen(direction).norm(),3e-6,"adapter world distance");
+            checkNear(actual.t,(domain.entry+expected.distance)/eigen(direction).norm(),3e-6,"adapter world distance");
             require((eigen(actual.p)-expected.position).norm()<2e-6,"adapter hit position");
-            require((V(actual.aniso.x(),actual.aniso.y(),actual.aniso.z())-expected.gradient).norm()<1e-8,
-                "adapter/reference full gradient parity");
+            const auto &part=flight->mean.segments().at(expected.segment);
+            const V interior=flight->ray.origin+(0.5*(part.begin+part.end)*flight->ell)*flight->ray.direction;
+            const NeuralGpis::RenewalGradientDistribution distribution(field.kernel,w,expected.distance/flight->ell,
+                -flight->sigma/flight->ell*expected.speed,mean->evaluateInCell(expected.position,interior).gradient,
+                flight->birthMeanGradient,flight->birthGradient);
+            ConditionalGpis::Random phaseRng(reference);
+            const V expectedGradient=distribution.sample(phaseRng);
             PhaseSample phase;
             require(actual.phase->sample(sampler,direction,actual,phase),"sampled conductor reflection");
-            near(phase.weight.x(),1,0,"unit Fresnel energy");
+            require(!actual.phase->isSpecular(),"neural collision exposes its continuous transverse phase");
+            const V reflected=ConditionalGpis::reflectTravelDirection(w,expectedGradient.normalized());
+            require((eigen(phase.w)-reflected).norm()<2e-6,"adapter/reference conditional gradient sampling");
+            checkNear(phase.pdf,actual.phase->pdf(direction,phase.w,actual),1e-4*std::max(1.f,phase.pdf),
+                "sample/evaluation PDF agreement within float direction precision");
+            require(phase.pdf>0,"continuous neural direction PDF");
+            checkNear(phase.weight.x(),1,0,"unit Fresnel energy");
             require(bool(phase.pathContext),"B birth context is returned");
             state.pathContext=phase.pathContext;
             const Ray outgoing(actual.p,phase.w,0.01f,0.3f);
-            const auto bFlight=medium.beginFlight({expected.position,eigen(phase.w).normalized()},expected.gradient);
+            const auto bFlight=medium.beginFlight({expected.position,eigen(phase.w).normalized()},expectedGradient);
             require(bool(bFlight),"B reference flight");
             const double expectedT=medium.transmittance(*bFlight,double(outgoing.farT())*eigen(phase.w).norm());
             Medium::MediumState branch=state;
-            near(adapter->transmittance(sampler,outgoing,false,true,&branch).x(),expectedT,2e-6,
+            checkNear(adapter->transmittance(sampler,outgoing,false,true,&branch).x(),expectedT,2e-6,
                 "B transmittance retains full gradient and includes geometry nearT gap");
             require(state.pathContext==phase.pathContext,"shadow query leaves parent context unchanged");
+            auto connection=state;
+            const Vec3f value=actual.phase->evalConnection(sampler,direction,phase.w,actual,connection.pathContext);
+            checkNear(value.x(),actual.phase->pdf(direction,phase.w,actual),0,
+                "unit Fresnel NEE equals the continuous phase PDF");
+            require(connection.pathContext!=state.pathContext,"NEE constructs its own gradient observation");
+            const auto connectionGradient=distribution.gradientForDirection(eigen(phase.w));
+            const auto connectionFlight=medium.beginFlight({expected.position,eigen(phase.w).normalized()},*connectionGradient);
+            const double connectionT=medium.transmittance(*connectionFlight,double(outgoing.farT())*eigen(phase.w).norm());
+            checkNear(adapter->transmittance(sampler,outgoing,false,true,&connection).x(),connectionT,2e-6,
+                "NEE shadow uses the direction-conditioned full gradient");
+            require(state.pathContext==phase.pathContext,"NEE leaves continuation observation unchanged");
             const Ray inward(actual.p,-phase.w,0.f,0.1f);
-            near(adapter->transmittance(sampler,inward,false,true,&state).x(),0,0,"inward B visibility is zero");
+            checkNear(adapter->transmittance(sampler,inward,false,true,&state).x(),0,0,"inward B visibility is zero");
         }
         require(hits>0,"collision coverage");
         const float endT=float((domain.entry+endQ*flight->ell)/eigen(direction).norm());
@@ -141,8 +165,8 @@ int main(int argc,char **argv) {
         const double front=adapter->transmittance(sampler,first,false,true,&split).x();
         const Ray tail(first.hitpoint(),direction,0.f,endT-splitT);
         const double back=adapter->transmittance(sampler,tail,true,true,&split).x();
-        near(front*back,full,3e-6,"forward geometry preserves conditional survival");
-        near(full,0.5,2e-5,"median visibility");
+        checkNear(front*back,full,3e-6,"forward geometry preserves conditional survival");
+        checkNear(full,0.5,2e-5,"median visibility");
         rapidjson::Document serialized; auto value=adapter->toJson(serialized.GetAllocator());
         rapidjson::StringBuffer buffer; rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
         value.Accept(writer);
@@ -150,7 +174,7 @@ int main(int argc,char **argv) {
         require(!roundTripSpec["field"].contains("sigma") && !roundTripSpec["material"].contains("roughness"),
             "serialization contains only explicit stationary covariance settings");
         auto roundTrip=parseMedium(roundTripSpec); roundTrip->loadResources(); roundTrip->prepareForRender();
-        near(roundTrip->transmittance(sampler,wholeRay,false,true,nullptr).x(),full,0,"covariance JSON round trip");
+        checkNear(roundTrip->transmittance(sampler,wholeRay,false,true,nullptr).x(),full,0,"covariance JSON round trip");
         for (int parameter=0;parameter<2;++parameter) {
             const double s=parameter==0 ? 0.08 : sigma, ell=parameter==1 ? 0.07 : lengthScale;
             auto changed=spec; changed["covariance"]["sigma"]=s; changed["covariance"]["lengthScale"]=ell;
@@ -163,7 +187,7 @@ int main(int argc,char **argv) {
             const double expected=configuredReference.transmittance(*configuredFlight,
                 double(endT)*eigen(direction).norm()-domain.entry);
             const double actual=configured->transmittance(sampler,wholeRay,false,true,nullptr).x();
-            near(actual,expected,2e-6,"manual sigma/lengthScale agrees with independent transport");
+            checkNear(actual,expected,2e-6,"manual sigma/lengthScale agrees with independent transport");
             require(std::abs(actual-full)>1e-4,"changing each covariance parameter affects transport");
         }
         int escaped=0; constexpr int count=128;
@@ -171,14 +195,14 @@ int main(int argc,char **argv) {
             sampler.startPath(1,i); Medium::MediumState state{}; state.reset(); MediumSample s{};
             require(adapter->sampleDistance(sampler,wholeRay,state,s),"finite interval flight");
             require(s.t>=0 && s.t<=wholeRay.farT()+1e-6,"geometry endpoint caps collisions");
-            near(s.weight.x(),1,0,"distance sampling does not double-count transmittance");
+            checkNear(s.weight.x(),1,0,"distance sampling does not double-count transmittance");
             escaped+=s.exited;
         }
         require(std::abs(double(escaped)/count-full)<0.15,"sampled escape agrees with visibility");
         Medium::MediumState empty{}; empty.reset(); MediumSample miss{};
         const Ray before(origin,direction,0.f,float(domain.entry*0.5));
         require(adapter->sampleDistance(sampler,before,empty,miss) && miss.exited,"geometry before SDF wins");
-        near(adapter->transmittance(sampler,before,false,true,nullptr).x(),1,0,"outside SDF is vacuum");
+        checkNear(adapter->transmittance(sampler,before,false,true,nullptr).x(),1,0,"outside SDF is vacuum");
         std::cout<<"PASS: shared model parity, bounded inversion, A/B gradients, geometry cutoff, "
             <<"forward survival, branch isolation, and visibility ("<<escaped<<"/"<<count<<")\n";
         return 0;

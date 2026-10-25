@@ -64,10 +64,11 @@ configuration. The field must be the bunny fixture in its original coordinates
 because the test rays and camera use that geometry. Missing files produce a
 configuration error only when these optional tests are enabled.
 
-The four CTest cases cover medium/sampler consistency, finite geometry cutoffs, B
+The CTest cases cover medium/sampler consistency, finite geometry cutoffs, B
 gradient state, forward-surface conditional survival, shadow-branch isolation,
-manual sigma/lengthScale, JSON round trips, and white-furnace energy with direct
-lighting on/off and the CPU path pool. Render tests use their own scene template.
+manual sigma/lengthScale, JSON round trips, direction-PDF normalization and
+NEE/MIS agreement, and white-furnace energy with direct lighting on/off and the
+CPU path pool. Render tests use their own scene template.
 
 Configure the stationary covariance just like `classic_local`:
 
@@ -105,9 +106,10 @@ New-Item -ItemType Directory -Force outputs/neural-bunny | Out-Null
 .\build\Release\tungsten.exe gpis-scenes/bunny/bunny.json --spp 4 -t 8 -d outputs/neural-bunny
 ```
 
-Materials are `conductor` (RGB `eta`, `k`) or `mirror` (`albedo`). The sampled
-full GP gradient supplies the microscopic normal. Delta reflection applies
-Fresnel once, without a second rough-conductor normal distribution.
+Materials are `conductor` (RGB `eta`, `k`) or `mirror` (`albedo`). The full GP
+gradient supplies the microscopic normal. Each sampled normal reflects
+specularly and applies Fresnel once, without a second rough-conductor normal
+distribution. The phase integrates over the remaining uncertain normal.
 
 Distance queries stop at ordinary geometry. A is a positive-exterior start;
 B retains the exact collision position and full gradient. Geometry `nearT`
@@ -117,14 +119,38 @@ direction change at an ordinary surface starts a new A flight: this is an
 explicit exterior-renewal approximation, not a sampled positive GP endpoint
 observation. Ordinary surfaces are never treated as GP zeros.
 
-Surface next-event estimation uses model transmittance
+Surface and GP-collision next-event estimation use model transmittance
 `exp(-(H(end)-H(begin)))`. Shadow branches replace immutable context pointers,
-leaving the parent intact. GP collisions use a sampled-normal delta phase;
-marginalized normal NEE/MIS and bidirectional distance PDFs are not implemented.
-Use `path_tracer`. The example disables volume light sampling and enables
-surface light sampling for ground shadows. If volume light sampling is enabled,
-Tungsten's UNI estimator traces the phase-sampled delta direction to a light and
-suppresses the corresponding continuation emission to avoid counting it twice.
+leaving the parent intact. Use `path_tracer`; bidirectional distance PDFs remain
+unsupported. Set `enable_volume_light_sampling: true` for GP NEE and MIS;
+`enable_light_sampling` controls ordinary surface direct lighting. Older scene
+files that explicitly disable volume light sampling must enable it to use GP NEE.
+
+At a learned collision, the network samples distance and the inward directional
+derivative `v = dot(wi,g) < 0`. Both direct-light strategies condition on this
+same `v`. The remaining two transverse gradient components have the existing
+Gaussian reconstruction law, including the previous full gradient for B starts.
+Phase sampling draws those components when a branch is created. A light
+direction instead determines the full gradient:
+
+```
+h = normalize(wo - wi)
+g = (v / dot(wi,h)) * h
+p(wo | v, collision, history) = p_perp(g_perp) * v^2 / (4 * abs(dot(wi,h))^4)
+```
+
+The Jacobian combines the fixed-derivative plane-to-normal mapping with the
+[reflection-direction Jacobian](https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory).
+There is no additional Rice/flux factor: the network already samples the
+collision-conditioned speed. Its density is common to both strategies and
+cancels in their MIS ratio. This integrates the transverse Gaussian, without
+replacing the learned speed mixture with a Gaussian or retraining the model.
+Each successor retains its complete sampled/reconstructed gradient for B
+transport. Exactly zero transverse variance keeps a delta phase; all positive
+variances use the continuous direction PDF and Tungsten's power heuristic.
+Sampled PDFs are evaluated from the double-precision gradient before storing
+the float ray direction; very narrow distributions would otherwise lose their
+own samples' density to rounding. MIS squares finite float PDFs in double.
 
 The neural medium can run in Tungsten's resumable CPU path pool. Selecting
 `backend: "cuda_wavefront"` is rejected: integration of the neural CUDA sampler
