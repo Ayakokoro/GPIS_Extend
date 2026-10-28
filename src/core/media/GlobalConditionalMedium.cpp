@@ -214,6 +214,9 @@ bool GlobalConditionalMedium::sampleDistance(PathSampleGenerator &sampler,const 
         // A geometry hit is an exterior GP point, not a zero crossing. Renew
         // before surface NEE and BSDF continuation copy this observation.
         next->birth=segment.samplePositiveEndpoint(rng);
+        // The segment normalizes its direction again. Reuse its endpoint
+        // exactly so a subsequent turn cannot expose coordinate roundoff.
+        next->position=next->birth.birthPosition;
     } else {
         auto e=std::make_shared<ConditionalEventContext>();
         e->owner=this; e->position=p; e->gradient=segment.gradient(t);
