@@ -1,6 +1,8 @@
 #pragma once
 #include "ClassicGlobalMedium.hpp"
 #include "math/conditional/transport/ConditionalSegment.h"
+#include <atomic>
+#include <cstdint>
 
 namespace Tungsten {
 struct ConditionalPathContext final : MediumPathContext {
@@ -21,6 +23,8 @@ struct ConditionalEventContext final : MediumEventContext {
 class GlobalConditionalMedium final : public ClassicGlobalMedium {
     ConditionalGpis::GPSSField _field;
     ConditionalGpis::ConditionalTrackingSettings _tracking;
+    mutable std::atomic<std::uint64_t> _discardedSurfacePaths{0};
+    mutable std::atomic<std::uint64_t> _discardedSurfaceConnections{0};
     std::shared_ptr<const ConditionalPathContext> context(
         PathSampleGenerator &,const Ray &,const MediumState &) const;
 public:
@@ -28,6 +32,7 @@ public:
     void fromJson(JsonPtr value, const Scene &scene) override;
     rapidjson::Value toJson(Allocator &) const override;
     void prepareForRender() override;
+    void teardownAfterRender() override;
     bool sampleDistance(PathSampleGenerator &,const Ray &,MediumState &,MediumSample &) const override;
     Vec3f transmittance(PathSampleGenerator &,const Ray &,bool,bool,MediumState *) const override;
     float pdf(PathSampleGenerator &,const Ray &,bool,bool) const override;
@@ -36,5 +41,7 @@ public:
     Vec3f sigmaT(Vec3f) const override;
     const ConditionalGpis::GPSSField &field() const { return _field; }
     const ConditionalGpis::ConditionalTrackingSettings &trackingSettings() const { return _tracking; }
+    std::uint64_t discardedSurfacePaths() const { return _discardedSurfacePaths.load(std::memory_order_relaxed); }
+    std::uint64_t discardedSurfaceConnections() const { return _discardedSurfaceConnections.load(std::memory_order_relaxed); }
 };
 }

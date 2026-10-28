@@ -529,7 +529,15 @@ bool FileUtils::moveFile(const Path &src, const Path &dst, bool deleteDst)
             return false;
         } else {
 #if _WIN32
-        return ReplaceFileW(makeWideLongPath(dst).c_str(), makeWideLongPath(src).c_str(), NULL, 0, 0, 0) != 0;
+            const auto target = makeWideLongPath(dst);
+            const auto source = makeWideLongPath(src);
+            if (ReplaceFileW(target.c_str(), source.c_str(), NULL, 0, 0, 0))
+                return true;
+            // Some restricted Windows directories permit replacing a file by
+            // rename, but reject ReplaceFileW. Publish the completed temporary
+            // file atomically instead of silently retaining an older output.
+            return GetLastError() == ERROR_ACCESS_DENIED &&
+                MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
         return rename(src.absolute().asString().c_str(), dst.absolute().asString().c_str()) == 0;
 #endif

@@ -114,7 +114,9 @@ void Integrator::saveRenderResumeData(Scene &scene)
 
 bool Integrator::resumeRender(Scene &scene)
 {
-    const Path &file = _scene->rendererSettings().resumeRenderFile();
+    // TraceableScene::rendererSettings() returns a temporary. Keep a value copy
+    // so the resume filename remains alive after that settings object dies.
+    const Path file = _scene->rendererSettings().resumeRenderFile();
     InputStreamHandle in = FileUtils::openInputStream(file);
     if (!in)
         return false;

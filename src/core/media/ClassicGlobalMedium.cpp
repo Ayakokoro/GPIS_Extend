@@ -3,6 +3,7 @@
 #include "GpisSdfGrid.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
+#include "phasefunctions/ObservedNormalScattering.hpp"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -19,11 +20,13 @@ public:
     explicit ClassicGlobalPhase(const ClassicGlobalMedium &medium) : _medium(medium) {}
     float pdf(const Vec3f &wi, const Vec3f &wo, const MediumSample &s) const override
     {
-        return float(_medium.ndf().phasePdf(eigen(_medium.meanGradient(Vec3d(s.p))),
+        if(_medium.hasDiffuseMicroMaterial()) return observedCosinePdf(wo,s);
+        return float(_medium.phasePdf(Vec3d(s.p),
                        eigen(Vec3d(wi)).normalized(), eigen(Vec3d(wo)).normalized()));
     }
     Vec3f eval(const Vec3f &wi, const Vec3f &wo, const MediumSample &s) const override
     {
+        if(_medium.hasDiffuseMicroMaterial()) return _medium.reflectance(1)*pdf(wi,wo,s);
         const Eigen::Vector3d a = eigen(Vec3d(wi)).normalized();
         const Eigen::Vector3d b = eigen(Vec3d(wo)).normalized();
         if ((b - a).squaredNorm() == 0.0) return Vec3f(0.0f);
@@ -32,9 +35,14 @@ public:
     bool sample(PathSampleGenerator &sampler, const Vec3f &wi,
                 const MediumSample &s, PhaseSample &result) const override
     {
+        if(_medium.hasDiffuseMicroMaterial()) {
+            result.w=sampleObservedCosine(sampler,s);
+            result.pdf=pdf(wi,result.w,s);
+            result.weight=_medium.reflectance(1);
+            return result.pdf>0;
+        }
         const Eigen::Vector3d w = eigen(Vec3d(wi)).normalized();
-        const Eigen::Vector3d n = _medium.ndf().sampleVisibleNormal(
-            eigen(_medium.meanGradient(Vec3d(s.p))), w, sampler);
+        const Eigen::Vector3d n = _medium.sampleVisibleNormal(Vec3d(s.p), w, sampler);
         result.w = Vec3f(vec(w - 2.0*w.dot(n)*n)).normalized();
         result.pdf = pdf(wi, result.w, s);
         result.weight = _medium.reflectance(std::abs(w.dot(n)));
@@ -80,17 +88,17 @@ void ClassicGlobalMedium::fromJson(JsonPtr value, const Scene &scene)
     _covariance = scene.fetchCovarianceFunction(gp.getRequiredMember("covariance"));
     if (auto material = value["material"]) {
         material.getField("type", _materialType);
-        if (_materialType == "mirror") {
+        if (_materialType == "mirror" || _materialType == "lambert") {
             material.getField("albedo", _mirrorAlbedo);
             for (int i = 0; i < 3; ++i)
                 if (!std::isfinite(_mirrorAlbedo[i]) || _mirrorAlbedo[i] < 0.0 || _mirrorAlbedo[i] > 1.0)
-                    material.parseError("classic_global: mirror albedo must be finite and in [0,1]");
+                    material.parseError("classic_global: albedo must be finite and in [0,1]");
         } else if (_materialType == "conductor") {
             material.getField("eta", _eta);
             material.getField("k", _k);
             material.getField("force_unit_fresnel", _forceUnitFresnel);
         } else {
-            material.parseError("classic_global material type must be conductor or mirror");
+            material.parseError("classic_global material type must be conductor, mirror or lambert");
         }
     }
     value.getField("max_bounces", _maxBounce);
@@ -111,7 +119,7 @@ void ClassicGlobalMedium::fromJson(JsonPtr value, const Scene &scene)
 rapidjson::Value ClassicGlobalMedium::toJson(Allocator &allocator) const
 {
     JsonObject material{allocator, "type", _materialType};
-    if (_materialType == "mirror")
+    if (_materialType == "mirror" || _materialType == "lambert")
         material.add("albedo", _mirrorAlbedo);
     else
         material.add("eta", _eta, "k", _k, "force_unit_fresnel", _forceUnitFresnel);
@@ -133,20 +141,27 @@ void ClassicGlobalMedium::loadResources()
 
 void ClassicGlobalMedium::prepareForRender()
 {
-    if (!_covariance->isStationaryKernel())
-        throw std::runtime_error("classic_global requires a stationary differentiable covariance");
-    const Vec3d zero(0.0);
-    const double variance = (*_covariance)(Derivative::None, Derivative::None, zero, zero, zero, zero);
-    if (!(variance > 0.0) || !std::isfinite(variance))
-        throw std::runtime_error("classic_global: field variance must be positive and finite");
-    _sigma = std::sqrt(variance);
-    Eigen::Matrix3d c;
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            Vec3d a(0.0), b(0.0); a[i] = 1.0; b[j] = 1.0;
-            c(i, j) = (*_covariance)(Derivative::First, Derivative::First, zero, zero, a, b);
-        }
-    _ndf = std::make_unique<ClassicGlobal::GaussianNdf>(c);
+    _nonstationary.reset();
+    _ndf.reset();
+    if (auto procedural = dynamic_cast<ProceduralNonstationaryCovariance *>(_covariance.get())) {
+        _nonstationary = std::make_unique<ClassicGlobal::NonstationaryKernel>(*procedural);
+        _sigma = _nonstationary->minimumSigma();
+    } else {
+        if (!_covariance->isStationaryKernel())
+            throw std::runtime_error("classic_global requires a stationary differentiable covariance or proc_nonstationary cov/var/ls");
+        const Vec3d zero(0.0);
+        const double variance = (*_covariance)(Derivative::None, Derivative::None, zero, zero, zero, zero);
+        if (!(variance > 0.0) || !std::isfinite(variance))
+            throw std::runtime_error("classic_global: field variance must be positive and finite");
+        _sigma = std::sqrt(variance);
+        Eigen::Matrix3d c;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) {
+                Vec3d a(0.0), b(0.0); a[i] = 1.0; b[j] = 1.0;
+                c(i, j) = (*_covariance)(Derivative::First, Derivative::First, zero, zero, a, b);
+            }
+        _ndf = std::make_unique<ClassicGlobal::GaussianNdf>(c);
+    }
     _sdfGrid.reset();
     double automaticBound = -1.0;
     if (dynamic_cast<HomogeneousMean *>(_mean.get())) automaticBound = 0.0;
@@ -201,7 +216,46 @@ Vec3d ClassicGlobalMedium::meanGradient(const Vec3d &p) const
 double ClassicGlobalMedium::extinction(const Vec3d &p, const Vec3d &travelDirection) const
 {
     const Eigen::Vector3d w = eigen(travelDirection).normalized();
+    if (_nonstationary) {
+        const auto s = pointStatistics(p);
+        return ClassicGlobal::density(s.normalizedMean,1.0)*ClassicGlobal::negativePartMean(
+            w.dot(s.gradientMean),std::sqrt(w.dot(s.gradientCovariance*w)));
+    }
     return ClassicGlobal::density(meanValue(p), _sigma)*_ndf->projectedArea(eigen(meanGradient(p)), w);
+}
+
+ClassicGlobal::PointStatistics ClassicGlobalMedium::pointStatistics(const Vec3d &p) const
+{
+    const double mean = meanValue(p);
+    const Eigen::Vector3d gradient = eigen(meanGradient(p));
+    if (_nonstationary) return _nonstationary->statistics(p,mean,gradient);
+    return {_sigma, mean/_sigma, gradient/_sigma, _ndf->covariance()/(_sigma*_sigma)};
+}
+
+double ClassicGlobalMedium::phasePdf(const Vec3d &p, const Eigen::Vector3d &wi, const Eigen::Vector3d &wo) const
+{
+    if (!_nonstationary) return _ndf->phasePdf(eigen(meanGradient(p)),wi,wo);
+    const auto s = pointStatistics(p);
+    return ClassicGlobal::GaussianNdf(s.gradientCovariance).phasePdf(s.gradientMean,wi,wo);
+}
+
+Eigen::Vector3d ClassicGlobalMedium::sampleVisibleNormal(const Vec3d &p, const Eigen::Vector3d &w,
+                                                       PathSampleGenerator &sampler) const
+{
+    if (!_nonstationary) return _ndf->sampleVisibleNormal(eigen(meanGradient(p)),w,sampler);
+    const auto s = pointStatistics(p);
+    return ClassicGlobal::GaussianNdf(s.gradientCovariance).sampleVisibleNormal(s.gradientMean,w,sampler);
+}
+
+double ClassicGlobalMedium::fieldSigma() const
+{
+    if (_nonstationary) throw std::runtime_error("classic_global: fieldSigma requires a position; use pointStatistics(p).sigma");
+    return _sigma;
+}
+const ClassicGlobal::GaussianNdf &ClassicGlobalMedium::ndf() const
+{
+    if (_nonstationary) throw std::runtime_error("classic_global: nonstationary NDF requires pointStatistics(p)");
+    return *_ndf;
 }
 
 double ClassicGlobalMedium::track(PathSampleGenerator &sampler, const Ray &ray,
@@ -218,7 +272,7 @@ double ClassicGlobalMedium::track(PathSampleGenerator &sampler, const Ray &ray,
     // still update the current medium, but contains no sampleable flight.
     if (farT <= nearT) return 1.0;
     const Eigen::Vector3d w = eigen(direction)/speed;
-    const double areaBound = ClassicGlobal::negativePartMean(-_gradientBound,
+    const double areaBound = _nonstationary ? 0.0 : ClassicGlobal::negativePartMean(-_gradientBound,
                               std::sqrt(w.dot(_ndf->covariance()*w)));
     const double baseStep = _trackingStep > 0.0 ? _trackingStep
         : (_lipschitz > 0.0 ? _sigma/_lipschitz : (farT-nearT)*speed);
@@ -234,7 +288,10 @@ double ClassicGlobalMedium::track(PathSampleGenerator &sampler, const Ray &ray,
         const double mid = 0.5*(begin + end);
         const double m = meanValue(origin + direction*mid);
         const double lower = m - _lipschitz*(end-begin)*speed*0.5 - 1e-12*std::max(_sigma, std::abs(m));
-        const double majorant = ClassicGlobal::density(lower, _sigma)*areaBound*(1.0 + 1e-5);
+        const double majorant = _nonstationary
+            ? _nonstationary->majorant(origin+direction*mid, (end-begin)*speed*0.5,
+                                       lower, 2.0*m-lower, _gradientBound)
+            : ClassicGlobal::density(lower, _sigma)*areaBound*(1.0 + 1e-5);
         if (!std::isfinite(majorant)) throw std::runtime_error("classic_global: non-finite extinction bound");
         if (majorant > 0.0) {
             double t = begin;
@@ -285,7 +342,12 @@ bool ClassicGlobalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray
     sample.pdf = 1.0f;
     sample.sparseConv1DSamplingScheme = SparseConv1DSamplingScheme::UNI;
     sample.rayInfo = state.info;
-    if (!sample.exited) state.advance();
+    if (!sample.exited) {
+        if(hasDiffuseMicroMaterial())
+            sample.aniso=vec(sampleVisibleNormal(Vec3d(sample.p),
+                            eigen(Vec3d(ray.dir())).normalized(),sampler));
+        state.advance();
+    }
     return true;
 }
 
@@ -306,9 +368,9 @@ Vec3f ClassicGlobalMedium::sigmaT(Vec3f) const { throw std::runtime_error("class
 
 Vec3f ClassicGlobalMedium::reflectance(double cosine) const
 {
-    // The exact same VNDF is used for both materials. A tinted ideal mirror
-    // returns constant albedo at every angle, matching Tungsten's MirrorBsdf.
-    if (_materialType == "mirror") return Vec3f(_mirrorAlbedo);
+    // Mirror and Lambert micro-materials return constant albedo. Their angular
+    // scattering differs; the conductor retains its angle-dependent Fresnel.
+    if (_materialType == "mirror" || _materialType == "lambert") return Vec3f(_mirrorAlbedo);
     if (_forceUnitFresnel) return Vec3f(1.0f);
     const double c = std::clamp(std::abs(cosine), 0.0, 1.0);
     if (c == 0.0) return Vec3f(1.0f);

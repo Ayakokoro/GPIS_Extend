@@ -72,11 +72,11 @@ inline void boundChecks()
     namespace b = cg::MajorantBounds;
     // Exact binary fixtures: endpoints, an interior vertex, a boundary vertex,
     // a linear/constant polynomial, and a very small quadratic coefficient.
-    const double small=std::ldexp(1.0,-50);
+    const double tinyCoefficient=std::ldexp(1.0,-50);
     const double polynomialFixtures[][7]={
         {1,-4,2,0,3,-1,7}, {1,4,-2,0,3,-5,3},
         {2,-3,0,-1,2,-4,5}, {1,-2,1,1,2,0,1},
-        {1,0,0,0,4,1,1}, {0,-2*small,small,0,2,-small,0}
+        {1,0,0,0,4,1,1}, {0,-2*tinyCoefficient,tinyCoefficient,0,2,-tinyCoefficient,0}
     };
     for(const auto &p:polynomialFixtures) {
         const auto range=b::quadraticPolynomialRange(p[0],p[1],p[2],p[3],p[4]);
@@ -178,19 +178,19 @@ inline void boundChecks()
             birth.birthGradient=V(0.1,-0.2,0.3)*sigma/ell;
             birth.birthGradient+=birth.direction*(slope*sigma/ell-birth.direction.dot(birth.birthGradient));
             cg::ConditionalFlightKernel flight(f,birth);
-            const auto near=flight.birthMajorant(3*ell);
+            const auto birthBound=flight.birthMajorant(3*ell);
             for(double fraction:{1e-6,0.001,0.1,0.5,1.0})
-                check(flight.evaluate(near.split*fraction).hazard.value<=near.maximum*(1+1e-10),
+                check(flight.evaluate(birthBound.split*fraction).hazard.value<=birthBound.maximum*(1+1e-10),
                     "tightened birth envelope covers zero and positive births");
             for(const auto &interval:std::array<std::pair<double,double>,4>{{
-                    {near.split,1.25*near.split},{0.05*ell,0.15*ell},{0.8*ell,1.2*ell},{2*ell,3*ell}}}) {
+                    {birthBound.split,1.25*birthBound.split},{0.05*ell,0.15*ell},{0.8*ell,1.2*ell},{2*ell,3*ell}}}) {
                 const double lo=interval.first,hi=interval.second;
                 const double bound=flight.intervalMajorant(lo,hi);
                 const double cheap=flight.cheapIntervalMajorant(lo,hi);
                 const double adaptive=flight.intervalMajorant(lo,hi,4);
                 check(bound<=adaptive && adaptive<=cheap,"adaptive majorant lies between fine and cheap bounds");
-                const double adjacent=hi<=near.smoothEnd ?
-                    flight.birthAdjacentMajorant(lo,hi,near):bound;
+                const double adjacent=hi<=birthBound.smoothEnd ?
+                    flight.birthAdjacentMajorant(lo,hi,birthBound):bound;
                 for(int j=0;j<=24;++j) {
                     const double hazard=flight.evaluate(lo+(hi-lo)*j/24).hazard.value;
                     check(hazard<=std::min(bound,adjacent)*(1+1e-10),
@@ -207,8 +207,8 @@ inline void boundChecks()
     f.kernel=cg::CovarianceKernel(1,M::Identity());
     cg::FlightState birth;birth.birthGradient=V::UnitZ();
     cg::ConditionalFlightKernel flight(f,birth);
-    const auto near=flight.birthMajorant(2);
-    check(near.maximum<0.5,"combined birth slope must avoid the former 3|g| coefficient");
+    const auto birthBound=flight.birthMajorant(2);
+    check(birthBound.maximum<0.5,"combined birth slope must avoid the former 3|g| coefficient");
     std::cout<<"bounds: cheap/fine certificates, screening, high-precision SE ratios, critical-point enclosures and "
-             <<flights<<" flights / "<<intervals<<" intervals passed; simple birth bound "<<near.maximum<<"\n";
+             <<flights<<" flights / "<<intervals<<" intervals passed; simple birth bound "<<birthBound.maximum<<"\n";
 }

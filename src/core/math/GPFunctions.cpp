@@ -685,14 +685,18 @@ void SquaredExponentialCovariance::fromJson(JsonPtr value, const Scene& scene) {
 }
 
 rapidjson::Value SquaredExponentialCovariance::toJson(Allocator& allocator) const {
-    return JsonObject{ StationaryCovariance::toJson(allocator), allocator,
+    auto result = JsonObject{ StationaryCovariance::toJson(allocator), allocator,
     "type", "squared_exponential",
     "sigma", _sigma,
     "lengthScale", _l,
     "aniso", _aniso,
     "useAnisoMtx", _use_aniso_mtx,
-    "anisoMtx", _aniso_mtx,
     };
+    // The matrix is initialized only in matrix-anisotropy mode. Serializing it
+    // otherwise reads indeterminate values and destabilizes resume scene hashes.
+    if (_use_aniso_mtx)
+        result.add("anisoMtx", _aniso_mtx);
+    return result;
 }
 
 std::string SquaredExponentialCovariance::id() const {
@@ -1632,6 +1636,7 @@ rapidjson::Value ProceduralNonstationaryCovariance::toJson(Allocator& allocator)
 }
 
 void ProceduralNonstationaryCovariance::loadResources() {
+    if (_stationaryCov) _stationaryCov->loadResources();
     if (_variance) _variance->loadResources();
     if (_ls) _ls->loadResources();
     if (_anisoField) _anisoField->loadResources();

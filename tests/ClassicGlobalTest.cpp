@@ -1,4 +1,5 @@
 #include "media/ClassicGlobalMedium.hpp"
+#include "media/GlobalConditionalMedium.hpp"
 #include "math/ClassicGlobalMath.hpp"
 #include "io/JsonDocument.hpp"
 #include "io/Scene.hpp"
@@ -29,9 +30,9 @@ void close(double actual, double expected, double tolerance, const char *message
     }
 }
 std::shared_ptr<ClassicGlobalMedium> makeMedium(const std::string &mean, const std::string &extra = "",
-        const std::string &material = R"({"force_unit_fresnel":true})")
+        const std::string &material = R"({"force_unit_fresnel":true})", const std::string &type = "classic_global")
 {
-    const std::string json = R"({"type":"classic_global","gaussian_process":{
+    const std::string json = "{\"type\":\"" + type + R"(","gaussian_process":{
         "type":"standard","mean":)" + mean + R"(,
         "covariance":{"type":"squared_exponential","sigma":1,"lengthScale":1}},
         "material":)" + material + extra + "}";
@@ -189,6 +190,65 @@ void mirrorMaterial()
     close(conductor->reflectance(1.0).x(), f0, 1e-7, "legacy conductor normal-incidence Fresnel");
     close(conductor->reflectance(0.0).x(), 1.0, 0.0, "legacy conductor grazing Fresnel");
 }
+
+void diffuseMaterial()
+{
+    for(const std::string type : {"classic_global","global_conditional"}) {
+        auto m=makeMedium(R"({"type":"linear","direction":[0,0,1]})", "",
+                          R"({"type":"lambert","albedo":0.7})",type);
+        IndependentPathSampler rng(9017,false);
+        const Vec3f wi(0.0f,0.0f,-1.0f);
+        const Ray ray(Vec3f(0.0f,0.0f,3.0f),wi,0,6);
+        MediumSample event{};
+        for(int i=0;i<100;++i) {
+            rng.startPath(0,i);
+            Medium::MediumState state{}; state.reset();
+            require(m->sampleDistance(rng,ray,state,event),"diffuse flight");
+            if(!event.exited) break;
+        }
+        require(!event.exited && event.aniso.dot(Vec3d(wi))<0,"sampled visible diffuse normal");
+        const auto n=event.aniso.normalized();
+        const auto *phase=event.phase;
+        double mass=0;
+        constexpr int nz=100,np=200;
+        for(int iz=0;iz<nz;++iz) for(int ip=0;ip<np;++ip) {
+            const double z=-1+2*(iz+.5)/nz,phi=2*Pi*(ip+.5)/np;
+            const double r=std::sqrt(1-z*z);
+            const Vec3f wo(float(r*std::cos(phi)),float(r*std::sin(phi)),float(z));
+            mass+=phase->pdf(wi,wo,event)*4*Pi/(nz*np);
+        }
+        close(mass,1,2e-4,"observed-normal diffuse PDF integrates to one");
+        Vec3d average(0.0);
+        for(int i=0;i<10000;++i) {
+            rng.startPath(1,i);
+            PhaseSample s{};
+            require(phase->sample(rng,wi,event,s),"diffuse direction sample");
+            require(Vec3d(s.w).dot(n)>0,"diffuse positive hemisphere");
+            close(s.weight.x(),.7,1e-7,"diffuse albedo throughput");
+            close(phase->eval(wi,s.w,event).x(),.7*s.pdf,1e-7,"diffuse eval/pdf");
+            close(s.pdf,phase->pdf(wi,s.w,event),0,"diffuse continuation MIS PDF");
+            average+=Vec3d(s.w);
+            std::shared_ptr<const MediumPathContext> connection;
+            const auto value=phase->evalConnection(rng,wi,s.w,event,connection);
+            close(value.x(),phase->eval(wi,s.w,event).x(),0,"diffuse NEE value");
+            if(type=="global_conditional") {
+                for(const auto &context : {s.pathContext,connection}) {
+                    const auto *c=dynamic_cast<const ConditionalPathContext *>(context.get());
+                    require(c && c->owner==m.get(),"diffuse conditional branch context");
+                    const auto &g=c->birth.birthGradient;
+                    require(g.x()==event.aniso.x() && g.y()==event.aniso.y() && g.z()==event.aniso.z(),
+                            "NEE and continuation must keep the same full collision gradient");
+                    require(c->birth.direction.dot(g)>0,"diffuse outward conditional birth");
+                }
+            }
+        }
+        require((average/10000-n*(2./3)).length()<.025,"cosine sample first moment");
+        rapidjson::Document document;
+        const auto saved=m->toJson(document.GetAllocator());
+        require(std::string(saved["material"]["type"].GetString())=="lambert","diffuse material serialization");
+        std::cout<<type<<": diffuse normalization, cosine moment, NEE/MIS and birth observation passed\n";
+    }
+}
 #if OPENVDB_AVAILABLE
 void sdfGrid(const std::filesystem::path &directory)
 {
@@ -221,7 +281,7 @@ void sdfGrid(const std::filesystem::path &directory)
 int main(int argc, char **argv)
 {
     try {
-        coefficients(); flights(); phase(); mirrorMaterial();
+        coefficients(); flights(); phase(); mirrorMaterial(); diffuseMaterial();
 #if OPENVDB_AVAILABLE
         openvdb::initialize();
         sdfGrid(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::current_path());

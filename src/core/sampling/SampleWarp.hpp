@@ -188,7 +188,10 @@ static inline float uniformTrianglePdf(const Vec3f &a, const Vec3f &b, const Vec
 
 static inline float powerHeuristic(float pdf0, float pdf1)
 {
-    return (pdf0*pdf0)/(pdf0*pdf0 + pdf1*pdf1);
+    // Conditional phases can have sharply concentrated, but finite, PDFs.
+    // Square in double so valid float densities cannot overflow or underflow.
+    const double p0=pdf0, p1=pdf1;
+    return float((p0*p0)/(p0*p0+p1*p1));
 }
 
 static inline Vec3f projectedBox(const Box3f &box, const Vec3f &direction, float faceXi, const Vec2f &xi)

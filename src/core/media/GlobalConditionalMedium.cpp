@@ -5,6 +5,8 @@
 #include "math/conditional/transport/DirectionalGradient.h"
 #include "math/ConditionalProfile.hpp"
 #include "io/JsonObject.hpp"
+#include "phasefunctions/ObservedNormalScattering.hpp"
+#include <iostream>
 
 namespace Tungsten {
 namespace cg = ConditionalGpis;
@@ -68,6 +70,7 @@ class ConditionalPhase : public PhaseFunction {
 public:
     explicit ConditionalPhase(const GlobalConditionalMedium &m):_medium(m) {}
     float pdf(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
+        if(_medium.hasDiffuseMicroMaterial()) return observedCosinePdf(wo,s);
         cg::Profile::Scope profile(cg::Profile::Stage::PhasePdf,cg::Profile::Domain::Phase);
         const auto &e=event(s);
         try {
@@ -80,6 +83,7 @@ public:
         }
     }
     Vec3f eval(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
+        if(_medium.hasDiffuseMicroMaterial()) return _medium.reflectance(1)*pdf(wi,wo,s);
         cg::Profile::Scope profile(cg::Profile::Stage::PhaseEval,cg::Profile::Domain::Phase);
         const Eigen::Vector3d h=eigen(wo).normalized()-eigen(wi).normalized();
         if(h.squaredNorm()==0) return Vec3f(0.0f);
@@ -91,6 +95,10 @@ public:
         const auto &e=event(s);
         const Vec3f value=eval(wi,wo,s);
         if(value==0.0f) return value;
+        if(_medium.hasDiffuseMicroMaterial()) {
+            state=successor(e,eigen(s.aniso),wo,s.p);
+            return value;
+        }
         const Eigen::Vector3d h=(eigen(wo).normalized()-eigen(wi).normalized()).normalized();
         cg::Random rng(sampler);
         const Eigen::Vector3d g=cg::sampleDirectionalGradient(e.gradient,h,rng);
@@ -100,6 +108,13 @@ public:
     bool sample(PathSampleGenerator &sampler,const Vec3f &wi,const MediumSample &s,PhaseSample &r) const override {
         cg::Profile::Scope profile(cg::Profile::Stage::PhaseSample,cg::Profile::Domain::Phase);
         const auto &e=event(s); cg::Random rng(sampler);
+        if(_medium.hasDiffuseMicroMaterial()) {
+            r.w=sampleObservedCosine(sampler,s);
+            r.pdf=pdf(wi,r.w,s);
+            r.weight=_medium.reflectance(1);
+            r.pathContext=successor(e,eigen(s.aniso),r.w,s.p);
+            return r.pdf>0 && eigen(r.w).dot(eigen(s.aniso))>0;
+        }
         const Eigen::Vector3d w=eigen(wi).normalized();
         const Eigen::Vector3d g=cg::sampleFluxWeightedGradient(e.gradient,w,rng);
         const Eigen::Vector3d n=g.normalized();
@@ -149,6 +164,8 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     return value;
 }
 void GlobalConditionalMedium::prepareForRender() {
+    _discardedSurfacePaths.store(0,std::memory_order_relaxed);
+    _discardedSurfaceConnections.store(0,std::memory_order_relaxed);
     if(!dynamic_cast<SquaredExponentialCovariance *>(_covariance.get()))
         throw std::runtime_error("global_conditional requires a stationary squared_exponential covariance");
     ClassicGlobalMedium::prepareForRender();
@@ -172,6 +189,11 @@ void GlobalConditionalMedium::prepareForRender() {
     if(_tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants && !_field.mean->globalMagnitudeBounds())
         throw std::runtime_error("tracking_majorant two_constants requires a clamped VDB SDF or constant mean with global bounds");
 }
+void GlobalConditionalMedium::teardownAfterRender() {
+    std::cout<<"GPIS conditional discarded surface births: {\"paths\":"<<discardedSurfacePaths()
+             <<",\"shadow_connections\":"<<discardedSurfaceConnections()<<"}\n";
+    ClassicGlobalMedium::teardownAfterRender();
+}
 std::shared_ptr<const ConditionalPathContext> GlobalConditionalMedium::context(
         PathSampleGenerator &sampler,const Ray &ray,const MediumState &s) const
 {
@@ -187,6 +209,7 @@ std::shared_ptr<const ConditionalPathContext> GlobalConditionalMedium::context(
     return c;
 }
 bool GlobalConditionalMedium::sampleDistance(PathSampleGenerator &sampler,const Ray &ray,MediumState &state,MediumSample &sample) const
+try
 {
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Path);
     if(state.bounce>_maxBounce) return false;
@@ -214,19 +237,32 @@ bool GlobalConditionalMedium::sampleDistance(PathSampleGenerator &sampler,const 
         // A geometry hit is an exterior GP point, not a zero crossing. Renew
         // before surface NEE and BSDF continuation copy this observation.
         next->birth=segment.samplePositiveEndpoint(rng);
-        // The segment normalizes its direction again. Reuse its endpoint
-        // exactly so a subsequent turn cannot expose coordinate roundoff.
+        // The segment normalizes its direction. Recomputing this endpoint
+        // separately can differ by an ulp, especially after cancellation near
+        // the world origin, and falsely look like a turn without renewal.
         next->position=next->birth.birthPosition;
     } else {
         auto e=std::make_shared<ConditionalEventContext>();
         e->owner=this; e->position=p; e->gradient=segment.gradient(t);
         sample.eventContext=e;
+        if(hasDiffuseMicroMaterial()) {
+            const auto g=cg::sampleFluxWeightedGradient(e->gradient,w,rng);
+            sample.aniso=Vec3d(g.x(),g.y(),g.z());
+        }
         state.advance();
     }
     state.pathContext=next;
     return true;
+} catch(const cg::NumericError &error) {
+    if(error.status()!=cg::NumericStatus::NonPositiveSurfaceBirth) throw;
+    // A deliberate absorbing approximation at unsupported surface births.
+    // Returning false preserves radiance already accumulated by the integrator;
+    // do not resample, move the ray, or swallow unrelated numerical failures.
+    _discardedSurfacePaths.fetch_add(1,std::memory_order_relaxed);
+    return false;
 }
 Vec3f GlobalConditionalMedium::transmittance(PathSampleGenerator &sampler,const Ray &ray,bool,bool,MediumState *state) const
+try
 {
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Shadow);
     if(!state) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional transmittance requires path state");
@@ -246,6 +282,11 @@ Vec3f GlobalConditionalMedium::transmittance(PathSampleGenerator &sampler,const 
     }
     state->pathContext=next;
     return Vec3f(float(tr));
+} catch(const cg::NumericError &error) {
+    if(error.status()!=cg::NumericStatus::NonPositiveSurfaceBirth) throw;
+    // Apply the same termination rule to NEE/visibility branches.
+    _discardedSurfaceConnections.fetch_add(1,std::memory_order_relaxed);
+    return Vec3f(0.0f);
 }
 float GlobalConditionalMedium::pdf(PathSampleGenerator &,const Ray &,bool,bool) const {
     throw std::runtime_error("global_conditional supports unidirectional path tracing; a state-free distance PDF is undefined");

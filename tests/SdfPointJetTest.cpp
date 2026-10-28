@@ -153,6 +153,54 @@ void rayReuseChecks() {
     }
     std::cout<<"ray reuse: "<<count<<" finite-radius, seam, large-coordinate and shifted-midpoint certificates passed\n";
 }
+
+void roundedUGrooveChecks() {
+    const auto fn=SdfFunctions::Function::RoundedUGroove;
+    const auto check=[](bool ok,const char *label) { if(!ok) throw std::runtime_error(label); };
+    // Known surface points and both sides of the circle/wall tangent join.
+    for(double angle : {0.,0.3,0.9,1.57,2.4,3.141592653589793}) {
+        const V p(std::cos(angle),-std::sin(angle),0.7);
+        const auto j=SdfFunctions::evaluateJet(fn,p);
+        check(std::abs(j.value)<1e-14,"U groove circular boundary");
+        check((j.gradient+V(p.x(),p.y(),0)).norm()<1e-14,"U groove inward circular normal");
+    }
+    for(double sign : {-1.,1.}) {
+        const auto a=SdfFunctions::evaluateJet(fn,V(sign,-1e-9,0));
+        const auto b=SdfFunctions::evaluateJet(fn,V(sign,1e-9,0));
+        check((a.gradient-b.gradient).norm()<2e-9,"U groove C1 tangent join");
+        for(double delta : {1e-8,1e-12,1e-18}) {
+            const double diff=SdfFunctions::valueDifference(fn,V(sign,0.4,0),V(sign*delta,0,0));
+            check(std::abs(diff+delta)<1e-14*delta,"U groove stable sub-ulp wall difference");
+        }
+    }
+    int certificates=0;
+    for(const V &o : {V(1,0,0),V(-1,1e-12,0),V(0,-1,0),V(0,0.4,0),V(0.4,-0.2,0)}) {
+        for(const V &w : {V(0.3,0.8,0.5),V(-0.7,-0.3,0),V(0,0,1)}) {
+            for(double length : {1e-9,0.01,0.3,2.0}) {
+                SdfRayQueryOptions options;
+                options.midpoint=o+0.5*length*w+V(1e-15,-1e-15,0);
+                const auto b=SdfFunctions::rayBounds(fn,o,w,0,length,options);
+                const V lo=o.cwiseMin(o+length*w),hi=o.cwiseMax(o+length*w);
+                const auto box=SdfFunctions::bounds(fn,lo,hi);
+                for(int i=0;i<=100;++i) {
+                    const V p=o+(length*i/100)*w;
+                    const auto j=SdfFunctions::evaluateJet(fn,p);
+                    const double derivative=j.gradient.dot(w);
+                    check(j.value>=b.minimumValue && j.value<=b.maximumValue,"U groove ray value enclosure");
+                    check(derivative>=b.minimumDerivative && derivative<=b.maximumDerivative,"U groove ray derivative enclosure");
+                    check(j.value>=box.minimumValue && j.value<=box.maximumValue,"U groove box enclosure");
+                    if(i>0 && std::isfinite(b.maximumSecondDerivative)) {
+                        const auto prev=SdfFunctions::evaluateJet(fn,o+(length*(i-1)/100)*w);
+                        check(std::abs((j.gradient-prev.gradient).dot(w))<=
+                              b.maximumSecondDerivative*length/100+1e-12,"U groove curvature enclosure");
+                    }
+                }
+                ++certificates;
+            }
+        }
+    }
+    std::cout<<"rounded U groove: boundary, normals, tiny differences and "<<certificates<<" certificates passed\n";
+}
 }
 }
 int main() {
@@ -160,6 +208,7 @@ int main() {
         Tungsten::primitiveChecks();
         Tungsten::geometryChecks();
         Tungsten::rayReuseChecks();
+        Tungsten::roundedUGrooveChecks();
         return 0;
     } catch(const std::exception &error) {
         std::cerr<<error.what()<<'\n'; return 1;

@@ -24,8 +24,32 @@ struct RenewalSurfaceSample {
     Eigen::Vector3d gradient = Eigen::Vector3d::Zero(), normal = Eigen::Vector3d::Zero();
 };
 
-// Reconstruct the full SE gradient from the network's inward derivative,
-// retaining the full gradient observation from the last collision for B starts.
+// Condition on the network's inward derivative. The two transverse gradient
+// components remain Gaussian, including full-gradient correlation at B starts.
+// Reflection maps this plane bijectively to outgoing directions except wi.
+class RenewalGradientDistribution {
+public:
+    RenewalGradientDistribution(const ConditionalGpis::CovarianceKernel& kernel,
+        const Eigen::Vector3d& direction, double normalizedDistance, double derivative,
+        const Eigen::Vector3d& meanGradient, const Eigen::Vector3d& birthMeanGradient,
+        const std::optional<Eigen::Vector3d>& birthGradient);
+    const Eigen::Vector3d& incomingDirection() const { return direction_; }
+    bool isDelta() const { return delta_; }
+    Eigen::Vector3d sample(ConditionalGpis::Random& rng) const;
+    std::optional<Eigen::Vector3d> gradientForDirection(const Eigen::Vector3d& outgoing) const;
+    double phasePdf(const Eigen::Vector3d& outgoing) const;
+    // Density at a sampled reflection, before float ray storage loses precision.
+    double phasePdfForGradient(const Eigen::Vector3d& gradient) const;
+private:
+    Eigen::Vector3d direction_;
+    Eigen::Matrix<double,3,2> basis_;
+    Eigen::Vector2d mean_;
+    Eigen::Matrix2d lower_;
+    double derivative_, logNormalization_ = 0;
+    bool delta_ = false;
+};
+
+// Reconstruct the full SE gradient using the same law as the renderer's phase.
 Eigen::Vector3d sampleRenewalGradient(const ConditionalGpis::CovarianceKernel& kernel,
     const Eigen::Vector3d& direction, double normalizedDistance, double derivative,
     const Eigen::Vector3d& meanGradient, const Eigen::Vector3d& birthMeanGradient,

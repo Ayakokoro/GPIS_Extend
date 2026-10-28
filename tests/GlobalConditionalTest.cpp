@@ -168,6 +168,43 @@ void renewedEndpointCoordinates() {
                 "renewed near-origin endpoint supports a changed continuation direction");
         }
     }
+void endpointPrecision() {
+    using namespace Tungsten;
+    auto m=makeMedium();
+    IndependentPathSampler sampler(9371,false);sampler.startPath(0,0);
+    cg::Random directions(9371);
+    // Non-axis-aligned float directions acquire another rounding on double
+    // normalization. Cancellation at an endpoint near the world origin makes
+    // independently recomputed endpoint coordinates especially sensitive.
+    for(int i=0;i<128;++i) {
+        const Vec3f raw(float(2*directions.uniform01()-1),float(2*directions.uniform01()-1),float(2*directions.uniform01()-1));
+        const Vec3f w=raw.normalized();const float length=.375f;
+        auto context=std::make_shared<ConditionalPathContext>();
+        context->owner=m.get();context->position=-double(length)*V(w.x(),w.y(),w.z());
+        context->rayOrigin=Vec3f(float(context->position.x()),float(context->position.y()),float(context->position.z()));
+        context->birth.birthPosition=context->position;
+        context->birth.birthValue=20;context->birth.birthGradient=V::Zero();
+        const Ray incoming(context->rayOrigin,w,0,length);
+        for(bool shadow : {false,true}) {
+            Medium::MediumState state{};state.reset();state.pathContext=context;
+            Vec3f endpoint;
+            if(shadow) {
+                check(m->transmittance(sampler,incoming,true,true,&state).min()>0,"positive precision-probe visibility");
+                endpoint=incoming.hitpoint();
+            } else {
+                MediumSample ms{};
+                check(m->sampleDistance(sampler,incoming,state,ms)&&ms.exited,"precision probe reaches geometry");
+                endpoint=ms.p;
+            }
+            // An ordinary surface may change direction immediately after
+            // endpoint renewal; it must not look like an unobserved turn.
+            check(m->transmittance(sampler,Ray(endpoint,Vec3f(1.0f,0.0f,0.0f),0,.01f),true,true,&state).min()>0,
+                "near-origin renewed endpoint permits a direction change");
+            const auto next=std::dynamic_pointer_cast<const ConditionalPathContext>(state.pathContext);
+            check(next->position==next->birth.birthPosition,"renewed endpoint uses one precise position");
+        }
+    }
+    std::cout<<"endpoint precision: non-axis directions, near-origin cancellation, distance and shadow renewal passed\n";
 }
 void stage2() {
     renewedEndpointCoordinates();
@@ -288,6 +325,7 @@ void stage2() {
 }
 #include "ConditionalKnobChecks.hpp"
 #include "ConditionalSdfChecks.hpp"
+#include "ConditionalSurfaceBirthChecks.hpp"
 #include "ConditionalBoundChecks.hpp"
 #include "ConditionalTrackingChecks.hpp"
 #include "ConditionalTrackingProbe.hpp"
@@ -402,7 +440,9 @@ int main(int argc,char **argv)
         std::string stage=argc>1?argv[1]:"all";
         if(stage=="stage1"||stage=="all") stage1();
         if(stage=="stage2"||stage=="all") stage2();
+        if(stage=="endpoint_precision"||stage=="all") endpointPrecision();
         if(stage=="stage3"||stage=="all") stage3();
+        if(stage=="surface_births"||stage=="all") surfaceBirthChecks();
         if(stage=="sdf"||stage=="all") sdfChecks();
         if(stage=="knob"||stage=="all") knobChecks();
         if(stage=="bounds"||stage=="all") boundChecks();

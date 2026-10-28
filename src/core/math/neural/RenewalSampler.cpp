@@ -18,25 +18,26 @@ using ConditionalGpis::CovarianceKernelType;
 using ConditionalGpis::normalizedOrThrow;
 using ConditionalGpis::orthonormalComplement;
 
-Vector3 sampleRenewalGradient(const CovarianceKernel& kernel, const Vector3& direction,
+RenewalGradientDistribution::RenewalGradientDistribution(const CovarianceKernel& kernel, const Vector3& direction,
     double x, double derivative, const Vector3& meanGradient,
-    const Vector3& birthMeanGradient, const std::optional<Vector3>& birthGradient, Random& rng) {
+    const Vector3& birthMeanGradient, const std::optional<Vector3>& birthGradient) {
     if (kernel.type() != CovarianceKernelType::SquaredExponential || !(x >= 0) || !std::isfinite(x) ||
         !(derivative < 0) || !std::isfinite(derivative) || !meanGradient.allFinite() ||
         !birthMeanGradient.allFinite() || (birthGradient && !birthGradient->allFinite()))
         throw std::invalid_argument("invalid Renewal gradient reconstruction inputs");
-    const Vector3 w = normalizedOrThrow(direction);
+    direction_ = normalizedOrThrow(direction);
+    derivative_ = derivative;
+    const Vector3& w = direction_;
     Vector3 e1, e2;
     orthonormalComplement(w, e1, e2);
-    Eigen::Matrix<double,3,2> basis;
-    basis << e1, e2;
+    basis_ << e1, e2;
     const Matrix3 C = kernel.gradientCovarianceAtZero();
     const Vector3 cw = C*w;
     const double variance = w.dot(cw);
     if (!(variance > 0)) throw std::invalid_argument("degenerate Renewal directional gradient covariance");
     const Vector3 regression = cw/variance;
     const Matrix3 residualCovariance = C-cw*regression.transpose();
-    const Matrix2 transverse = basis.transpose()*residualCovariance*basis;
+    const Matrix2 transverse = basis_.transpose()*residualCovariance*basis_;
     const Eigen::LLT<Matrix2> cholesky(transverse);
     if (cholesky.info() != Eigen::Success)
         throw std::invalid_argument("Renewal requires a positive-definite kernel metric");
@@ -48,16 +49,61 @@ Vector3 sampleRenewalGradient(const CovarianceKernel& kernel, const Vector3& dir
         // term from the two-point gradient covariance. The remaining transverse
         // SE correlation is exp(-x*x/2).
         const double decay = 0.5*x*x;
-        residual = std::exp(-decay)*(basis.transpose()*(previous-regression*w.dot(previous)));
+        residual = std::exp(-decay)*(basis_.transpose()*(previous-regression*w.dot(previous)));
         varianceFactor = -std::expm1(-2*decay);
     }
+    const Vector3 longitudinal = meanGradient+regression*(derivative-w.dot(meanGradient));
+    mean_ = basis_.transpose()*longitudinal+residual;
+    lower_ = std::sqrt(varianceFactor)*cholesky.matrixL().toDenseMatrix();
+    delta_ = varianceFactor==0;
+    if (!delta_)
+        logNormalization_ = -std::log(2*ConditionalGpis::kPi)-lower_.diagonal().array().log().sum();
+}
+
+Vector3 RenewalGradientDistribution::sample(Random& rng) const {
     // Explicit temporaries fix random draw order across compilers.
     const double z1 = rng.standardNormal(), z2 = rng.standardNormal();
-    const Vector2 noise = cholesky.matrixL()*Vector2(z1,z2);
-    residual += std::sqrt(varianceFactor)*noise;
-    const Vector3 longitudinal = meanGradient+regression*(derivative-w.dot(meanGradient));
     // Construct in the ray frame so transverse roundoff cannot flip V's sign.
-    return derivative*w + basis*(basis.transpose()*longitudinal+residual);
+    return derivative_*direction_+basis_*(mean_+lower_*Vector2(z1,z2));
+}
+
+std::optional<Vector3> RenewalGradientDistribution::gradientForDirection(const Vector3& outgoing) const {
+    const Vector3 difference = normalizedOrThrow(outgoing)-direction_;
+    const double distanceSquared = difference.squaredNorm();
+    if (distanceSquared==0 || delta_) return std::nullopt;
+    // g = (v / dot(wi,h))*h, expressed in the fixed-v plane. This form
+    // preserves dot(wi,g)=v even near the forward-direction singularity.
+    const Vector2 transverse = (-2*derivative_/distanceSquared)*(basis_.transpose()*difference);
+    const Vector3 gradient = derivative_*direction_+basis_*transverse;
+    if (!gradient.allFinite()) throw std::runtime_error("nonfinite neural connection gradient");
+    return gradient;
+}
+
+double RenewalGradientDistribution::phasePdf(const Vector3& outgoing) const {
+    const auto gradient = gradientForDirection(outgoing);
+    return gradient ? phasePdfForGradient(*gradient) : 0;
+}
+
+double RenewalGradientDistribution::phasePdfForGradient(const Vector3& gradient) const {
+    if (delta_) return 0;
+    const double length=gradient.norm();
+    if (!(length>0) || !std::isfinite(length)) throw std::runtime_error("invalid neural phase gradient");
+    const Vector2 residual = basis_.transpose()*gradient-mean_;
+    const Vector2 standardized = lower_.triangularView<Eigen::Lower>().solve(residual);
+    // Plane -> normal -> reflection: d^2g_perp/domega_o =
+    // v^2/(4*|wi.h|^4) = |g|^4/(4*v^2). The network's speed was
+    // already sampled at the collision; do not add another crossing-flux factor.
+    const double logPdf = logNormalization_-0.5*standardized.squaredNorm()+4*std::log(length)-
+        std::log(4.)-2*std::log(-derivative_);
+    const double result = std::exp(logPdf);
+    if (!(result>=0) || !std::isfinite(result)) throw std::runtime_error("nonfinite neural phase PDF");
+    return result;
+}
+
+Vector3 sampleRenewalGradient(const CovarianceKernel& kernel, const Vector3& direction,
+    double x, double derivative, const Vector3& meanGradient,
+    const Vector3& birthMeanGradient, const std::optional<Vector3>& birthGradient, Random& rng) {
+    return RenewalGradientDistribution(kernel,direction,x,derivative,meanGradient,birthMeanGradient,birthGradient).sample(rng);
 }
 
 RenewalSampler::RenewalSampler(const GPSSField& field, const CausalRenewalModel& model,

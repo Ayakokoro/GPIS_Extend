@@ -240,7 +240,9 @@ if (TUNGSTEN_BUILD_GLOBAL_CONDITIONAL_TESTS)
     add_test(NAME global_conditional_point_jet COMMAND sdf_point_jet_test)
     add_test(NAME global_conditional_stage1 COMMAND global_conditional_test stage1)
     add_test(NAME global_conditional_stage2 COMMAND global_conditional_test stage2)
+    add_test(NAME global_conditional_endpoint_precision COMMAND global_conditional_test endpoint_precision)
     add_test(NAME global_conditional_stage3 COMMAND global_conditional_test stage3)
+    add_test(NAME global_conditional_surface_births COMMAND global_conditional_test surface_births)
     add_test(NAME global_conditional_sdf COMMAND global_conditional_test sdf)
     add_test(NAME global_conditional_knob COMMAND global_conditional_test knob)
     add_test(NAME global_conditional_bounds COMMAND global_conditional_test bounds)
@@ -271,6 +273,15 @@ if (TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS)
     add_executable(classic_global_test tests/ClassicGlobalTest.cpp)
     target_link_libraries(classic_global_test PRIVATE ${core_libs})
     add_test(NAME classic_global COMMAND classic_global_test "${CMAKE_CURRENT_BINARY_DIR}/classic-global-test")
+    add_executable(classic_global_nonstationary_test tests/ClassicGlobalNonstationaryTest.cpp)
+    target_link_libraries(classic_global_nonstationary_test PRIVATE ${core_libs})
+    add_test(NAME classic_global_nonstationary COMMAND classic_global_nonstationary_test)
+    add_test(NAME classic_global_nonstationary_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:classic_global_nonstationary_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global/shaderball-nonstationary.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/classic-global-nonstationary-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalNonstationaryRenderSmoke.cmake")
     add_test(NAME classic_global_render COMMAND ${CMAKE_COMMAND}
         "-DRENDERER=$<TARGET_FILE:tungsten>"
         "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global/scene.json"
@@ -306,6 +317,17 @@ if (OpenVDB_FOUND AND TBB_FOUND AND nanovdb_FOUND)
         nanovdb::nanovdb OpenVDB::openvdb nlohmann_json::nlohmann_json Eigen3::Eigen)
     if (MSVC)
         target_compile_options(bake_contact_fields PRIVATE /EHsc /utf-8 /bigobj)
+    endif()
+    add_executable(surface_probe EXCLUDE_FROM_ALL tools/surface_compare/probe.cpp)
+    target_link_libraries(surface_probe PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    add_executable(gpis_shaderball_bake EXCLUDE_FROM_ALL
+        tools/surface_compare/knob_bake.cpp src/core/math/SdfFunctionsQueries.cpp
+        src/core/math/Mat4f.cpp src/core/math/conditional/mathutility/Gaussian1D.cpp)
+    target_compile_definitions(gpis_shaderball_bake PRIVATE NANOVDB_USE_OPENVDB)
+    target_link_libraries(gpis_shaderball_bake PRIVATE
+        nanovdb::nanovdb OpenVDB::openvdb nlohmann_json::nlohmann_json Eigen3::Eigen)
+    if (MSVC)
+        target_compile_options(gpis_shaderball_bake PRIVATE /EHsc /utf-8 /bigobj)
     endif()
 endif()
 

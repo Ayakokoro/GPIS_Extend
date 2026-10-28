@@ -23,29 +23,68 @@ struct NeuralPathContext final : MediumPathContext {
 };
 struct NeuralEventContext final : MediumEventContext {
     const NeuralRenewalMedium *owner = nullptr;
-    V position, gradient;
+    V position;
+    std::optional<NeuralGpis::RenewalGradientDistribution> gradient;
 };
+
+std::shared_ptr<const NeuralPathContext> successor(const NeuralEventContext &event,
+    const V &gradient, const Vec3f &position) {
+    auto next=std::make_shared<NeuralPathContext>();
+    next->owner=event.owner; next->position=event.position; next->rayOrigin=position;
+    next->gradient=gradient;
+    return next;
+}
 
 class NeuralPhase final : public PhaseFunction {
     const NeuralRenewalMedium &_medium;
+    const bool _delta;
+    const NeuralEventContext &event(const Vec3f &wi, const MediumSample &s) const {
+        const auto *e=dynamic_cast<const NeuralEventContext *>(s.eventContext.get());
+        if (!e || e->owner!=&_medium || !e->gradient)
+            throw std::runtime_error("neural_causal_renewal: missing collision context");
+        if ((eigen(wi).normalized()-e->gradient->incomingDirection()).squaredNorm()>1e-12)
+            throw std::runtime_error("neural phase requires its incoming collision direction");
+        return *e;
+    }
 public:
-    explicit NeuralPhase(const NeuralRenewalMedium &medium) : _medium(medium) {}
-    // Conditioned on the sampled geometry this is a delta conductor. Ordinary
-    // surface NEE uses medium transmittance; no marginalized GP normal PDF is assumed.
-    bool isSpecular() const override { return true; }
-    Vec3f eval(const Vec3f &, const Vec3f &, const MediumSample &) const override { return Vec3f(0.f); }
-    float pdf(const Vec3f &, const Vec3f &, const MediumSample &) const override { return 0.f; }
-    bool sample(PathSampleGenerator &, const Vec3f &wi, const MediumSample &s, PhaseSample &r) const override {
-        const auto event = std::dynamic_pointer_cast<const NeuralEventContext>(s.eventContext);
-        if (!event || event->owner != &_medium) throw std::runtime_error("neural_causal_renewal: missing collision context");
-        const V w = eigen(wi).normalized(), n = event->gradient.normalized();
+    explicit NeuralPhase(const NeuralRenewalMedium &medium, bool delta=false) : _medium(medium),_delta(delta) {}
+    bool isSpecular() const override { return _delta; }
+    float pdf(const Vec3f &wi, const Vec3f &wo, const MediumSample &s) const override {
+        const auto &e=event(wi,s);
+        if (_delta) return 0;
+        const float value=float(e.gradient->phasePdf(eigen(wo)));
+        if (!(value>=0) || !std::isfinite(value)) throw std::runtime_error("neural phase PDF exceeds float range");
+        return value;
+    }
+    Vec3f eval(const Vec3f &wi, const Vec3f &wo, const MediumSample &s) const override {
+        const float density=pdf(wi,wo,s);
+        if (density==0) return Vec3f(0.f);
+        const V w=eigen(wi).normalized(), h=(eigen(wo).normalized()-w).normalized();
+        return _medium.reflectance(std::abs(w.dot(h)))*density;
+    }
+    Vec3f evalConnection(PathSampleGenerator &, const Vec3f &wi, const Vec3f &wo,
+        const MediumSample &s, std::shared_ptr<const MediumPathContext> &state) const override {
+        const Vec3f value=eval(wi,wo,s);
+        if (value==0.f) return value;
+        const auto &e=event(wi,s);
+        // The learned inward derivative is shared by both strategies. A light
+        // direction then fixes the complete gradient, including its length.
+        const auto gradient=e.gradient->gradientForDirection(eigen(wo));
+        if (!gradient) throw std::runtime_error("neural connection lost gradient support");
+        state=successor(e,*gradient,s.p);
+        return value;
+    }
+    bool sample(PathSampleGenerator &sampler, const Vec3f &wi, const MediumSample &s, PhaseSample &r) const override {
+        const auto &e=event(wi,s);
+        ConditionalGpis::Random rng(sampler);
+        const V gradient=e.gradient->sample(rng);
+        const V w=e.gradient->incomingDirection(), n=gradient.normalized();
         r.w = vec(ConditionalGpis::reflectTravelDirection(w,n)).normalized();
-        if (!(eigen(r.w).dot(event->gradient)>0)) return false;
-        r.weight = _medium.reflectance(-w.dot(n)); r.pdf = 1;
-        auto next = std::make_shared<NeuralPathContext>();
-        next->owner = &_medium; next->position = event->position; next->rayOrigin = s.p;
-        next->gradient = event->gradient;
-        r.pathContext = std::move(next);
+        if (!(eigen(r.w).dot(gradient)>0)) return false;
+        r.weight = _medium.reflectance(-w.dot(n));
+        r.pdf = _delta ? 1.f : float(e.gradient->phasePdfForGradient(gradient));
+        if (!(r.pdf>=0) || !std::isfinite(r.pdf)) throw std::runtime_error("neural sampled PDF exceeds float range");
+        r.pathContext = successor(e,gradient,s.p);
         return true;
     }
 };
@@ -62,6 +101,7 @@ struct NeuralRenewalMedium::Impl {
     ConditionalGpis::GPSSField field;
     std::optional<NeuralGpis::CausalRenewalModel> model;
     std::unique_ptr<NeuralGpis::RenewalSampler> medium;
+    std::shared_ptr<PhaseFunction> deltaPhase;
 
     Segment segment(const NeuralRenewalMedium *owner, const Ray &ray, const MediumState *state) const {
         if (!medium) throw std::runtime_error("neural_causal_renewal: prepareForRender must precede tracing");
@@ -113,6 +153,7 @@ struct NeuralRenewalMedium::Impl {
 
 NeuralRenewalMedium::NeuralRenewalMedium() : _impl(std::make_unique<Impl>()) {
     _maxBounce=128; _phaseFunction=std::make_shared<NeuralPhase>(*this);
+    _impl->deltaPhase=std::make_shared<NeuralPhase>(*this,true);
 }
 NeuralRenewalMedium::~NeuralRenewalMedium() = default;
 
@@ -206,13 +247,14 @@ bool NeuralRenewalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray
             if (part==parts.end()) part=std::prev(parts.end());
             const auto interior=f.ray.origin+(0.5*(part->begin+part->end)*f.ell)*f.ray.direction;
             const V meanGradient=_impl->field.mean->evaluateInCell(e->position,interior).gradient;
-            e->gradient=NeuralGpis::sampleRenewalGradient(_impl->field.kernel,f.ray.direction,hit.q,
-                -f.sigma/f.ell*hit.speed,meanGradient,f.birthMeanGradient,f.birthGradient,rng);
-            if (!e->gradient.allFinite() || !(e->gradient.dot(f.ray.direction)<0))
-                throw std::runtime_error("neural_causal_renewal: invalid collision gradient");
+            // Keep the learned speed as the common conditioning variable. NEE
+            // and phase sampling integrate the remaining transverse Gaussian.
+            e->gradient.emplace(_impl->field.kernel,f.ray.direction,hit.q,
+                -f.sigma/f.ell*hit.speed,meanGradient,f.birthMeanGradient,f.birthGradient);
+            if (e->gradient->isDelta()) sample.phase=_impl->deltaPhase.get();
             sample.exited=false; sample.t=sample.continuedT=float(
                 (segment.entry+hit.q*f.ell-segment.begin)/segment.speed);
-            sample.p=vec(e->position); sample.aniso=Vec3d(e->gradient.x(),e->gradient.y(),e->gradient.z());
+            sample.p=vec(e->position);
             sample.eventContext=e; state.advance();
             return true;
         }
