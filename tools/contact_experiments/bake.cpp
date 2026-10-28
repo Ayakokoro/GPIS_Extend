@@ -44,6 +44,7 @@ void writeJson(const fs::path& path, const Json& data) {
 struct Shape {
     std::string type;
     double radius = 0.25, gap = 0.02, angle = 90;
+    double width = 0, depth = 0, wall = 0, base = 0, halfLength = .5;
     Vec lo{}, hi{};
     std::vector<std::array<double, 2>> polygon;
 
@@ -64,6 +65,16 @@ struct Shape {
                        {0,-.05}, {-a,.2}, {-.5,.2}};
             lo = {-.5,-.2,-.5};
             hi = { .5, .2, .5};
+        } else if (type == "u_groove") {
+            width = spec.at("width"); depth = spec.at("depth");
+            wall = spec.at("wall_thickness"); base = spec.at("base_thickness");
+            halfLength = spec.at("length").get<double>() / 2;
+            for (double value : {width, depth, wall, base, halfLength})
+                require(std::isfinite(value) && value > 0, "U groove dimensions must be positive and finite");
+            const double a = width / 2, b = a + wall, bottom = -depth - base;
+            polygon = {{-b,bottom}, {b,bottom}, {b,0}, {a,0},
+                       {a,-depth}, {-a,-depth}, {-a,0}, {-b,0}};
+            lo = {-b,bottom,-halfLength}; hi = {b,0,halfLength};
         } else throw std::runtime_error("unknown shape: " + type);
     }
 
@@ -89,7 +100,7 @@ struct Shape {
                 p[0] < a[0] + (p[1]-a[1])*ex/ey) inside = !inside;
         }
         const double d = (inside ? -1 : 1) * std::sqrt(squared);
-        const double cap = std::abs(p[2]) - .5;
+        const double cap = std::abs(p[2]) - halfLength;
         return std::min(std::max(d, cap), 0.0) + std::hypot(std::max(d, 0.0), std::max(cap, 0.0));
     }
 
@@ -105,6 +116,13 @@ struct Shape {
             check({radius+gap/2,0,0}, -radius);
             check({-radius-gap/2,0,0}, -radius);
             check({2*radius+gap/2,0,0}, 0);
+        } else if (type == "u_groove") {
+            check({width/2,-depth/2,0}, 0);
+            check({-width/2,-depth/2,0}, 0);
+            check({0,-depth,0}, 0);
+            check({0,-depth/2,0}, std::min(width/2, depth/2));
+            check({width/2+wall/2,-depth/2,0}, -std::min({wall/2,depth/2,halfLength}));
+            check({0,-depth-base/2,halfLength+width}, width);
         } else {
             check({0,-.05,0}, 0);
             check({0,-.075,0}, -.025);
@@ -250,7 +268,7 @@ void bake(const Json& spec, const Json& settings, const fs::path& directory) {
                           {"sdf_formats_identical",true},{"density_verified",true},
                           {"analytic_probes",shape.probes()}}},
         {"note","Exact analytic SDF at nodes; trilinear between nodes. Bounds apply inside the full grid."
-                " Both spheres share one field; V groove is a finite extruded closed polygon."}
+                " Both spheres share one field; grooves are finite extruded closed polygons, Y up."}
     };
     writeJson(nvdbPath.string()+".json", metadata);
     std::cout << name << ": verified and saved " << nvdbPath.string() << std::endl;

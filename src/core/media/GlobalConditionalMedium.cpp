@@ -240,7 +240,10 @@ Vec3f GlobalConditionalMedium::transmittance(PathSampleGenerator &sampler,const 
     next->position=c->position+double(ray.farT())*speed*w; next->rayOrigin=ray.hitpoint();
     // Shadow traversal uses the same endpoint renewal as distance sampling,
     // including forward surfaces inside the same medium.
-    if(tr>0) next->birth=segment.samplePositiveEndpoint(rng);
+    if(tr>0) {
+        next->birth=segment.samplePositiveEndpoint(rng);
+        next->position=next->birth.birthPosition;
+    }
     state->pathContext=next;
     return Vec3f(float(tr));
 }

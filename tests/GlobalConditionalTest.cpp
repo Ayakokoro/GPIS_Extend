@@ -127,7 +127,50 @@ std::shared_ptr<Tungsten::GlobalConditionalMedium> makeMedium(const std::string 
     check(bool(m),"conditional factory");
     m->loadResources();m->prepareForRender();return m;
 }
+void renewedEndpointCoordinates() {
+    using namespace Tungsten;
+    auto medium=makeMedium();
+    const V target(6.4410418442434336e-5,-2.0082864538029099e-10,-1.1738900735902536e-4);
+    // Near the world origin, subtracting a flight can expose the ulp
+    // difference between a direction and its second normalization.
+    for(const Vec3f &direction : {Vec3f(-0.023702f,-0.9995955f,0.0157197f),
+            Vec3f(1.0f,-3.0f,2.0f).normalized(),Vec3f(0.17f,-0.87f,0.29f).normalized(),
+            Vec3f(0.137f,-0.98f,0.241f).normalized()}) {
+        const V raw(direction.x(),direction.y(),direction.z());
+        const V w=raw.normalized();
+        const float distance=0.125f;
+        auto initial=std::make_shared<ConditionalPathContext>();
+        initial->owner=medium.get();
+        initial->position=target-(double(distance)*raw.norm())*w;
+        initial->rayOrigin=Vec3f(float(initial->position.x()),float(initial->position.y()),float(initial->position.z()));
+        initial->birth.birthPosition=initial->position;
+        initial->birth.birthValue=5;initial->birth.birthGradient=V(0.2,-0.1,1);
+        const Ray incoming(initial->rayOrigin,direction,0,distance);
+        for(bool shadow : {false,true}) {
+            Medium::MediumState state{};state.reset();state.pathContext=initial;
+            IndependentPathSampler sampler(833,false);sampler.startPath(0,0);
+            MediumSample sample{};
+            if(shadow)
+                check(medium->transmittance(sampler,incoming,true,true,&state).min()>0,
+                    "off-axis shadow reaches geometry near origin");
+            else
+                check(medium->sampleDistance(sampler,incoming,state,sample) && sample.exited,
+                    "off-axis path reaches geometry near origin");
+            const auto endpoint=std::dynamic_pointer_cast<const ConditionalPathContext>(state.pathContext);
+            check(endpoint->position==endpoint->birth.birthPosition,
+                shadow ? "shadow endpoint coordinates must agree exactly" : "path endpoint coordinates must agree exactly");
+            check(endpoint->rayOrigin==incoming.hitpoint(),"precise renewal preserves the float geometry hitpoint");
+            const Ray turned(endpoint->rayOrigin,Vec3f(-0.3625183f,0.93165535f,0.02446967f),0,0.001f);
+            auto connection=state;
+            check(medium->transmittance(sampler,turned,true,true,&connection).min()>0,
+                "renewed near-origin endpoint supports a changed shadow direction");
+            check(medium->sampleDistance(sampler,turned,state,sample) && sample.exited,
+                "renewed near-origin endpoint supports a changed continuation direction");
+        }
+    }
+}
 void stage2() {
+    renewedEndpointCoordinates();
     auto f=field();
     f.mean=std::make_shared<cg::ConstantMean>(0.0);
     cg::FlightState s; s.birthPosition=V::Zero();s.birthGradient=V(0.2,-0.1,1.0);
