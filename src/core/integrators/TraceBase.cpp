@@ -1,4 +1,5 @@
 #include "TraceBase.hpp"
+#include "BounceContributions.hpp"
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
@@ -471,19 +472,35 @@ Vec3f TraceBase::attenuatedEmission(PathSampleGenerator &sampler,
                          Medium::MediumState* mediumState,
                          Vec3f *transmittance)
 {
+    using D = PathTraceDiagnostics;
+    size_t diagnosticIndex = 0;
+    if (_pathDiagnostics)
+        diagnosticIndex = _pathDiagnostics->add("connection", {{"position", D::vector(ray.pos())},
+            {"outgoing", D::vector(ray.dir())}, {"bounce", bounce},
+            {"strategy", expectedDist < 0.0f ? "scatter_sample" : "light_sample"},
+            {"light", light.name()}, {"infinite_light", light.isInfinite()}, {"from_surface", startsOnSurface}});
     CONSTEXPR float fudgeFactor = 1.0f + 1e-3f;
 
     if (light.isDirac()) {
         ray.setFarT(expectedDist);
     } else {
-        if (!light.intersect(ray, data) || ray.farT()*fudgeFactor < expectedDist)
+        if (!light.intersect(ray, data) || ray.farT()*fudgeFactor < expectedDist) {
+            if (_pathDiagnostics) _pathDiagnostics->events[diagnosticIndex]["status"] = "missed_selected_light";
             return Vec3f(0.0f);
+        }
     }
     info.p = ray.pos() + ray.dir()*ray.farT();
     info.w = ray.dir();
     light.intersectionInfo(data, info);
+    if (_pathDiagnostics && !light.isInfinite())
+        _pathDiagnostics->events[diagnosticIndex]["endpoint"] = D::vector(info.p);
 
     Vec3f shadow = generalizedShadowRay(sampler, ray, medium, &light, startsOnSurface, true, bounce, mediumState);
+    if (_pathDiagnostics) {
+        auto &event = _pathDiagnostics->events[diagnosticIndex];
+        event["transmittance"] = D::vector(shadow);
+        event["status"] = shadow == 0.0f ? "zero_transmittance" : "connected";
+    }
     if (transmittance)
         *transmittance = shadow;
     if (shadow == 0.0f)
@@ -849,12 +866,20 @@ bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumS
            const Medium *&medium, int bounce, bool adjoint, bool enableLightSampling,
            Ray &ray, Vec3f &throughput, Vec3f &emission, bool &wasSpecular, bool directLightingDone)
 {
+    using D = PathTraceDiagnostics;
     wasSpecular = !enableLightSampling;
 
     if (!directLightingDone && !adjoint && enableLightSampling && bounce < _settings.maxBounces - 1) {
         Medium::MediumState mediumStateBounceIncr = mediumState;
         mediumStateBounceIncr.info.pixelSampleSegment.w() += 1;
+        const Vec3f emissionBefore = emission;
         emission += throughput*volumeEstimateDirect(sampler, mediumSample, &mediumStateBounceIncr, medium, bounce + 1, ray);
+        recordBounceContribution(bounce + 1, emission - emissionBefore);
+        if (_pathDiagnostics)
+            _pathDiagnostics->add("direct_estimate", {{"position", D::vector(mediumSample.p)},
+                {"bounce", bounce}, {"medium_scatter_order", _pathDiagnostics->mediumScatters + 1},
+                {"surface_reflections_before", _pathDiagnostics->surfaceReflections},
+                {"emission_added", D::vector(emission - emissionBefore)}});
     }
 
     PhaseSample phaseSample;
@@ -864,6 +889,14 @@ bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumS
     }
 
     if (phaseSample.pathContext) mediumState.pathContext = phaseSample.pathContext;
+    if (_pathDiagnostics) {
+        ++_pathDiagnostics->mediumScatters;
+        _pathDiagnostics->add("medium_scatter", {{"position", D::vector(mediumSample.p)},
+            {"incoming", D::vector(ray.dir())}, {"outgoing", D::vector(phaseSample.w)},
+            {"scatter_weight", D::vector(phaseSample.weight)},
+            {"throughput_before", D::vector(throughput)}, {"throughput_after", D::vector(throughput*phaseSample.weight)},
+            {"medium_scatter_order", _pathDiagnostics->mediumScatters}, {"bounce", bounce}});
+    }
     ray = ray.scatter(mediumSample.p, phaseSample.w, 0.f);
     ray.setPrimaryRay(false);
     throughput *= phaseSample.weight;
@@ -894,8 +927,11 @@ bool TraceBase::finishSurface(SurfaceState &surface, SurfaceScatterEvent &event,
 {
     if (!surface.forward) {
         if (!adjoint && info.primitive->isEmissive() && bounce >= _settings.minBounces) {
-            if (!enableLightSampling || wasSpecular || !info.primitive->isSamplable())
+            if (!enableLightSampling || wasSpecular || !info.primitive->isSamplable()) {
+                const Vec3f emissionBefore = emission;
                 emission += info.primitive->evalDirect(data, info)*throughput;
+                recordBounceContribution(bounce, emission - emissionBefore);
+            }
         }
         event.requestedLobe = BsdfLobes::AllLobes;
         if (!info.bsdf->sample(event, adjoint))
@@ -928,8 +964,10 @@ bool TraceBase::handleSurface(SurfaceScatterEvent &event, IntersectionTemporary 
     if (!surface.forward && !adjoint && enableLightSampling && bounce < _settings.maxBounces - 1) {
         Medium::MediumState mediumStateBounceIncr = mediumState;
         mediumStateBounceIncr.info.pixelSampleSegment.w() += 1;
+        const Vec3f emissionBefore = emission;
         emission += estimateDirect(event, &mediumStateBounceIncr, medium, bounce + 1,
             ray, transmittance)*throughput;
+        recordBounceContribution(bounce + 1, emission - emissionBefore);
     }
     return finishSurface(surface, event, data, info, medium, bounce, adjoint,
         enableLightSampling, ray, throughput, emission, wasSpecular, mediumState);

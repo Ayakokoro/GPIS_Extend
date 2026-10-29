@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shaderball · 1–4 次反射贡献</title>
+<style>
+:root{color-scheme:light;--ink:#1b2b3d;--muted:#596b7e;--line:#d9e1e9;--accent:#205b8b}
+*{box-sizing:border-box}body{margin:0;background:#f3f6f9;color:var(--ink);font:15px/1.65 system-ui,"Microsoft YaHei",sans-serif}
+main{max-width:1240px;margin:0 auto;padding:32px 24px 55px}h1{font-size:29px;line-height:1.3;margin:4px 0 12px}h2{font-size:20px;margin:24px 0 12px}
+p{margin:8px 0}a{color:var(--accent)}.subtle{color:var(--muted)}.eyebrow{font-size:12px;color:var(--accent);letter-spacing:1.4px;font-weight:700}
+.badge{display:inline-block;background:#e1eee8;color:#285d48;border-radius:5px;padding:3px 9px;margin:3px 6px 0 0;font-size:12px}
+.controls{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:14px 16px;margin:22px 0 15px;background:white;border:1px solid var(--line);border-radius:8px;position:sticky;top:0;z-index:2;box-shadow:0 3px 14px #1b2b3d0b}
+label{white-space:nowrap}select{font:inherit;color:var(--ink);background:#f6f8fa;border:1px solid #bccbd8;padding:5px 8px;border-radius:4px}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.card{background:#fff;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.card header{padding:8px 12px;font-size:14px;font-weight:650}.card canvas{width:100%;height:auto;display:block;cursor:crosshair;image-rendering:pixelated;background:#000}.card footer{padding:5px 10px;color:var(--muted);font-size:12px}
+.section-title{display:flex;justify-content:space-between;align-items:baseline;gap:20px;margin:18px 0 8px}.section-title h2{margin:0}.section-title span{font-size:13px;color:var(--muted)}
+.readout{padding:18px;background:white;border:1px solid var(--line);border-radius:8px;margin-top:24px}.readout-controls{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.chart{width:100%;height:290px;display:block}.legend{display:flex;gap:15px;flex-wrap:wrap;font-size:13px}.legend i{display:inline-block;width:12px;height:9px;margin-right:5px}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-variant-numeric:tabular-nums;font-size:13px}td,th{border-bottom:1px solid #e3e9ef;padding:7px 10px;text-align:right}td:first-child,th:first-child{text-align:left}
+.downloads{display:flex;flex-wrap:wrap;gap:20px;margin:16px 0}.note{padding:16px 18px;border-left:3px solid #adc0ce;background:#eaf0f5;margin-top:22px}
+@media(max-width:700px){main{padding:20px 12px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.controls{position:static;gap:10px}h1{font-size:24px}table{font-size:11px}td,th{padding:6px 3px}}
+</style>
+<main>
+<div class="eyebrow">GPIS SHADERBALL / BOUNCE CONTRIBUTIONS</div>
+<h1>凹槽差异从第几次反射开始？</h1>
+<p>四种模式采用原场景、ℓ=0.2、σ=0.02，统一 <b>256×256 · 128 spp</b>。以下图像按每条光路对相机亮度的贡献分类。</p>
+<p class="subtle">保留完整追踪至最大深度 20，再拆分出 1、2、3、4 次反射。NEE、MIS、俄罗斯轮盘与原有拒绝规则均沿用原设置。</p>
+<span class="badge">拆分之和已核验</span><span class="badge">与原 128 spp 图像逐像素一致（浮点容差内）</span><span class="badge">统一曝光 · 未降噪</span>
+<div class="controls">
+<label>贡献 <select id="kind"><option value="exact">恰好 k 次反射</option><option value="cumulative">累计到 k 次反射（含 0 次）</option></select></label>
+<label>区域 <select id="crop"><option value="full">完整图像</option><option value="inner">球间凹槽放大</option><option value="base">底座凹槽放大</option></select></label>
+<label>统一增益 <select id="gain"><option value="1">×1（原曝光）</option><option value="4">×4</option><option value="16">×16</option></select></label>
+<span class="subtle">点击图像查看同一位置的线性亮度</span>
+</div>
+<div id="images"></div>
+<div class="readout">
+<div class="readout-controls"><strong id="probeTitle"></strong><label>预设像素 <select id="pixel"></select></label><label>统计范围 <select id="radius"><option value="4">9×9 邻域均值</option><option value="0">单像素</option></select></label></div>
+<p class="subtle">按原始线性亮度统计，不受上方增益影响。横轴为反射次数；5+ 为剩余高阶贡献。</p>
+<div class="legend" id="legend"></div><svg id="chart" class="chart" viewBox="0 0 1040 290" role="img" aria-label="各反射次数的线性亮度"></svg>
+<div style="overflow-x:auto"><table id="values"></table></div>
+</div>
+<div class="downloads"><a href="exact.png">下载 1–4 次贡献总览</a><a href="cumulative.png">下载累计总览</a><a href="exact_groove.png">下载凹槽放大图</a><a href="../groove_paths/comparison.html">查看 7 个探针的实际光线与反射方向</a></div>
+<div class="note">
+<p><b>如何读图：</b>“恰好 3 次”只显示经过 3 个散射点后抵达光源的贡献；NEE 连接也计入当前散射点。地面反射计数，透明介质边界和光源端点不计数。它不是“路径只追踪 3 次”的渲染。</p>
+<p>累计图在线性空间相加后统一显示，含直接可见光源的 0 次贡献。完整参考图还包含 5 次及以上贡献。128 spp 用于定位差异，高阶反射仍有噪声；图像变暗本身不能区分遮挡、材质衰减和被拒绝路径的影响。</p>
+<p><a href="manifest.json">场景与文件记录</a> · <a href="validation.json">验证结果</a> · <a href="statistics.json">预设区域的线性数据</a></p>
+</div>
+</main>
+<script id="payload" type="application/json">__PAYLOAD__</script>
+<script>
+'use strict';
+const D=JSON.parse(document.querySelector('#payload').textContent), W=D.width,H=D.height,N=W*H*3;
+const colors=['#277bb2','#d28130','#a34a92','#287b60'];
+const arrays={};for(const m of D.modes){const s=atob(D.images[m]),u=new Uint8Array(s.length);for(let i=0;i<s.length;i++)u[i]=s.charCodeAt(i);arrays[m]=new Float32Array(u.buffer)}
+delete D.images;document.querySelector('#payload').remove();
+const $=s=>document.querySelector(s), panels=[];let point=[165,83];
+const crops={full:[0,0,256,256],inner:[55,38,195,145],base:[60,145,216,213]};
+const params=new URLSearchParams(location.search);
+for(const id of ['kind','crop','gain']){const v=params.get(id),select=$('#'+id);if(v&&[...select.options].some(o=>o.value===v))select.value=v}
+for(const k of [6,1,2,3,4]){
+ const section=document.createElement('section');section.innerHTML=`<div class="section-title"><h2 data-order="${k}"></h2><span>${k===6?'含 0 次及 5+ 次贡献':'相同曝光，可直接比较亮暗'}</span></div><div class="grid"></div>`;
+ for(let j=0;j<4;j++){
+  const c=document.createElement('article');c.className='card';c.innerHTML=`<header style="border-top:3px solid ${colors[j]}">${D.labels[j]}</header><canvas></canvas><footer></footer>`;
+  section.querySelector('.grid').appendChild(c);const cv=c.querySelector('canvas');panels.push({cv,k,m:D.modes[j],footer:c.querySelector('footer')});
+  cv.addEventListener('click',e=>{const b=cv.getBoundingClientRect(),r=crops[$('#crop').value];point=[Math.min(r[2]-1,r[0]+Math.floor((e.clientX-b.left)/b.width*(r[2]-r[0]))),Math.min(r[3]-1,r[1]+Math.floor((e.clientY-b.top)/b.height*(r[3]-r[1])))];$('#pixel').value='custom';updateProbe();drawPanels()});
+ }
+ $('#images').appendChild(section);
+}
+for(const p of D.pixels){const o=document.createElement('option');o.value=p.label;o.textContent=`${p.label} (${p.xy.join(', ')})`;$('#pixel').appendChild(o)}
+const custom=document.createElement('option');custom.value='custom';custom.textContent='点击位置';$('#pixel').appendChild(custom);$('#pixel').value='inner_right';
+$('#legend').innerHTML=D.labels.map((l,i)=>`<span><i style="background:${colors[i]}"></i>${l}</span>`).join('');
+function tone(v,g){let x=Math.max(0,v*g-.004);return Math.round(255*Math.min(1,x*(6.2*x+.5)/(x*(6.2*x+1.7)+.06)))}
+function drawPanels(){
+ const cumulative=$('#kind').value==='cumulative',g=Number($('#gain').value),[x0,y0,x1,y1]=crops[$('#crop').value];
+ for(const title of document.querySelectorAll('[data-order]')){const k=Number(title.dataset.order);title.textContent=k===6?'完整参考图':(cumulative?'累计到 ':'恰好 ')+k+' 次反射'+(cumulative?'':'的贡献')}
+ for(const {cv,k,m,footer} of panels){
+  cv.width=x1-x0;cv.height=y1-y0;const ctx=cv.getContext('2d'),im=ctx.createImageData(cv.width,cv.height),a=arrays[m];
+  for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++){
+   const i=3*(x+y*W),q=4*((x-x0)+(y-y0)*cv.width);
+   for(let c=0;c<3;c++){let v=a[k*N+i+c];if(k!==6&&cumulative){v=0;for(let t=0;t<=k;t++)v+=a[t*N+i+c]}im.data[q+c]=tone(v,g)}im.data[q+3]=255;
+  }
+  ctx.putImageData(im,0,0);
+  if(point[0]>=x0&&point[0]<x1&&point[1]>=y0&&point[1]<y1){ctx.strokeStyle='#ffce59';ctx.lineWidth=.8;ctx.strokeRect(point[0]-x0-3.5,point[1]-y0-3.5,8,8)}
+  footer.textContent=`${x1-x0}×${y1-y0} 原图区域 · 增益 ×${g}`;
+ }
+}
+function means(m){
+ const r=Number($('#radius').value),a=arrays[m],v=new Array(7).fill(0);let n=0;
+ for(let y=Math.max(0,point[1]-r);y<=Math.min(H-1,point[1]+r);y++)for(let x=Math.max(0,point[0]-r);x<=Math.min(W-1,point[0]+r);x++){
+  const i=3*(x+y*W);for(let k=0;k<7;k++)v[k]+=.2126*a[k*N+i]+.7152*a[k*N+i+1]+.0722*a[k*N+i+2];n++;
+ }return v.map(x=>x/n);
+}
+function updateProbe(){
+ const values=D.modes.map(means),rad=Number($('#radius').value);$('#probeTitle').textContent=`像素 (${point.join(', ')}) · ${rad?'9×9 邻域':'单像素'}`;
+ const ymax=Math.max(1e-8,...values.flatMap(v=>v.slice(1,6)))*1.12,left=72,right=1018,top=18,bottom=245,span=(right-left)/5;
+ let svg='';for(let t=0;t<=4;t++){const value=ymax*t/4,y=bottom-(bottom-top)*t/4;svg+=`<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="#dfe6ed"/><text x="${left-9}" y="${y+4}" text-anchor="end" font-size="12" fill="#596b7e">${value.toPrecision(3)}</text>`}
+ for(let k=1;k<=5;k++){for(let m=0;m<4;m++){const v=values[m][k],bw=span*.15,x=left+(k-1)*span+span*.14+m*bw,y=bottom-(bottom-top)*v/ymax;svg+=`<rect x="${x}" y="${y}" width="${bw-3}" height="${bottom-y}" fill="${colors[m]}"><title>${D.labels[m]} · ${k===5?'5+':k}: ${v}</title></rect>`}svg+=`<text x="${left+(k-.5)*span}" y="274" text-anchor="middle" font-size="14" fill="#1b2b3d">${k===5?'5+':k} 次</text>`}
+ $('#chart').innerHTML=svg;
+ $('#values').innerHTML='<tr><th>模式</th><th>0 次</th><th>1 次</th><th>2 次</th><th>3 次</th><th>4 次</th><th>5+ 次</th><th>总亮度</th></tr>'+values.map((v,m)=>`<tr><td style="color:${colors[m]}">${D.labels[m]}</td>${v.map(x=>`<td>${x.toFixed(5)}</td>`).join('')}</tr>`).join('');
+}
+for(const id of ['kind','crop','gain'])$('#'+id).addEventListener('change',drawPanels);
+$('#radius').addEventListener('change',updateProbe);$('#pixel').addEventListener('change',()=>{const p=D.pixels.find(p=>p.label===$('#pixel').value);if(p)point=p.xy.slice();updateProbe();drawPanels()});
+drawPanels();updateProbe();document.documentElement.dataset.ready='true';
+</script>
+</html>

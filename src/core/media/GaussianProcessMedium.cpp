@@ -248,6 +248,7 @@ namespace Tungsten {
         float maxT = r.farT();
 
         if (state.bounce >= _maxBounce) {
+            if (state.distanceDiagnostic) state.distanceDiagnostic->failure = "medium_bounce_limit";
             return DistanceStatus::Failed;
         }
 
@@ -304,14 +305,21 @@ namespace Tungsten {
 
             Vec3d grad;
             if (!sampleGradient(sampler, r, ip, t, state, grad)) {
+                if (state.distanceDiagnostic) state.distanceDiagnostic->failure = "gradient_sampling_failed";
                 std::cout << "Failed to sample gradient.\n";
                 return DistanceStatus::Failed;
             }
 
             state.lastAniso = sample.aniso = grad;
+            if (state.distanceDiagnostic) {
+                state.distanceDiagnostic->hasCandidate = true;
+                state.distanceDiagnostic->position = ip;
+                state.distanceDiagnostic->gradient = grad;
+            }
             state.firstScatter = false;
 
             if (!std::isfinite(sample.aniso.avg())) {
+                if (state.distanceDiagnostic) state.distanceDiagnostic->failure = "nonfinite_gradient";
                 sample.aniso = Vec3d(1.f, 0.f, 0.f);
                 std::cout << "Gradient invalid in sampleDistance: " << grad << std::endl;
                 return DistanceStatus::Failed;
@@ -325,10 +333,12 @@ namespace Tungsten {
         }
         if (!sample.exited) {
             if (sample.aniso.dot(vec_conv<Vec3d>(ray.dir())) > 0) {
+                if (state.distanceDiagnostic) state.distanceDiagnostic->failure = "outward_crossing_rejected";
                 return DistanceStatus::Failed;
             }
 
             if (sample.aniso.lengthSq() < 0.0000001f) {
+                if (state.distanceDiagnostic) state.distanceDiagnostic->failure = "zero_gradient";
                 sample.aniso = Vec3d(1.f, 0.f, 0.f);
                 std::cout << "Gradient zero.\n";
                 return DistanceStatus::Failed;
