@@ -2,6 +2,7 @@
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
+#include "media/PoissonEllipsoidMedium.hpp"
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
 #include "media/NeuralRenewalMedium.hpp"
 #endif
@@ -29,7 +30,8 @@ TraceBase::TraceBase(TraceableScene *scene, const TraceSettings &settings, uint3
         auto *cube = dynamic_cast<Cube *>(prim.get());
         if (cube && (dynamic_cast<const GaussianProcessMedium *>(cube->intMedium().get()) ||
                      dynamic_cast<const ClassicLocalMedium *>(cube->intMedium().get()) ||
-                     dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get())
+                     dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get()) ||
+                     dynamic_cast<const PoissonEllipsoidMedium *>(cube->intMedium().get())
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
                      || dynamic_cast<const NeuralRenewalMedium *>(cube->intMedium().get())
 #endif
@@ -43,7 +45,7 @@ bool TraceBase::intersectScene(Ray &ray, const Medium *medium,
         IntersectionTemporary &data, IntersectionInfo &info) const
 {
     bool hit = _scene->intersect(ray, data, info);
-    // BVH traversal also ignores exits before nearT. Query the current GP/classic
+    // BVH traversal also ignores exits before nearT. Query the current process
     // boundary directly so a transparent boundary still updates medium state.
     if (medium) {
         for (const auto *cube : _gpisBoundaryCubes) {

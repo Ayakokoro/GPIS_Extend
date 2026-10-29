@@ -10,6 +10,7 @@
 #include "ClassicGlobalMedium.hpp"
 #include "ClassicLocalMedium.hpp"
 #include "GlobalConditionalMedium.hpp"
+#include "PoissonEllipsoidMedium.hpp"
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
 #include "NeuralRenewalMedium.hpp"
 #define NEURAL_RENEWAL_FACTORY_ENTRY {"neural_causal_renewal", std::make_shared<NeuralRenewalMedium>},
@@ -31,6 +32,7 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"classic_global", std::make_shared<ClassicGlobalMedium>},
     {"classic_local", std::make_shared<ClassicLocalMedium>},
     {"global_conditional", std::make_shared<GlobalConditionalMedium>},
+    {"poisson_ellipsoid_local", std::make_shared<PoissonEllipsoidMedium>},
     NEURAL_RENEWAL_FACTORY_ENTRY
 }))
 

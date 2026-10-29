@@ -54,6 +54,67 @@ to build only the other medium implementations.
 
 # Scene Files
 
+## Pointwise local Poisson ellipsoids
+
+The independent `poisson_ellipsoid_local` medium evaluates the SDF value **and
+its full gradient at every tracking candidate**. Its local center-density law is
+`lambda_i0 * exp(-(phi(x) - gradient(phi(x)).dot(q_i(m))) / decay_length)`.
+The gradient magnitude is preserved for trilinear fields; only the particle
+orientation frame uses its unit direction. Each new bounce uses the same
+pointwise rule, without particle identities or empty-path history.
+
+See [the runnable example](data/example-scenes/poisson-ellipsoid-local/scene.json).
+`sdf` takes an existing scene mean: `linear`, `spherical`, `homogeneous`, a
+procedural mean with certified SDF queries, or a `tabulated` trilinear VDB.
+For the contact experiments, copy `gaussian_process.mean` from a `classic_global`
+scene into this medium's `sdf` field; retain its process box. No GP covariance,
+baked density channel, or learned model is used. Transport outside the process
+box is vacuum; its boundary is a finite-domain truncation of the density law.
+
+Each entry in `particles` specifies positive `semiaxes` in world length units,
+nonnegative center `density` in inverse world-volume units at `phi=0`, optional
+`rotation_degrees`, and a smooth `mirror` or `conductor` material. Rotations are
+applied X, then Y, then Z. `frame="sdf"` (default) uses local Z along the current
+SDF gradient; local X is projected world X, switching to projected world Y
+when `abs(N.x) >= 0.9`. A zero gradient uses the world frame. `frame="world"`
+fixes particle orientation. `decay_length` is positive; `tracking_step` controls
+the maximum length of a majorant interval and defaults to `decay_length`.
+Changing the step changes efficiency, not the specified collision law.
+
+Distance, particle type and geometric normal are sampled together using a
+marked Poisson majorant. The visible-normal proposal samples the projected
+full ellipsoid, equivalent to the [SGGX visible-normal distribution](https://research.nvidia.com/labs/rtr/publication/heitz2015sggx/).
+Acceptance includes the finite-particle height-density correction. Every
+candidate uses a fresh local plane; the algorithm never evaluates the SDF at
+a reconstructed particle center. The same process estimates shadow
+transmittance by ratio tracking. `extinction(position, direction, order)` is a
+deterministic angular quadrature for inspection; transport does not use this
+approximate integral or a table of interpolated normals.
+
+The sampled normal is kept in the current collision context. Smooth particle
+reflection is a delta event conditional on that normal, using Tungsten's
+existing specular phase path. `sampleDistance()` returns the collision position
+in `MediumSample::p` and its unit outward normal in `aniso`; calling
+`sample.phase->sample(sampler, ray.dir(), sample, bounce)` produces the outgoing
+direction and reflection weight for that collision. Direct-light handling uses
+that sampled reflection direction; it does not marginalize the random normal to importance
+sample arbitrary light directions. This implementation supports the CPU
+path tracer and its wavefront fallback, not BDPT or a CUDA ellipsoid kernel.
+Finite bounce limits and the process-box truncation remain separate rendering
+approximations.
+
+```powershell
+cmake -S . -B build -DTUNGSTEN_BUILD_LOCAL_ELLIPSOID_TESTS=ON
+cmake --build build --config Release --target local_ellipsoid_test tungsten --parallel 4
+ctest --test-dir build -C Release -R "^local_ellipsoid" --output-on-failure
+```
+
+Tests compare distances with analytic planar and varying-gradient references,
+normal/type histograms with independent solid-angle integration, and VDB
+transport with integrated local coefficients. They check process-box exits
+within the geometry epsilon and at zero distance, and render a white furnace
+with direct lighting enabled, disabled, and through the wavefront path.
+
 We provide the JSON scene files on [Google Drive](https://drive.google.com/file/d/1nzmRUxxPsP5bIgX6SrOjjc0_664KtQgQ/view?usp=sharing) that reproduce the results presented in the paper. Some scene files include multiple rendering configurations, where only one is active while the others are commented out and annotated for clarity.
 
 Additionally, the rendered results are available through an interactive viewer on the project webpage.

@@ -1,0 +1,38 @@
+{
+  "media": [{
+    "name": "grains",
+    "type": "poisson_ellipsoid_local",
+    "sdf": {"type": "spherical", "center": [0, 0, 0.6], "radius": 0.6},
+    "decay_length": 0.06,
+    "tracking_step": 0.03,
+    "frame": "sdf",
+    "max_bounces": 128,
+    "particles": [
+      {"semiaxes": [0.025, 0.012, 0.01], "rotation_degrees": [0, 0, 30], "density": 9000,
+       "material": {"type": "mirror", "albedo": [0.85, 0.6, 0.3]}},
+      {"semiaxes": [0.014, 0.022, 0.008], "rotation_degrees": [0, 0, -25], "density": 2000,
+       "material": {"type": "conductor", "eta": [0.2, 0.9, 1.1], "k": [3.9, 2.5, 2.2]}}
+    ]
+  }],
+  "bsdfs": [{"name": "boundary", "type": "forward", "albedo": 1}],
+  "primitives": [
+    {"name": "processBox", "type": "cube", "bsdf": "boundary", "int_medium": "grains",
+     "transform": {"position": [0, 0, 0.6], "scale": [2.4, 2.4, 2.4]}},
+    {"type": "infinite_sphere", "emission": [1, 1, 1], "sample": true}
+  ],
+  "camera": {
+    "type": "pinhole", "resolution": [128, 128], "fov": 30,
+    "transform": {"position": [2.4, -3.6, 2.1], "look_at": [0, 0, 0.6], "up": [0, 0, 1]},
+    "tonemap": "filmic", "reconstruction_filter": "tent"
+  },
+  "integrator": {
+    "type": "path_tracer", "max_bounces": 128, "min_bounces": 0,
+    "enable_light_sampling": false, "enable_volume_light_sampling": false,
+    "use_cuda_gpis": false
+  },
+  "renderer": {
+    "spp": 64, "spp_step": 16, "adaptive_sampling": false,
+    "output_file": "ellipsoid.png", "hdr_output_file": "ellipsoid.exr",
+    "overwrite_output_files": true
+  }
+}

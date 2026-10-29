@@ -228,6 +228,22 @@ if (OpenVDB_FOUND AND OpenEXR_FOUND AND TBB_FOUND)
 endif()
 
 option(TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS "Build SDF-only classic_global tests" OFF)
+option(TUNGSTEN_BUILD_LOCAL_ELLIPSOID_TESTS "Build pointwise local Poisson ellipsoid tests" OFF)
+if (TUNGSTEN_BUILD_LOCAL_ELLIPSOID_TESTS)
+    enable_testing()
+    add_executable(local_ellipsoid_test tests/LocalEllipsoidTest.cpp)
+    target_link_libraries(local_ellipsoid_test PRIVATE ${core_libs})
+    add_test(NAME local_ellipsoid COMMAND local_ellipsoid_test "${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-test")
+    set_tests_properties(local_ellipsoid PROPERTIES FIXTURES_SETUP local_ellipsoid_field)
+    foreach(mode nee no_nee wavefront)
+        add_test(NAME local_ellipsoid_${mode}_render COMMAND ${CMAKE_COMMAND}
+            "-DRENDERER=$<TARGET_FILE:tungsten>" "-DCHECKER=$<TARGET_FILE:local_ellipsoid_test>"
+            "-DSCENE=${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-test/scene.json"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-${mode}-render"
+            "-DMODE=${mode}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/LocalEllipsoidRenderSmoke.cmake")
+        set_tests_properties(local_ellipsoid_${mode}_render PROPERTIES FIXTURES_REQUIRED local_ellipsoid_field)
+    endforeach()
+endif()
 option(TUNGSTEN_BUILD_GLOBAL_CONDITIONAL_TESTS "Build SDF-only conditional GP transport tests" OFF)
 if (TUNGSTEN_BUILD_GLOBAL_CONDITIONAL_TESTS)
     enable_testing()
