@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<title>Shaderball 凹槽：实际路径重放</title>
+<style>
+*{box-sizing:border-box}body{background:#111821;color:#dee6ef;font:15px/1.6 system-ui,sans-serif;max-width:1420px;margin:25px auto;padding:0 22px}h1{font-size:26px}h2{font-size:19px}p{color:#b9c8d8}a{color:#8ec9ff}button,select,input{background:#243344;color:#fff;border:1px solid #56687a;border-radius:5px;padding:7px;margin:3px}button{cursor:pointer}input[type=number]{width:90px}.controls{position:sticky;top:0;background:#111821ed;z-index:3;padding:9px 0}.grid{display:grid;grid-template-columns:minmax(480px,2fr) minmax(330px,1fr);gap:20px}.panel{background:#1b2633;border-radius:10px;padding:15px}canvas{width:100%;display:block;touch-action:none}#view{height:560px;cursor:grab}.table{overflow:auto;max-height:540px}table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}td,th{border-bottom:1px solid #354250;padding:7px;text-align:right}td:first-child,th:first-child{text-align:left}th{position:sticky;top:0;background:#1b2633}code{color:#b6dafa}.status{color:#a4e4bc}.warn{color:#ffb888}.vectors{font:12px/1.5 ui-monospace,monospace}.legend span{padding-right:18px}img{max-width:100%}#summary{font-size:16px}.dim{font-size:13px;color:#a9b6c4}@media(max-width:900px){.grid{grid-template-columns:1fr}}
+</style>
+<p><a href="../bounce_orders/comparison.html">查看四种模式的 1、2、3、4 次反射贡献图</a></p>
+<h1>Shaderball 凹槽：实际光线方向与反射次数</h1>
+<p>σ = 0.02，ℓ = 0.2，原相机 / 灯光 / 绿色镜面微材质，256 × 256，seed = 20261024。以下路径由正式 CPU PathTracer 重放，保留直接光照、MIS 和俄罗斯轮盘的随机采样顺序。</p>
+<div id="validation" class="panel">正在解压本地路径数据…</div>
+<p>黄色编号标出诊断像素：1–4 为内球周围，5–6 为对照，7 为底座凹槽。图中 GPIS 使用已有的 512 spp 图，另外三种使用已有的 128 spp 图；下方统计使用各模式重放的样本。像素坐标从左上角 (0, 0) 开始。</p>
+<img src="pixels.png" alt="四种模式上相同的七个诊断像素">
+<div id="findings" class="panel"></div>
+<div class="controls"><label>像素 <select id="pixel"></select></label><label>模式 <select id="mode"></select></label><label>样本编号 <input id="sample" type="number" min="0" value="0"></label>
+<button id="prev">上一条</button><button id="next">下一条</button><button id="single">找一反射</button><button id="multi">找多反射</button><button id="failed">找异常终止</button></div>
+<div class="grid"><div class="panel"><canvas id="view"></canvas>
+<button id="reset">相机方向</button><button id="side">侧视</button><button id="focus">放大首交点</button>
+<label><input id="connections" type="checkbox">显示光源连接支路</label><label><input id="geometry" type="checkbox" checked>均值几何</label>
+<p class="dim">拖动旋转，滚轮缩放。灰色网格仅用于定位，是均值零等值面；它不是该样本的随机场表面。彩色箭头按相机 → 场景方向追踪，数字表示成功的连续路径反射；透明包围盒不计数。红叉为被拒绝的候选交点。放大可检查距离很近的反射。</p>
+<p class="legend"><span style="color:#ffcf56">● 首次反射</span><span style="color:#79cfff">→ 后续反射</span><span style="color:#ff7083">× 拒绝交点</span></p></div>
+<div class="panel"><div id="summary"></div><div id="pixelstats"></div><h2>相机光线与结束原因</h2><div id="details" class="vectors"></div><p class="dim">“连续路径反射次数”只计成功采样的镜面微表面散射。一次直接光照连接可能已经给像素贡献亮度，随后连续路径还会继续，因此不能用最终路径长度给全部能量归类。</p></div></div>
+<h2>该路径的实际反射顶点</h2><div class="table"><table><thead><tr><th>序号</th><th>世界坐标 (x,y,z)</th><th>入射传播方向</th><th>出射传播方向</th><th>距上一反射</th><th>散射权重 RGB</th><th>反射后 throughput RGB</th></tr></thead><tbody id="vertices"></tbody></table></div>
+<h2>光源连接与能量记录</h2><div class="table"><table><thead><tr><th>事件</th><th>顶点 / 层数</th><th>方向</th><th>状态 / 透射率</th><th>新增像素辐亮度 RGB</th></tr></thead><tbody id="events"></tbody></table></div>
+<h2>选定像素的四模式统计</h2><p class="dim">GPIS 的事件来自同一个三维随机场；三个 classic / conditional 模式的事件来自各自的统计传输模型。相同样本编号不代表跨模型共享同一张随机表面。均值和比例仅描述这些像素，不能当作整个凹槽的统计。</p>
+<div class="table"><table><thead><tr><th>位置</th><th>模式</th><th>样本数</th><th>平均反射数</th><th>1 次</th><th>≥ 2 次</th><th>线性亮度 ± 标准误</th><th>异常方向拒绝</th><th>路径含 &lt; 10⁻⁵ 间距</th></tr></thead><tbody id="stats"></tbody></table></div>
+<p><a href="statistics.csv">统计 CSV</a> · <a href="statistics.json">详细统计 JSON</a> · <a href="verification.json">原像素重放校验</a> · <a href="manifest.json">参数与说明</a> · <a id="raw" href="sparse_3d_global.json">当前模式完整路径 JSON</a></p>
+<script>
+(async()=>{
+const compressed=Uint8Array.from(atob(__PATH_DATA__),c=>c.charCodeAt(0));
+const B=JSON.parse(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
+const $=s=>document.getElementById(s), names=['1 内球左侧','2 内球下侧','3 内球右侧','4 远侧边缘','5 中心对照','6 槽唇对照','7 底座凹槽'];
+const short=m=>m==='sparse_3d_global'?'GPIS global':m;
+const pct=x=>(100*x).toFixed(1)+'%', f=x=>Number(x).toPrecision(5), vec=v=>v?v.map(f).join(', '):'—';
+const reasons={escaped:'离开场景',russian_roulette:'俄罗斯轮盘终止',outward_crossing_rejected:'候选交点满足 ∇F·d > 0，被拒绝',surface_terminated:'普通表面 / 光源结束',bounce_limit:'达到最大深度',zero_throughput:'权重为零',phase_sampling_failed:'散射采样失败'};
+B.pixels.forEach((p,i)=>$('pixel').add(new Option(names[i]+' ('+p.xy+')',p.label)));B.modes.forEach(m=>$('mode').add(new Option(short(m),m)));$('pixel').value='inner_right';
+const V=B.verification;$('validation').innerHTML=`<b class="${V.all_original_pixels_match?'status':'warn'}">${V.all_original_pixels_match?'原图像素重放通过':'原图像素存在不一致，请查看校验文件'}</b> · 开启 / 关闭记录逐样本校验 ${V.observer_verified_samples} 条；辐亮度和下一随机数不一致 ${V.observer_mismatches} 条。<br>原图校验使用相同的前 128 个样本，GPIS 另校验前 512 个；允许浮点求和舍入误差。`;
+const right=B.statistics.filter(s=>s.label==='inner_right'),base=B.statistics.find(s=>s.label==='base_groove'&&s.mode==='sparse_3d_global');
+$('findings').innerHTML=`<b>实测结果</b><p>3 号位置的平均反射次数：${right.map(s=>short(s.mode)+' '+s.mean_medium_scatters.toFixed(2)).join('；')}。四种模式均有明显的多次反射，不能用“其他模式缺少多次反射”解释外观差异；反射方向和到光源的连接同样重要。</p><p>7 号底座凹槽中，GPIS 有 ${base.termination.outward_crossing_rejected||0}/${base.samples} 条路径在 ∇F·d > 0 的候选交点被终止。这是当前实现实际发生的截断，已有贡献仍保留，不能直接换算成同等比例的亮度损失，也不能据此把整条暗带都归因于数值问题。</p>`;
+const c=$('view'),ctx=c.getContext('2d');let yaw=Math.atan2(2,7),pitch=Math.atan2(2.4,Math.hypot(2,7)),scale=230,center=[0,.85,0],path;
+const sub=(a,b)=>a.map((x,i)=>x-b[i]), add=(a,b)=>a.map((x,i)=>x+b[i]), mul=(a,k)=>a.map(x=>x*k), length=v=>Math.hypot(...v);
+function project(v){let [x,y,z]=sub(v,center),a=Math.cos(yaw)*x-Math.sin(yaw)*z,b=Math.sin(yaw)*x+Math.cos(yaw)*z;return [c.width/2+a*scale,c.height/2-(Math.cos(pitch)*y-Math.sin(pitch)*b)*scale,Math.sin(pitch)*y+Math.cos(pitch)*b]}
+function arrow(a,b,color,dashed=false){a=project(a);b=project(b);ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=dashed?1.5:2.6;ctx.setLineDash(dashed?[6,5]:[]);ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();ctx.setLineDash([]);let d=[b[0]-a[0],b[1]-a[1]],l=Math.hypot(...d);if(l<7)return;d=d.map(v=>v/l);let t=[a[0]+.68*l*d[0],a[1]+.68*l*d[1]];ctx.beginPath();ctx.moveTo(...t);ctx.lineTo(t[0]-9*d[0]+4*d[1],t[1]-9*d[1]-4*d[0]);ctx.lineTo(t[0]-9*d[0]-4*d[1],t[1]-9*d[1]+4*d[0]);ctx.fill()}
+function draw(){c.width=c.clientWidth;c.height=560;ctx.fillStyle='#151e29';ctx.fillRect(0,0,c.width,c.height);if($('geometry').checked){const triangles=B.mesh.triangles.map(t=>t.map(project));triangles.sort((a,b)=>a.reduce((s,p)=>s+p[2],0)-b.reduce((s,p)=>s+p[2],0));ctx.lineWidth=.3;for(const t of triangles){ctx.fillStyle='rgba(142,161,184,.12)';ctx.strokeStyle='rgba(142,161,184,.09)';ctx.beginPath();ctx.moveTo(t[0][0],t[0][1]);ctx.lineTo(t[1][0],t[1][1]);ctx.lineTo(t[2][0],t[2][1]);ctx.closePath();ctx.fill();ctx.stroke()}}
+if(!path)return;let previous=path.events.find(e=>e.type==='camera')?.position,ordinal=0;
+for(const e of path.events){if(e.type==='medium_scatter'||e.type==='surface'||e.type==='boundary'||e.type==='distance_failed'){
+ if(e.position){let color=e.type==='distance_failed'?'#ff7083':e.type==='boundary'?'#8798ad':ordinal===0?'#ffcf56':'#79cfff';if(previous)arrow(previous,e.position,color,e.type==='boundary');previous=e.position;const q=project(e.position);if(e.type==='medium_scatter'){ordinal++;ctx.fillStyle=color;ctx.beginPath();ctx.arc(q[0],q[1],4,0,7);ctx.fill();ctx.font='bold 14px monospace';ctx.fillText(ordinal,q[0]+6,q[1]-7)}else if(e.type==='distance_failed'){ctx.strokeStyle=color;ctx.beginPath();ctx.moveTo(q[0]-6,q[1]-6);ctx.lineTo(q[0]+6,q[1]+6);ctx.moveTo(q[0]+6,q[1]-6);ctx.lineTo(q[0]-6,q[1]+6);ctx.stroke()}}
+}if(e.type==='connection'&&$('connections').checked){const dist=e.endpoint?Math.min(1.5,length(sub(e.endpoint,e.position))):.7;arrow(e.position,add(e.position,mul(e.outgoing,dist)),e.status==='connected'?'#94da8d':'#e39069',true)}}
+const last=path.events.filter(e=>['medium_scatter','surface','boundary'].includes(e.type)&&e.outgoing).at(-1);if(last&&!path.events.some(e=>e.type==='distance_failed'))arrow(last.position,add(last.position,mul(last.outgoing,.45)),'#d4a4ff');ctx.fillStyle='#b7c6d9';ctx.font='13px sans-serif';ctx.fillText('世界坐标；末端箭头 / 光源支路仅显示方向，长度可能截短',15,25)}
+function paths(){return B.data[$('mode').value].paths.filter(p=>p.pixel_label===$('pixel').value)}
+function update(){const ps=paths();$('sample').max=ps.at(-1).sample;let n=Math.max(0,Math.min(+$('sample').value,ps.at(-1).sample));$('sample').value=n;path=ps.find(p=>p.sample===n)||ps[0];const scat=path.events.filter(e=>e.type==='medium_scatter'),cam=path.events.find(e=>e.type==='camera'),fail=path.events.find(e=>e.type==='distance_failed');
+$('summary').innerHTML=`<b>${short($('mode').value)} · sample ${path.sample}</b><p>微表面反射 <strong style="font-size:32px;color:#ffcf56">${path.medium_scatters}</strong> 次<br>普通表面反射 ${path.surface_reflections} 次<br>像素辐亮度 RGB：<code>${vec(path.radiance)}</code></p>`;
+$('details').textContent=`origin = [${vec(cam?.position)}]\ndirection = [${vec(cam?.outgoing)}]\n结束：${reasons[path.termination]||path.termination}`;$('details').style.whiteSpace='pre-wrap';if(fail)$('details').textContent+=`\n拒绝位置：[${vec(fail.position)}]\n梯度：[${vec(fail.gradient)}]`;
+const st=B.statistics.find(s=>s.mode===$('mode').value&&s.label===$('pixel').value);$('pixelstats').innerHTML=`<p>${st.samples} 个样本：平均 ${st.mean_medium_scatters.toFixed(2)} 次，≥ 2 次占 ${pct(st.multiple_fraction)}。<br>次数分布：<code>${Object.entries(st.histogram).map(([k,v])=>k+'次:'+v).join(' / ')}</code></p>`;
+$('vertices').innerHTML=scat.map((e,i)=>`<tr><td>${i+1}</td><td>${vec(e.position)}</td><td>${vec(e.incoming)}</td><td>${vec(e.outgoing)}</td><td>${i?f(length(sub(e.position,scat[i-1].position))):'—'}</td><td>${vec(e.scatter_weight)}</td><td>${vec(e.throughput_after)}</td></tr>`).join('');
+$('events').innerHTML=path.events.filter(e=>e.type==='connection'||e.emission_added?.some(v=>v!==0)).map(e=>`<tr><td>${e.strategy||e.type}</td><td>${e.medium_scatter_order||e.bounce||0}</td><td>${vec(e.outgoing)}</td><td>${e.status||''} ${e.transmittance?'['+vec(e.transmittance)+']':''}</td><td>${vec(e.emission_added)}</td></tr>`).join('');
+$('stats').innerHTML=B.statistics.filter(s=>s.label===$('pixel').value).map(s=>`<tr><td>${s.label}</td><td>${short(s.mode)}</td><td>${s.samples}</td><td>${s.mean_medium_scatters.toFixed(3)}</td><td>${pct(s.single_fraction)}</td><td>${pct(s.multiple_fraction)}</td><td>${f(s.mean_luminance)} ± ${f(s.luminance_standard_error)}</td><td>${pct((s.termination.outward_crossing_rejected||0)/s.samples)}</td><td>${pct(s.tiny_step_path_fraction)}</td></tr>`).join('');$('raw').href=$('mode').value+'.json';draw()}
+['pixel','mode','sample'].forEach(id=>$(id).onchange=update);['geometry','connections'].forEach(id=>$(id).onchange=draw);
+$('prev').onclick=()=>{$('sample').value=+$('sample').value-1;update()};$('next').onclick=()=>{$('sample').value=+$('sample').value+1;update()};
+function find(pred){const p=paths().find(pred);if(p){$('sample').value=p.sample;update()}else alert('这个像素的已记录样本中没有此类路径。')}
+$('single').onclick=()=>find(p=>p.medium_scatters===1);$('multi').onclick=()=>find(p=>p.medium_scatters>=2);$('failed').onclick=()=>find(p=>p.events.some(e=>e.type==='distance_failed'));
+$('reset').onclick=()=>{yaw=Math.atan2(2,7);pitch=Math.atan2(2.4,Math.hypot(2,7));center=[0,.85,0];scale=230;draw()};$('side').onclick=()=>{yaw=1.57;pitch=.1;center=[0,.85,0];scale=230;draw()};$('focus').onclick=()=>{center=path.events.find(e=>e.type==='medium_scatter')?.position||center;scale=700;draw()};
+let drag=null;c.onpointerdown=e=>{drag=[e.clientX,e.clientY];c.setPointerCapture(e.pointerId)};c.onpointermove=e=>{if(!drag)return;yaw-=(e.clientX-drag[0])*.008;pitch=Math.max(-1.5,Math.min(1.5,pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];draw()};c.onpointerup=()=>drag=null;c.onwheel=e=>{e.preventDefault();scale=Math.max(30,Math.min(50000,scale*Math.exp(-e.deltaY*.001)));draw()};window.onresize=draw;update();
+})().catch(e=>{document.getElementById('validation').textContent='查看器载入失败：'+e.message;console.error(e)});
+</script></html>

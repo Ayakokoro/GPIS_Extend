@@ -1,5 +1,6 @@
 #include "math/conditional/mathutility/NumericPolicy.h"
 #include "PathTracer.hpp"
+#include "integrators/BounceContributions.hpp"
 
 #include "bsdfs/TransparencyBsdf.hpp"
 
@@ -19,6 +20,11 @@ PathTracer::PathTracer(TraceableScene *scene, const PathTracerSettings &settings
 
 Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint spp)
 {
+    using D = PathTraceDiagnostics;
+    auto finish = [&](const std::string &reason, const Vec3f &value) {
+        if (activeBounceContributions) activeBounceContributions->termination = reason;
+        return _pathDiagnostics ? _pathDiagnostics->finish(reason, value) : value;
+    };
     std::shared_ptr<DumpData> gpDumpDataPointer;
     if (pixel == _scene->rendererSettings().dataDumpPixel()) {
         gpDumpDataPointer = std::make_shared<DumpData>();
@@ -33,14 +39,17 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
 
     PositionSample point;
     if (!_scene->cam().samplePosition(sampler, point))
-        return Vec3f(0.0f);
+        return finish("camera_position_failed", Vec3f(0.0f));
     DirectionSample direction;
     if (!_scene->cam().sampleDirection(sampler, point, pixel, direction))
-        return Vec3f(0.0f);
+        return finish("camera_direction_failed", Vec3f(0.0f));
 
     Vec3f throughput = point.weight*direction.weight;
     Ray ray(point.p, direction.d);
     ray.setPrimaryRay(true);
+    if (_pathDiagnostics)
+        _pathDiagnostics->add("camera", {{"position", D::vector(ray.pos())},
+            {"outgoing", D::vector(ray.dir())}, {"pixel", {pixel.x(), pixel.y()}}, {"sample", spp}});
 
     MediumSample mediumSample;
     SurfaceScatterEvent surfaceEvent;
@@ -60,6 +69,7 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
 
     int mediumBounces = 0;
     int bounce = 0;
+    const char *termination = "escaped";
     bool didHit = intersectScene(ray, medium, data, info);
     bool wasSpecular = true;
 
@@ -69,11 +79,31 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
         if (medium) {
             mediumSample.continuedWeight = throughput;
 
+            Medium::DistanceDiagnostic distanceDiagnostic;
+            if (_pathDiagnostics || activeBounceContributions) state.distanceDiagnostic = &distanceDiagnostic;
             bool succeed = medium->sampleDistance(sampler, ray, state, mediumSample);
-            if (!succeed)
-                return emission;
+            state.distanceDiagnostic = nullptr;
+            if (!succeed) {
+                if (_pathDiagnostics) {
+                    auto index = _pathDiagnostics->add("distance_failed", {{"origin", D::vector(ray.pos())},
+                        {"incoming", D::vector(ray.dir())}, {"reason", distanceDiagnostic.failure}, {"bounce", bounce}});
+                    if (distanceDiagnostic.hasCandidate) {
+                        _pathDiagnostics->events[index]["position"] = D::vector(distanceDiagnostic.position);
+                        _pathDiagnostics->events[index]["gradient"] = D::vector(distanceDiagnostic.gradient);
+                    }
+                }
+                return finish(distanceDiagnostic.failure, emission);
+            }
 
+            if (_pathDiagnostics)
+                _pathDiagnostics->add(mediumSample.exited ? "medium_exit" : "medium_collision",
+                    {{"position", D::vector(mediumSample.p)}, {"origin", D::vector(ray.pos())},
+                     {"incoming", D::vector(ray.dir())}, {"t", mediumSample.t}, {"bounce", bounce},
+                     {"distance_weight", D::vector(mediumSample.weight)},
+                     {"emission_added", D::vector(throughput*mediumSample.emission)}});
+            const Vec3f emissionBefore = emission;
             emission += throughput*mediumSample.emission;
+            recordBounceContribution(bounce, emission - emissionBefore);
             throughput *= mediumSample.weight;
             hitSurface = mediumSample.exited;
             if (hitSurface && !didHit)
@@ -88,23 +118,36 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
             hitDistance += ray.farT();
 
             if (mediumBounces == 1 && !_settings.lowOrderScattering)
-                return emission;
+                return finish("low_order_disabled", emission);
 
             surfaceEvent = makeLocalScatterEvent(data, info, ray, &sampler);
             Vec3f transmittance(-1.0f);
+            const Vec3f incoming = ray.dir(), emissionBefore = emission;
 
             bool terminate = !handleSurface(surfaceEvent, data, info, medium, bounce, false,
                     _settings.enableLightSampling && (mediumBounces > 0 || _settings.includeSurfaces), ray, throughput, emission, wasSpecular, state, &transmittance);
 
+            if (_pathDiagnostics) {
+                const bool forward = info.bsdf->lobes().isForward();
+                if (!terminate && !forward && surfaceEvent.sampledLobe.test(BsdfLobes::ReflectiveLobe))
+                    ++_pathDiagnostics->surfaceReflections;
+                auto index = _pathDiagnostics->add(forward ? "boundary" : "surface",
+                    {{"position", D::vector(info.p)}, {"incoming", D::vector(incoming)},
+                     {"normal", D::vector(info.Ng)}, {"primitive", info.primitive->name()},
+                     {"continued", !terminate}, {"bounce", bounce},
+                     {"emission_added", D::vector(emission - emissionBefore)}, {"throughput", D::vector(throughput)}});
+                if (!terminate) _pathDiagnostics->events[index]["outgoing"] = D::vector(ray.dir());
+            }
+
             if (_firstSurfaceBounceCb) {
                 if (!_firstSurfaceBounceCb(surfaceEvent, ray)) {
-                    return Vec3f(0.f);
+                    return finish("surface_callback", Vec3f(0.f));
                 }
             }
 
             if (!info.bsdf->lobes().isPureDirac())
                 if (mediumBounces == 0 && !_settings.includeSurfaces)
-                    return emission;
+                    return finish("surfaces_disabled", emission);
 
             if (_trackOutputValues && !recordedOutputValues && (!wasSpecular || terminate)) {
                 if (_scene->cam().depthBuffer())
@@ -127,36 +170,38 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
             }
 
             if (terminate)
-                return emission;
+                return finish("surface_terminated", emission);
         } else {
             mediumBounces++;
 
             if (!handleVolume(sampler, mediumSample, state, medium, bounce, false,
                 _settings.enableVolumeLightSampling && (mediumBounces > 1 || _settings.lowOrderScattering), ray, throughput, emission, wasSpecular))
-                return emission;
+                return finish("phase_sampling_failed", emission);
 
             if (_firstMediumBounceCb) {
                 if (!_firstMediumBounceCb(mediumSample, ray)) {
-                    return Vec3f(0.f);
+                    return finish("medium_callback", Vec3f(0.f));
                 }
             }
         }
 
-        if (throughput.max() == 0.0f)
+        if (throughput.max() == 0.0f) {
+            termination = "zero_throughput";
             break;
+        }
 
         float roulettePdf = std::abs(throughput).max();
         if (bounce > 2 && roulettePdf < 0.1f) {
             if (sampler.nextBoolean(roulettePdf))
                 throughput /= roulettePdf;
             else
-                return emission;
+                return finish("russian_roulette", emission);
         }
 
         if (std::isnan(ray.dir().sum() + ray.pos().sum()))
-            return nanDirColor;
+            return finish("nonfinite_ray", nanDirColor);
         if (std::isnan(throughput.sum() + emission.sum()))
-            return nanBsdfColor;
+            return finish("nonfinite_weight", nanBsdfColor);
 
         if (!(hitSurface && info.bsdf->lobes().isForward())) {
             bounce++;
@@ -170,22 +215,27 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
         }
     }
     if (bounce >= _settings.minBounces && bounce < _settings.maxBounces) {
+        const Vec3f emissionBefore = emission;
         handleInfiniteLights(data, info, _settings.enableLightSampling, ray, throughput, wasSpecular, emission);
+        recordBounceContribution(bounce, emission - emissionBefore);
+        if (_pathDiagnostics)
+            _pathDiagnostics->add("environment", {{"position", D::vector(ray.pos())}, {"outgoing", D::vector(ray.dir())},
+                {"bounce", bounce}, {"emission_added", D::vector(emission - emissionBefore)}});
         if (_firstMediumBounceCb) {
             mediumSample.p = ray.pos() + ray.dir() * 10;
             if (!_firstMediumBounceCb(mediumSample, ray.scatter(mediumSample.p, ray.dir(), 0))) {
-                return Vec3f(0.f);
+                return finish("medium_callback", Vec3f(0.f));
             }
         }
 
         if (_firstSurfaceBounceCb) {
             if (!_firstSurfaceBounceCb(surfaceEvent, ray.scatter(ray.pos() + ray.dir() * 10, ray.dir(), 0))) {
-                return Vec3f(0.f);
+                return finish("surface_callback", Vec3f(0.f));
             }
         }
     }
     if (std::isnan(throughput.sum() + emission.sum()))
-        return nanEnvDirColor;
+        return finish("nonfinite_environment", nanEnvDirColor);
 
     if (_trackOutputValues && !recordedOutputValues) {
         if (_scene->cam().depthBuffer() && bounce == 0)
@@ -196,14 +246,14 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
             _scene->cam().albedoBuffer()->addSample(pixel, info.primitive->evalDirect(data, info));
     }
 
-    return emission;
+    return finish(bounce >= _settings.maxBounces ? "bounce_limit" : termination, emission);
 
     } catch (const ConditionalGpis::NumericError &) {
         throw; // A failed conditional bound must never be converted to a black sample.
     } catch (std::runtime_error &e) {
         std::cout << tfm::format("Caught an internal error at pixel %s: %s", pixel, e.what()) << std::endl;
 
-        return Vec3f(0.0f);
+        return finish(std::string("runtime_error: ") + e.what(), Vec3f(0.0f));
     }
 }
 

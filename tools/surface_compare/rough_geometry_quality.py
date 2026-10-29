@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -40,11 +41,24 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def replace_with_retry(temporary, path):
+    # Windows readers / antivirus can briefly hold a destination without delete
+    # sharing. Keep the last valid file visible and retry the atomic replacement.
+    for attempt in range(6):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(.05 * 2**attempt)
+
+
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + '.tmp')
     temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + '\n', encoding='utf-8')
-    temporary.replace(path)
+    replace_with_retry(temporary, path)
 
 
 @contextmanager
@@ -64,7 +78,25 @@ def job_lock(root):
         yield
 
 
+_blocked_progress_files = set()
+
+
 def publish_status(root, status):
+    # A failed progress-page refresh must not terminate a costly native render.
+    # Scene, checkpoint and result writes still fail loudly through atomic_json.
+    try:
+        _publish_status(root, status)
+    except PermissionError as error:
+        key = str(root)
+        if key not in _blocked_progress_files:
+            print('Progress file is locked; rendering continues and refresh will be retried: '
+                  + str(error), file=sys.stderr, flush=True)
+            _blocked_progress_files.add(key)
+    else:
+        _blocked_progress_files.discard(str(root))
+
+
+def _publish_status(root, status):
     status = dict(status, updated_utc=now(), worker_pid=os.getpid())
     atomic_json(root / 'status.json', status)
     config = rg.load(root / 'config.json') if (root / 'config.json').exists() else {}
@@ -93,7 +125,7 @@ def publish_status(root, status):
 <p>更新时间（UTC）：{status['updated_utc']}</p></html>'''
     temporary = root / 'comparison.html.tmp'
     temporary.write_text(body, encoding='utf-8')
-    temporary.replace(root / 'comparison.html')
+    replace_with_retry(temporary, root / 'comparison.html')
 
 
 def snapshot_renderer(root):

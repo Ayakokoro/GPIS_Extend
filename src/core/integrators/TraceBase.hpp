@@ -2,6 +2,7 @@
 #define TRACEBASE_HPP_
 
 #include "TraceSettings.hpp"
+#include "PathTraceDiagnostics.hpp"
 
 #include "samplerecords/SurfaceScatterEvent.hpp"
 #include "samplerecords/MediumSample.hpp"
@@ -41,6 +42,7 @@ protected:
     const TraceableScene *_scene;
     TraceSettings _settings;
     uint32 _threadId;
+    PathTraceDiagnostics *_pathDiagnostics = nullptr;
 
     // For computing direct lighting probabilities
     std::vector<float> _lightPdf;
@@ -221,6 +223,8 @@ protected:
                          Vec3f *transmission);
 
 public:
+    void setPathDiagnostics(PathTraceDiagnostics *diagnostics) { _pathDiagnostics = diagnostics; }
+
     SurfaceScatterEvent makeLocalScatterEvent(IntersectionTemporary &data, IntersectionInfo &info,
             Ray &ray, PathSampleGenerator *sampler) const;
 

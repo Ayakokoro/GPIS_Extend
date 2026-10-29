@@ -58,8 +58,16 @@ protected:
 
 public:
 
+    struct DistanceDiagnostic {
+        const char *failure = "sample_distance_failed";
+        bool hasCandidate = false;
+        Vec3d position = Vec3d(0.0), gradient = Vec3d(0.0);
+    };
+
     struct MediumState
     {
+        // Non-owning, used only during an explicitly observed distance query.
+        DistanceDiagnostic *distanceDiagnostic = nullptr;
         GpRayBatchBackend *gpRayBatchBackend = nullptr;
         bool firstScatter;
         int component;

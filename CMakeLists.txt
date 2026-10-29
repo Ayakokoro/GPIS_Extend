@@ -336,6 +336,10 @@ if (OpenVDB_FOUND AND TBB_FOUND AND nanovdb_FOUND)
     endif()
     add_executable(surface_probe EXCLUDE_FROM_ALL tools/surface_compare/probe.cpp)
     target_link_libraries(surface_probe PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    add_executable(surface_path_trace EXCLUDE_FROM_ALL tools/surface_compare/path_trace.cpp)
+    target_link_libraries(surface_path_trace PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    add_executable(surface_bounce_images EXCLUDE_FROM_ALL tools/surface_compare/bounce_images.cpp)
+    target_link_libraries(surface_bounce_images PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
     add_executable(gpis_shaderball_bake EXCLUDE_FROM_ALL
         tools/surface_compare/knob_bake.cpp src/core/math/SdfFunctionsQueries.cpp
         src/core/math/Mat4f.cpp src/core/math/conditional/mathutility/Gaussian1D.cpp)
