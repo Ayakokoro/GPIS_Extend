@@ -64,6 +64,17 @@ orientation frame uses its unit direction. Each new bounce uses the same
 pointwise rule, without particle identities or empty-path history.
 
 See [the runnable example](data/example-scenes/poisson-ellipsoid-local/scene.json).
+The [shaderball preset](data/example-scenes/poisson-ellipsoid-local/shaderball.json)
+uses the original procedural `knob` SDF, camera, lighting, ground and green
+mirror reflectance. It queries the SDF directly without external grid assets.
+It starts with `decay_length=0.001`, semiaxes `[0.007, 0.007, 0.004]`,
+center density `200000`, and both light-sampling switches enabled. The preset
+renders at 512 x 512 and 256 spp; `--spp` overrides only the sample count.
+
+```powershell
+.\build\Release\tungsten.exe -t 4 -s 41 data/example-scenes/poisson-ellipsoid-local/shaderball.json
+```
+
 `sdf` takes an existing scene mean: `linear`, `spherical`, `homogeneous`, a
 procedural mean with certified SDF queries, or a `tabulated` trilinear VDB.
 For the contact experiments, copy `gaussian_process.mean` from a `classic_global`
@@ -80,6 +91,15 @@ when `abs(N.x) >= 0.9`. A zero gradient uses the world frame. `frame="world"`
 fixes particle orientation. `decay_length` is positive; `tracking_step` controls
 the maximum length of a majorant interval and defaults to `decay_length`.
 Changing the step changes efficiency, not the specified collision law.
+In rapidly changing density, tracking automatically shortens costly intervals
+to at most one decay length of SDF variation. For SDF-aligned particles the
+height bound uses their support along local Z, including `rotation_degrees`,
+rather than their largest semiaxis. Grid rays reuse the current cell's
+trilinear polynomial while evaluating its changing value and full gradient
+at each candidate; this does not freeze the local plane.
+Sparse grid regions use conservative bounds over blocks of 8 cells per axis,
+within `tracking_step`. They retain their nonzero collision probability and
+fall back to cell bounds when a block would generate too many candidates.
 
 Distance, particle type and geometric normal are sampled together using a
 marked Poisson majorant. The visible-normal proposal samples the projected
@@ -96,10 +116,35 @@ reflection is a delta event conditional on that normal, using Tungsten's
 existing specular phase path. `sampleDistance()` returns the collision position
 in `MediumSample::p` and its unit outward normal in `aniso`; calling
 `sample.phase->sample(sampler, ray.dir(), sample, bounce)` produces the outgoing
-direction and reflection weight for that collision. Direct-light handling uses
-that sampled reflection direction; it does not marginalize the random normal to importance
-sample arbitrary light directions. This implementation supports the CPU
-path tracer and its wavefront fallback, not BDPT or a CUDA ellipsoid kernel.
+direction and reflection weight for that collision.
+
+Enable both `integrator.enable_light_sampling` and
+`integrator.enable_volume_light_sampling` for light importance sampling with
+MIS. At a tracking candidate, the light sampler proposes an outgoing direction;
+its reflection half-vector determines a possible ellipsoid normal. The exact
+unnormalized angular rate `K_i = normalIntensity_i / (4 * abs(travel.dot(normal)))`
+includes the local height-density weight. Light evaluation sums `F_i * K_i`
+over particle types, including each type's mirror color or conductor Fresnel.
+Visibility uses the same changing-SDF ratio tracking as other shadow rays.
+
+This estimate is accumulated **before collision acceptance, including null
+candidates**. Independent thinning uses a capped moment estimate of the local
+rate to limit shadow work when the tracking majorant is loose. This estimate
+only chooses how often to query lighting; it is not used as the extinction or
+to accept collisions. If the selected-candidate
+intensity is `r`, the light estimator divides by `r * light_pdf`; its power-MIS
+competitor is the intensity ratio `sum(K_i) / r`. At real collisions, the original
+normal-sampled direct-light estimator receives the complementary MIS weight.
+Continuation directions and indirect throughput retain their original law.
+The intensity ratio is not a normalized phase PDF: no approximate extinction
+quadrature enters either estimator. Simply enabling NEE on the conditional
+delta phase would not implement this marginalization. Both lighting switches
+are required so directly hit emitters are not also counted by continuation.
+
+This implementation supports the CPU path tracer and its wavefront fallback,
+not BDPT or a CUDA ellipsoid kernel. More shadow rays increase work per sample;
+the benefit depends on light size, scattering and visibility. It does not
+eliminate noise from multiple scattering or stochastic shadow transmission.
 Finite bounce limits and the process-box truncation remain separate rendering
 approximations.
 
@@ -111,9 +156,15 @@ ctest --test-dir build -C Release -R "^local_ellipsoid" --output-on-failure
 
 Tests compare distances with analytic planar and varying-gradient references,
 normal/type histograms with independent solid-angle integration, and VDB
-transport with integrated local coefficients. They check process-box exits
+transport with integrated local coefficients. Thin-layer tests cover both
+orientation frames and tilted particles, and track candidate counts to guard
+against a loose height bound. Grid tests check both sparse-block and cell
+tracking against the same reference. They check process-box exits
 within the geometry epsilon and at zero distance, and render a white furnace
-with direct lighting enabled, disabled, and through the wavefront path.
+with direct lighting enabled, disabled, through the wavefront path, and with
+only one lighting switch enabled. Angular-kernel tests check the reflection
+Jacobian and its integral; candidate-lighting tests compare NEE and MIS energy
+with independently integrated references for different tracking steps.
 
 We provide the JSON scene files on [Google Drive](https://drive.google.com/file/d/1nzmRUxxPsP5bIgX6SrOjjc0_664KtQgQ/view?usp=sharing) that reproduce the results presented in the paper. Some scene files include multiple rendering configurations, where only one is active while the others are commented out and annotated for clarity.
 

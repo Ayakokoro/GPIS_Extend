@@ -1,5 +1,6 @@
 #include "math/LocalEllipsoid.hpp"
 #include "media/PoissonEllipsoidMedium.hpp"
+#include "media/GpisSdfGrid.hpp"
 #include "io/JsonDocument.hpp"
 #include "io/Scene.hpp"
 #include "io/ImageIO.hpp"
@@ -114,6 +115,140 @@ void planeFlights() {
         close(shadows/count,expected,tolerance,"plane marked ratio tracking");
         std::cout<<"plane step="<<step<<": survival="<<double(exits)/count
                  <<", shadow="<<shadows/count<<", analytic="<<expected<<"\n";
+    }
+}
+
+V sphereDirection(double z,double azimuth) {
+    const double r=std::sqrt(std::max(0.0,1-z*z));
+    return V(r*std::cos(azimuth),r*std::sin(azimuth),z);
+}
+
+void angularScattering() {
+    for (bool sdfFrame:{false,true}) {
+        le::Model model({le::Grain(V(0.27,0.13,0.18),V(30,-20,42),4),
+                         le::Grain(V(0.12,0.23,0.16),V(-10,50,15),3)},0.45,sdfFrame);
+        const SdfJet jet{0.12,V(0.4,-0.3,1.2)};
+        const V w=V(0.3,0.2,-1).normalized();
+        double mass[2]={0,0};
+        constexpr int nz=220,nphi=440;
+        for (int z=0;z<nz;++z) for (int p=0;p<nphi;++p) {
+            const V outgoing=sphereDirection(-1+2.0*(z+0.5)/nz,2*pi*(p+0.5)/nphi);
+            const V normal=(outgoing-w).normalized();
+            for (std::size_t type=0;type<2;++type) {
+                const double rate=model.directionIntensity(jet,w,outgoing,type);
+                const double reference=model.normalIntensity(jet,w,type,normal)/(4*-w.dot(normal));
+                close(rate,reference,1e-10*std::max(1.0,rate),"reflection solid-angle Jacobian");
+                mass[type]+=rate*4*pi/(nz*nphi);
+            }
+        }
+        for (std::size_t type=0;type<2;++type) {
+            const double extinction=model.typeExtinction(jet,w,type,64);
+            close(mass[type],extinction,3e-4*extinction,"angular rate integrates to type extinction");
+        }
+        for (const V &direction:{w,V(-w),V::UnitX().eval()})
+            require(model.visibleMajorant(jet,direction)>=model.extinction(jet,direction,64),
+                    "visible-hemisphere bound covers extinction");
+    }
+    close(le::Model::misWeight(1e300,2e300),0.2,1e-15,"MIS avoids squaring overflow");
+    close(le::Model::misWeight(0,1),0,0,"zero-density MIS branch");
+    std::cout<<"scattering: angular Jacobian, integrated rates, visible bounds and stable MIS passed\n";
+}
+
+void candidateLighting() {
+    cg::PlaneMean plane(V::UnitZ(),0);
+    le::Model model({le::Grain(V(0.22,0.11,0.07),V(20,-15,35),8),
+                     le::Grain(V(0.10,0.17,0.13),V(-25,35,-10),6)},0.35);
+    const V origin(0,0,0.35),w=V(0.15,0.05,-1).normalized();
+    const SdfJet initial=plane.evaluate(origin);
+    const double albedo[2]={0.35,0.9};
+    const auto lighting=[](const V &outgoing) { return 1+0.6*outgoing.x()+0.2*outgoing.z(); };
+    const double k0=model.extinction(initial,w,64),end=0.75;
+    const double slope=-w.z()/model.decayLength();
+    const double survival=std::exp(-k0*std::expm1(slope*end)/slope);
+    double angularEnergy=0;
+    constexpr int nz=180,nphi=360;
+    for (int z=0;z<nz;++z) for (int p=0;p<nphi;++p) {
+        const V outgoing=sphereDirection(-1+2.0*(z+0.5)/nz,2*pi*(p+0.5)/nphi);
+        for (std::size_t type=0;type<2;++type)
+            angularEnergy+=albedo[type]*model.directionIntensity(initial,w,outgoing,type)*
+                lighting(outgoing)*4*pi/(nz*nphi);
+    }
+    const double expected=(1-survival)*angularEnergy/k0;
+    constexpr int count=30000;
+    constexpr double lightPdf=1/(4*pi);
+    for (double step:{0.04,0.5}) {
+        cg::Random rng(step<0.1 ? 47181:47182);
+        le::TrackingStatistics stats;
+        double sum=0,squareSum=0,neeSum=0,neeSquareSum=0;
+        int hits=0,flightsWithNullScores=0;
+        for (int j=0;j<count;++j) {
+            double estimate=0,neeOnly=0;
+            int scores=0;
+            const auto score=[&](const le::Candidate &candidate) {
+                ++scores;
+                const V outgoing=sphereDirection(2*rng.openUniform01()-1,2*pi*rng.openUniform01());
+                double density=0,energy=0;
+                for (std::size_t type=0;type<2;++type) {
+                    const double rate=model.directionIntensity(candidate.jet,w,outgoing,type)/candidate.rate;
+                    density+=rate; energy+=albedo[type]*rate;
+                }
+                const double value=energy*lighting(outgoing)/lightPdf;
+                neeOnly+=value;
+                estimate+=value*le::Model::misWeight(lightPdf,density);
+            };
+            le::Collision hit;
+            model.track(plane,origin,w,0,end,step,rng,true,hit,&stats,score);
+            flightsWithNullScores+=scores>int(hit.hit);
+            if (hit.hit) {
+                ++hits;
+                const V outgoing=w-2*w.dot(hit.normal)*hit.normal;
+                double density=0;
+                for (std::size_t type=0;type<2;++type)
+                    density+=model.directionIntensity(hit.jet,w,outgoing,type)/hit.directRate;
+                estimate+=albedo[hit.type]*lighting(outgoing)*le::Model::misWeight(density,lightPdf);
+            }
+            sum+=estimate; squareSum+=estimate*estimate;
+            neeSum+=neeOnly; neeSquareSum+=neeOnly*neeOnly;
+        }
+        const auto tolerance=[&](double total,double squares) {
+            return 6*std::sqrt(std::max(0.0,squares/count-std::pow(total/count,2))/count)+0.0005;
+        };
+        close(sum/count,expected,tolerance(sum,squareSum),"candidate NEE plus real-collision MIS energy");
+        close(neeSum/count,expected,tolerance(neeSum,neeSquareSum),"candidate NEE includes rejected events");
+        close(double(hits)/count,1-survival,0.02,"candidate lighting preserves collision distribution");
+        require(flightsWithNullScores>0,"fixture needs null candidate lighting contributions");
+        std::cout<<"candidate lighting step="<<step<<": MIS="<<sum/count<<", NEE="<<neeSum/count
+                 <<", reference="<<expected<<", candidates="<<stats.directCandidates<<"\n";
+    }
+}
+
+void thinLayerFlights() {
+    cg::PlaneMean plane(V::UnitZ(),0);
+    constexpr double ell=0.001;
+    constexpr int count=12000;
+    for (bool sdfFrame:{true,false}) for (double tilt:{0.0,55.0}) {
+        le::Model model({le::Grain(V(0.007,0.007,0.004),V(tilt,0,0),200000)},ell,sdfFrame);
+        const V w(0,0,-1);
+        const double k=model.extinction({0,V::UnitZ()},w,64);
+        const double targetHeight=ell*std::log(k*ell);
+        const V origin(0,0,targetHeight+6*ell);
+        const double expected=std::exp(-1+std::exp(-6.0));
+        cg::Random rng(5314+int(tilt)+int(sdfFrame));
+        le::TrackingStatistics stats;
+        int exits=0; double shadows=0;
+        for (int i=0;i<count;++i) {
+            le::Collision hit;
+            model.track(plane,origin,w,0,6*ell,0.01,rng,true,hit,&stats);
+            exits+=!hit.hit;
+            shadows+=model.track(plane,origin,w,0,6*ell,0.01,rng,false,hit);
+        }
+        close(double(exits)/count,expected,0.028,"thin ellipsoid layer survival");
+        close(shadows/count,expected,0.028,"thin ellipsoid layer ratio tracking");
+        if (sdfFrame && tilt==0)
+            require(double(stats.candidates)/count<12,"thin SDF-aligned layer must avoid the largest-axis majorant");
+        std::cout<<"thin frame="<<(sdfFrame ? "sdf":"world")<<", tilt="<<tilt
+                 <<": survival="<<double(exits)/count<<", shadow="<<shadows/count
+                 <<", reference="<<expected<<", candidates/flight="<<double(stats.candidates)/count<<"\n";
     }
 }
 
@@ -255,6 +390,36 @@ void rendererAndGrid(const std::filesystem::path &output) {
     for (int i=0;i<intervals;++i)
         optical+=medium->model().extinction(trilinear(origin+distance*(i+0.5)/intervals*direction),direction,24)*distance/intervals;
     const double expected=std::exp(-optical);
+    // Check the sparse-block path against the same independent optical depth,
+    // including its nonzero collision probability, with and without blocks.
+    JsonDocument fieldDocument(Path("ellipsoid-field.json"),sdf);
+    Scene fieldScene;
+    auto fieldMean=std::dynamic_pointer_cast<TabulatedMean>(fieldScene.fetchMeanFunction(fieldDocument));
+    require(bool(fieldMean),"tabulated fixture mean");
+    fieldMean->loadResources();
+    auto fieldGrid=std::dynamic_pointer_cast<VdbGrid>(fieldMean->grid());
+    require(bool(fieldGrid),"VDB fixture grid");
+    GpisSdfGrid field;
+    field.initialize(*fieldMean,*fieldGrid);
+    for (int blockSize:{0,8}) {
+        field.buildMacrocells(blockSize);
+        cg::Random random(17983+blockSize);
+        le::TrackingStatistics stats;
+        constexpr int flights=6000;
+        int escapes=0; double transmission=0;
+        for (int i=0;i<flights;++i) {
+            le::Collision hit;
+            medium->model().track(field,origin,direction,0,distance,0.12,random,true,hit,&stats);
+            escapes+=!hit.hit;
+            transmission+=medium->model().track(field,origin,direction,0,distance,0.12,random,false,hit);
+        }
+        close(double(escapes)/flights,expected,0.04,"sparse-block survival keeps nonzero extinction");
+        close(transmission/flights,expected,0.04,"sparse-block shadow transmission");
+        if (blockSize) require(stats.coarseIntervals>0 && stats.collisions>0,"sparse blocks must sample collisions");
+        std::cout<<"blocks="<<blockSize<<": survival="<<double(escapes)/flights
+                 <<", shadow="<<transmission/flights<<", reference="<<expected
+                 <<", coarse intervals="<<stats.coarseIntervals<<"\n";
+    }
     IndependentPathSampler rng(19471,false);
     constexpr int count=14000;
     int exits=0,hits=0; double shadows=0;
@@ -357,7 +522,8 @@ int main(int argc,char **argv) {
         if (argc==3 && std::string(argv[1])=="image") { imageCheck(argv[2]); return 0; }
         require(argc==2,"expected fixture output directory");
         const auto output=std::filesystem::absolute(argv[1]); std::filesystem::create_directories(output);
-        geometryAndNormals(); planeFlights(); curvedFlights(); validation(); rendererAndGrid(output);
+        geometryAndNormals(); angularScattering(); planeFlights(); candidateLighting();
+        thinLayerFlights(); curvedFlights(); validation(); rendererAndGrid(output);
         std::cout<<"local ellipsoid checks passed\n"; return 0;
     } catch (const std::exception &error) { std::cerr<<error.what()<<"\n"; return 1; }
 }

@@ -17,6 +17,7 @@ class PathTracer : public TraceBase
     PathTracerSettings _settings;
     bool _trackOutputValues;
     GpRayBatchBackend *_gpRayBatchBackend;
+    bool useVolumeDirect(const Medium *medium, int mediumBounces) const;
 
 public:
     enum class SampleStatus { NeedGpis, Finished };

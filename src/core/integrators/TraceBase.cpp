@@ -448,10 +448,9 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                             light.directPdf(_threadId, direct.lightData, direct.lightInfo, event.info->p));
                     } else {
                         direct.result = e*direct.phaseSample.weight;
-                        if (!sample.phase->isSpecular() ||
-                            sample.sparseConv1DSamplingScheme != SparseConv1DSamplingScheme::UNI)
-                            direct.result *= SampleWarp::powerHeuristic(direct.phaseSample.pdf,
-                                light.directPdf(_threadId, direct.lightData, direct.lightInfo, sample.p));
+                        direct.result *= float(volumeScatterMisWeight(medium,sample,parentRay.dir(),
+                            direct.phaseSample.w,direct.phaseSample.pdf,
+                            light.directPdf(_threadId,direct.lightData,direct.lightInfo,sample.p)));
                     }
                 }
             }
@@ -668,6 +667,56 @@ Vec3f TraceBase::bsdfSample(const Primitive &light,
     return bsdfF;
 }
 
+bool TraceBase::sampleMediumDistance(PathSampleGenerator &sampler,const Ray &ray,const Medium *medium,
+    Medium::MediumState &state,MediumSample &sample,int bounce,bool enableDirect,Vec3f &directEmission)
+{
+    directEmission=Vec3f(0.f);
+    const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
+    if (!ellipsoid || !enableDirect || bounce>=_settings.maxBounces-1 || _scene->lights().empty())
+        return medium->sampleDistance(sampler,ray,state,sample);
+    const auto illuminate=[&](const LocalEllipsoid::Candidate &candidate) {
+        const Vec3f p(float(candidate.position.x()),float(candidate.position.y()),float(candidate.position.z()));
+        float lightWeight;
+        const Primitive *light=chooseLight(sampler,p,lightWeight);
+        if (!light) return;
+        LightSample ls;
+        if (!light->sampleDirect(_threadId,p,sampler,ls) || !(ls.pdf>0)) return;
+        double scatterDensity;
+        const Vec3f f=ellipsoid->candidateScattering(candidate,ray.dir(),ls.d,scatterDensity);
+        if (f==0.f) return;
+        auto shadowState=state;
+        shadowState.advance();
+        shadowState.pathContext.reset();
+        ++shadowState.info.pixelSampleSegment.w();
+        Ray shadow=ray.scatter(p,ls.d,0.f);
+        shadow.setPrimaryRay(false);
+        IntersectionTemporary lightData;
+        IntersectionInfo lightInfo;
+        const Vec3f e=attenuatedEmission(sampler,*light,medium,ls.dist,lightData,lightInfo,
+            bounce+1,false,shadow,&shadowState,nullptr);
+        if (e==0.f) return;
+        const double mis=light->isDirac() ? 1.0 : LocalEllipsoid::Model::misWeight(ls.pdf,scatterDensity);
+        directEmission+=f*e*float(lightWeight*mis/ls.pdf);
+    };
+    return ellipsoid->sampleDistance(sampler,ray,state,sample,illuminate);
+}
+
+double TraceBase::volumeScatterMisWeight(const Medium *medium,const MediumSample &sample,
+    const Vec3f &travel,const Vec3f &outgoing,float phasePdf,float lightPdf) const
+{
+    const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
+    if (ellipsoid && ellipsoid->hasCandidateLighting(sample)) {
+        // Compete using K(direction)/selectedCandidateRate.
+        // This is an intensity ratio, not a normalized phase PDF. Its complementary
+        // light weight was applied at ALL selected candidates, including nulls.
+        return LocalEllipsoid::Model::misWeight(
+            ellipsoid->candidateDirectionPdf(sample,travel,outgoing),lightPdf);
+    }
+    if (sample.phase->isSpecular() && sample.sparseConv1DSamplingScheme==SparseConv1DSamplingScheme::UNI)
+        return 1;
+    return SampleWarp::powerHeuristic(phasePdf,lightPdf);
+}
+
 Vec3f TraceBase::volumeLightSample(PathSampleGenerator &sampler,
                     MediumSample &mediumSample,
                     Medium::MediumState* mediumState,
@@ -739,9 +788,8 @@ Vec3f TraceBase::volumePhaseSample(const Primitive &light,
 
     Vec3f phaseF = e*phaseSample.weight;
 
-    if (!mediumSample.phase->isSpecular() || mediumSample.sparseConv1DSamplingScheme != SparseConv1DSamplingScheme::UNI) {
-        phaseF *= SampleWarp::powerHeuristic(phaseSample.pdf, light.directPdf(_threadId, data, info, mediumSample.p));
-    }
+    phaseF *= float(volumeScatterMisWeight(medium,mediumSample,parentRay.dir(),phaseSample.w,
+        phaseSample.pdf,light.directPdf(_threadId,data,info,mediumSample.p)));
 
     return phaseF;
 }

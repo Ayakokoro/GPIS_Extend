@@ -235,7 +235,7 @@ if (TUNGSTEN_BUILD_LOCAL_ELLIPSOID_TESTS)
     target_link_libraries(local_ellipsoid_test PRIVATE ${core_libs})
     add_test(NAME local_ellipsoid COMMAND local_ellipsoid_test "${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-test")
     set_tests_properties(local_ellipsoid PROPERTIES FIXTURES_SETUP local_ellipsoid_field)
-    foreach(mode nee no_nee wavefront)
+    foreach(mode nee no_nee wavefront surface_only volume_only)
         add_test(NAME local_ellipsoid_${mode}_render COMMAND ${CMAKE_COMMAND}
             "-DRENDERER=$<TARGET_FILE:tungsten>" "-DCHECKER=$<TARGET_FILE:local_ellipsoid_test>"
             "-DSCENE=${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-test/scene.json"

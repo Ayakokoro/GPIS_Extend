@@ -80,6 +80,7 @@ Grain::Grain(const V &axes, const V &degrees, double numberDensity) : density(nu
     inverse=axes.cwiseInverse().asDiagonal()*rotation.transpose();
     determinant=axes.prod();
     radius=axes.maxCoeff();
+    normalRadius=transform.row(2).norm();
     maximumArea=pi*determinant/axes.minCoeff();
     if (!transform.allFinite() || !inverse.allFinite() || !(determinant>0) ||
         !std::isfinite(determinant) || !(maximumArea>0) || !std::isfinite(maximumArea))
@@ -163,6 +164,53 @@ double Model::normalIntensity(const SdfJet &jet,const V &travel,std::size_t type
                      (-jet.value+jet.gradient.dot(q))/decayLength_);
 }
 
+double Model::directionIntensity(const SdfJet &jet,const V &travel,const V &outgoing,std::size_t type) const {
+    validateJet(jet);
+    const V w=cg::normalizedOrThrow(travel),o=cg::normalizedOrThrow(outgoing);
+    const V difference=o-w;
+    if (difference.squaredNorm()==0) return 0; // Degenerate grazing half-vector.
+    const V m=difference.normalized();
+    const auto &grain=grains_.at(type);
+    const M transform=frame(jet.gradient)*grain.transform;
+    const V transformed=transform.transpose()*m;
+    const double support=transformed.norm();
+    const V q=transform*transformed/support;
+    // Cancel the incident cosine against the reflection Jacobian analytically.
+    // This avoids a numerically unstable normalIntensity()/(4*cosine).
+    return finiteExp(std::log(grain.density)-std::log(4.0)+
+        2*(std::log(grain.determinant)-2*std::log(support))+
+        (-jet.value+jet.gradient.dot(q))/decayLength_);
+}
+
+double Model::visibleMajorant(const SdfJet &jet,const V &travel) const {
+    validateJet(jet);
+    const V w=cg::normalizedOrThrow(travel);
+    double result=0;
+    for (std::size_t i=0;i<grains_.size();++i) {
+        const auto &g=grains_[i];
+        if (g.density==0) continue;
+        const auto p=projection(i,jet.gradient,w);
+        const V a=p.transform.transpose()*jet.gradient;
+        const double along=a.dot(p.incoming);
+        // Maximize a.u on the visible sphere hemisphere u.incoming <= 0.
+        const double height=along<=0 ? a.norm() : (a-along*p.incoming).norm();
+        result+=finiteExp(std::log(g.density)+std::log(p.area)+
+                          (-jet.value+height)/decayLength_+1e-12);
+    }
+    if (!std::isfinite(result)) throw std::runtime_error("ellipsoid visible majorant overflow");
+    return result;
+}
+
+double Model::misWeight(double sampledDensity,double otherDensity) {
+    if (!(sampledDensity>=0) || !(otherDensity>=0) ||
+        !std::isfinite(sampledDensity) || !std::isfinite(otherDensity))
+        throw std::runtime_error("ellipsoid MIS needs finite nonnegative densities");
+    const double scale=std::max(sampledDensity,otherDensity);
+    if (scale==0) return 0;
+    const double a=sampledDensity/scale,b=otherDensity/scale;
+    return a*a/(a*a+b*b);
+}
+
 NormalSample Model::sampleNormal(const SdfJet &jet,const V &travel,cg::Random &rng) const {
     validateJet(jet);
     const V w=cg::normalizedOrThrow(travel);
@@ -191,7 +239,8 @@ NormalSample Model::sampleNormal(const SdfJet &jet,const V &travel,cg::Random &r
 }
 
 double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
-    double begin,double end,double maximumStep,cg::Random &rng,bool collision,Collision &result) const {
+    double begin,double end,double maximumStep,cg::Random &rng,bool collision,Collision &result,
+    TrackingStatistics *statistics,const CandidateCallback &onCandidate) const {
     const V w=cg::normalizedOrThrow(travel);
     if (!origin.allFinite() || !(begin>=0) || !std::isfinite(begin) || !(end>=0) || !std::isfinite(end) ||
         !(maximumStep>0) || !std::isfinite(maximumStep))
@@ -203,38 +252,110 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
     cg::MajorantOpticalDepth clock;
     double weight=1;
     std::vector<double> rates(grains_.size()),logRates(grains_.size());
-    while (begin<end) {
-        double limit=std::min(end,begin+maximumStep);
-        if (cursor) limit=cursor->nextBoundary(begin,limit);
-        if (!(limit>begin)) throw std::runtime_error("ellipsoid tracking interval cannot advance");
-        const V a=origin+begin*w,b=origin+limit*w;
-        const double pad=128*std::numeric_limits<double>::epsilon()*(1+a.norm()+b.norm());
-        cg::BoundsSummary spatial;
-        if (!global) spatial=sdf.bounds({a.cwiseMin(b)-V::Constant(pad),a.cwiseMax(b)+V::Constant(pad)});
-        if (!global && !spatial.certified) throw std::runtime_error("ellipsoid tracking requires certified SDF gradient bounds");
-        const double gradientBound=global ? global->maximumGradientNorm : spatial.maximumGradientNorm;
-        SdfRayQueryOptions options; options.computeBeginDerivative=false;
-        const auto bounds=cursor ? cursor->rayBounds(begin,limit,options) : sdf.rayBounds(origin,w,begin,limit,options);
-        if (!bounds.certified || !std::isfinite(bounds.minimumValue) ||
-            !(gradientBound>=0) || !std::isfinite(gradientBound))
-            throw std::runtime_error("ellipsoid tracking requires finite certified SDF bounds");
+    const auto updateRates=[&](double minimumValue,double gradientBound,bool strict=true) {
+        double total=0;
         for (std::size_t i=0;i<grains_.size();++i) {
             const auto &g=grains_[i];
-            // Bounds hold even as the SDF tangent frame rotates inside I:
-            // A_i <= pi*abc/min(a,b,c), gradient.q <= |gradient|*max(a,b,c).
+            // In an SDF frame, F^T gradient = (0,0,|gradient|), even as
+            // F rotates along the ray. Include the particle's local rotation.
+            const double extent=sdfFrame_ ? g.normalRadius : g.radius;
             logRates[i]=g.density>0 ? std::log(g.density)+std::log(g.maximumArea)+
-                (-bounds.minimumValue+gradientBound*g.radius)/decayLength_+1e-12 :
+                (-minimumValue+gradientBound*extent)/decayLength_+1e-12 :
                 -std::numeric_limits<double>::infinity();
-            rates[i]=finiteExp(logRates[i]);
+            rates[i]=strict ? finiteExp(logRates[i]) : std::exp(logRates[i]);
+            total+=rates[i];
         }
-        const double total=sumWeights(rates);
+        if (strict && !std::isfinite(total))
+            throw std::runtime_error("poisson_ellipsoid_local: nonfinite total candidate rate");
+        return total;
+    };
+    double coarseRetry=begin;
+    while (begin<end) {
+        double limit=std::min(end,begin+maximumStep);
+        bool coarse=false;
+        double total=0;
+        // Sparse blocks need no cell-polynomial construction unless an event
+        // actually lands there. This still samples their nonzero extinction;
+        // it never treats a small probability as vacuum.
+        if (cursor && global && begin>=coarseRetry) {
+            double coarseLimit=limit;
+            cg::MeanRayBounds block;
+            if (cursor->coarseRayBounds(begin,coarseLimit,block) && block.certified &&
+                coarseLimit>begin && std::isfinite(block.minimumValue) &&
+                global->maximumGradientNorm>=0 && std::isfinite(global->maximumGradientNorm)) {
+                total=updateRates(block.minimumValue,global->maximumGradientNorm,false);
+                if (total*(coarseLimit-begin)<=1) {
+                    limit=coarseLimit;
+                    coarse=true;
+                    if (statistics) ++statistics->coarseIntervals;
+                } else coarseRetry=coarseLimit;
+            }
+        }
+        if (!coarse) {
+            if (cursor) limit=cursor->nextBoundary(begin,limit);
+            if (!(limit>begin)) throw std::runtime_error("ellipsoid tracking interval cannot advance");
+            const V a=origin+begin*w,b=origin+limit*w;
+            const double pad=128*std::numeric_limits<double>::epsilon()*(1+a.norm()+b.norm());
+            cg::BoundsSummary spatial;
+            if (!global) spatial=sdf.bounds({a.cwiseMin(b)-V::Constant(pad),a.cwiseMax(b)+V::Constant(pad)});
+            if (!global && !spatial.certified) throw std::runtime_error("ellipsoid tracking requires certified SDF gradient bounds");
+            const double gradientBound=global ? global->maximumGradientNorm : spatial.maximumGradientNorm;
+            SdfRayQueryOptions options; options.computeBeginDerivative=false;
+            auto bounds=cursor ? cursor->rayBounds(begin,limit,options) : sdf.rayBounds(origin,w,begin,limit,options);
+            if (!bounds.certified || !std::isfinite(bounds.minimumValue) ||
+                !(gradientBound>=0) || !std::isfinite(gradientBound))
+                throw std::runtime_error("ellipsoid tracking requires finite certified SDF bounds");
+            total=updateRates(bounds.minimumValue,gradientBound);
+            // Refine costly intervals spanning several decay lengths. Keep the
+            // same optical-depth clock across every subdivision and block.
+            const double slope=std::max(std::abs(bounds.minimumDerivative),std::abs(bounds.maximumDerivative));
+            if (total*(limit-begin)>1 && std::isfinite(slope) && slope*(limit-begin)>decayLength_) {
+                const double refined=begin+decayLength_/slope;
+                if (refined>begin && refined<limit) {
+                    limit=refined;
+                    bounds=cursor ? cursor->rayBounds(begin,limit,options) : sdf.rayBounds(origin,w,begin,limit,options);
+                    if (!bounds.certified || !std::isfinite(bounds.minimumValue))
+                        throw std::runtime_error("ellipsoid tracking requires finite certified SDF bounds");
+                    total=updateRates(bounds.minimumValue,gradientBound);
+                }
+            }
+        }
+        if (statistics) ++statistics->intervals;
         double t=begin,candidate;
         while (clock.advance(rng,total,t,limit,candidate)) {
+            if (statistics) ++statistics->candidates;
             t=candidate;
             const V position=origin+t*w;
-            // Query the actual point, never extrapolate the previous plane.
-            const SdfJet jet=sdf.evaluate(position);
+            // Re-evaluate value AND gradient at this candidate. A grid cursor
+            // evaluates its exact trilinear polynomial, not a frozen plane.
+            const SdfJet jet=cursor ? cursor->evaluate(t) : sdf.evaluate(position);
             validateJet(jet);
+            double directRate=0;
+            if (collision && onCandidate) {
+                // Choose a light-query intensity near the local extinction.
+                // A cosine hemisphere has E[u]=-2b/3 and
+                // Cov[u]=I/4-7bb^T/36. A capped second-cumulant estimate
+                // is cheap even for a thin layer. This is ONLY a proposal:
+                // it need not bound extinction, and it cancels in the light
+                // estimator. Real collision acceptance still uses total.
+                for (std::size_t i=0;i<grains_.size();++i) {
+                    const auto &g=grains_[i];
+                    if (g.density==0) continue;
+                    const auto p=projection(i,jet.gradient,w);
+                    const V a=p.transform.transpose()*jet.gradient/decayLength_;
+                    const double along=a.dot(p.incoming);
+                    const double maximum=along<=0 ? a.norm() : (a-along*p.incoming).norm();
+                    const double variance=std::max(0.0,a.squaredNorm()/4-7*along*along/36);
+                    const double moment=std::min(maximum,-2*along/3+variance/2);
+                    directRate+=finiteExp(std::log(g.density)+std::log(p.area)-jet.value/decayLength_+moment);
+                }
+                directRate=std::min(total,directRate);
+                // Score BEFORE acceptance, including candidates later rejected.
+                if (directRate>0 && rng.openUniform01()<directRate/total) {
+                    if (statistics) ++statistics->directCandidates;
+                    onCandidate({position,jet,directRate});
+                }
+            }
             const std::size_t i=choose(rates,total,rng);
             const auto p=projection(i,jet.gradient,w);
             const V u=p.spherePoint(std::sqrt(rng.openUniform01()),2*pi*rng.openUniform01());
@@ -243,7 +364,9 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
                 (-jet.value+jet.gradient.dot(q))/decayLength_-logRates[i]);
             if (collision) {
                 if (rng.openUniform01()<acceptance) {
+                    if (statistics) ++statistics->collisions;
                     result.hit=true; result.distance=t; result.position=position;
+                    result.jet=jet; result.directRate=directRate;
                     result.type=i; result.normal=(p.normalTransform*u).normalized();
                     return 1;
                 }

@@ -3,6 +3,7 @@
 #include "integrators/BounceContributions.hpp"
 
 #include "bsdfs/TransparencyBsdf.hpp"
+#include "media/PoissonEllipsoidMedium.hpp"
 
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -16,6 +17,15 @@ PathTracer::PathTracer(TraceableScene *scene, const PathTracerSettings &settings
   _trackOutputValues(!scene->rendererSettings().renderOutputs().empty()),
   _gpRayBatchBackend(gpRayBatchBackend)
 {
+}
+
+bool PathTracer::useVolumeDirect(const Medium *medium,int mediumBounces) const
+{
+    // Candidate NEE replaces direct light hits after an ellipsoid scatter.
+    // The global switch must also enable that emission suppression.
+    return _settings.enableVolumeLightSampling &&
+        (mediumBounces>1 || _settings.lowOrderScattering) &&
+        (_settings.enableLightSampling || !dynamic_cast<const PoissonEllipsoidMedium *>(medium));
 }
 
 Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint spp)
@@ -81,7 +91,11 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
 
             Medium::DistanceDiagnostic distanceDiagnostic;
             if (_pathDiagnostics || activeBounceContributions) state.distanceDiagnostic = &distanceDiagnostic;
-            bool succeed = medium->sampleDistance(sampler, ray, state, mediumSample);
+            Vec3f candidateEmission;
+            bool succeed = sampleMediumDistance(sampler,ray,medium,state,mediumSample,bounce,
+                useVolumeDirect(medium,mediumBounces+1),candidateEmission);
+            emission+=throughput*candidateEmission;
+            recordBounceContribution(bounce+1,throughput*candidateEmission);
             state.distanceDiagnostic = nullptr;
             if (!succeed) {
                 if (_pathDiagnostics) {
@@ -175,7 +189,7 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
             mediumBounces++;
 
             if (!handleVolume(sampler, mediumSample, state, medium, bounce, false,
-                _settings.enableVolumeLightSampling && (mediumBounces > 1 || _settings.lowOrderScattering), ray, throughput, emission, wasSpecular))
+                useVolumeDirect(medium,mediumBounces), ray, throughput, emission, wasSpecular))
                 return finish("phase_sampling_failed", emission);
 
             if (_firstMediumBounceCb) {
@@ -375,7 +389,11 @@ PathTracer::SampleStatus PathTracer::advanceSample(PathState &path, PathSampleGe
                             path.stage = PathState::Stage::Distance;
                     } else {
                         path.sparse = nullptr;
-                        if (!medium->sampleDistance(sampler, ray, state, mediumSample))
+                        Vec3f candidateEmission;
+                        const bool succeeded=sampleMediumDistance(sampler,ray,medium,state,mediumSample,bounce,
+                            useVolumeDirect(medium,mediumBounces+1),candidateEmission);
+                        emission+=throughput*candidateEmission;
+                        if (!succeeded)
                             return finish(emission);
                     }
                 }
@@ -426,8 +444,7 @@ PathTracer::SampleStatus PathTracer::advanceSample(PathState &path, PathSampleGe
                     (mediumBounces > 0 || _settings.includeSurfaces);
             } else {
                 mediumBounces++;
-                path.enableDirect = _settings.enableVolumeLightSampling &&
-                    (mediumBounces > 1 || _settings.lowOrderScattering);
+                path.enableDirect = useVolumeDirect(medium,mediumBounces);
             }
             if (path.enableDirect && bounce < _settings.maxBounces - 1 &&
                 (!hitSurface || !path.surface.forward)) {

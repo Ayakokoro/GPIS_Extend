@@ -27,7 +27,7 @@
   },
   "integrator": {
     "type": "path_tracer", "max_bounces": 128, "min_bounces": 0,
-    "enable_light_sampling": false, "enable_volume_light_sampling": false,
+    "enable_light_sampling": true, "enable_volume_light_sampling": true,
     "use_cuda_gpis": false
   },
   "renderer": {

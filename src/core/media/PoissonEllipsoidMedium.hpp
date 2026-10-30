@@ -24,7 +24,8 @@ class PoissonEllipsoidMedium final : public Medium {
     double _decayLength=0, _trackingStep=0;
     std::string _frame="sdf";
     static Material readMaterial(JsonPtr value,Material defaults);
-    double track(PathSampleGenerator &,const Ray &,bool,LocalEllipsoid::Collision &) const;
+    double track(PathSampleGenerator &,const Ray &,bool,LocalEllipsoid::Collision &,
+                 const LocalEllipsoid::CandidateCallback & = {}) const;
 public:
     PoissonEllipsoidMedium();
     ~PoissonEllipsoidMedium() override;
@@ -34,6 +35,12 @@ public:
     void prepareForRender() override;
     bool isHomogeneous() const override { return false; }
     bool sampleDistance(PathSampleGenerator &,const Ray &,MediumState &,MediumSample &) const override;
+    bool sampleDistance(PathSampleGenerator &,const Ray &,MediumState &,MediumSample &,
+                        const LocalEllipsoid::CandidateCallback &) const;
+    Vec3f candidateScattering(const LocalEllipsoid::Candidate &,const Vec3f &travel,
+                             const Vec3f &outgoing,double &density) const;
+    bool hasCandidateLighting(const MediumSample &) const;
+    double candidateDirectionPdf(const MediumSample &,const Vec3f &travel,const Vec3f &outgoing) const;
     Vec3f transmittance(PathSampleGenerator &,const Ray &,bool,bool,MediumState *) const override;
     float pdf(PathSampleGenerator &,const Ray &,bool,bool) const override;
     Vec3f sigmaA(Vec3f) const override;

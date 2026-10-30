@@ -2,6 +2,7 @@
 
 #include "math/conditional/gpss/MeanField.h"
 #include "math/conditional/core/Random.h"
+#include <functional>
 #include <vector>
 
 namespace Tungsten::LocalEllipsoid {
@@ -13,7 +14,7 @@ using M = Eigen::Matrix3d;
 // optional SDF tangent-frame rotation. Density is a number per unit volume.
 struct Grain {
     M transform, inverse;
-    double determinant, radius, maximumArea, density;
+    double determinant, radius, normalRadius, maximumArea, density;
     Grain(const V &semiaxes, const V &rotationDegrees, double numberDensity);
 };
 
@@ -26,6 +27,21 @@ struct Collision : NormalSample {
     bool hit = false;
     double distance = 0;
     V position = V::Zero();
+    SdfJet jet;
+    double directRate = 0;
+};
+
+// A thinned majorant event, before deciding whether a real collision occurs.
+// rate is the event intensity per distance, not the physical extinction.
+struct Candidate {
+    V position;
+    SdfJet jet;
+    double rate;
+};
+using CandidateCallback = std::function<void(const Candidate &)>;
+
+struct TrackingStatistics {
+    std::size_t intervals = 0, coarseIntervals = 0, candidates = 0, collisions = 0, directCandidates = 0;
 };
 
 // A memoryless local law. At EVERY candidate x the plane is
@@ -55,6 +71,12 @@ public:
                           int order = 32) const;
     double normalIntensity(const SdfJet &jet, const V &travel,
                            std::size_t type, const V &normal) const;
+    // Unnormalized angular scattering rate, without material reflectance.
+    // Its integral over outgoing directions equals typeExtinction().
+    double directionIntensity(const SdfJet &jet, const V &travel,
+                              const V &outgoing, std::size_t type) const;
+    double visibleMajorant(const SdfJet &jet, const V &travel) const;
+    static double misWeight(double sampledDensity, double otherDensity);
     NormalSample sampleNormal(const SdfJet &jet, const V &travel,
                               ConditionalGpis::Random &rng) const;
 
@@ -64,7 +86,8 @@ public:
     double track(const ConditionalGpis::MeanField &sdf, const V &origin,
                  const V &travel, double begin, double end, double maximumStep,
                  ConditionalGpis::Random &rng, bool sampleCollision,
-                 Collision &result) const;
+                 Collision &result, TrackingStatistics *statistics = nullptr,
+                 const CandidateCallback &onCandidate = {}) const;
 };
 
 } // namespace Tungsten::LocalEllipsoid

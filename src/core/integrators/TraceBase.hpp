@@ -55,6 +55,11 @@ protected:
     bool isConsistent(const SurfaceScatterEvent &event, const Vec3f &w) const;
     bool intersectScene(Ray &ray, const Medium *medium,
         IntersectionTemporary &data, IntersectionInfo &info) const;
+    bool sampleMediumDistance(PathSampleGenerator &sampler, const Ray &ray, const Medium *medium,
+        Medium::MediumState &state, MediumSample &sample, int bounce, bool enableDirect,
+        Vec3f &directEmission);
+    double volumeScatterMisWeight(const Medium *medium, const MediumSample &sample,
+        const Vec3f &travel, const Vec3f &outgoing, float phasePdf, float lightPdf) const;
 
     // These continuations own every local needed while a shadow GP segment is
     // in flight. Intersection data for the light and the scene remain separate.

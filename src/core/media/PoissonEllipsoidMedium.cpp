@@ -152,6 +152,7 @@ void PoissonEllipsoidMedium::prepareForRender() {
         if (auto vdb=dynamic_cast<VdbGrid *>(tabulated->grid().get())) {
             auto grid=std::make_shared<GpisSdfGrid>();
             grid->initialize(*tabulated,*vdb);
+            grid->buildMacrocells(8);
             _field=grid;
         }
 #endif
@@ -180,7 +181,8 @@ double PoissonEllipsoidMedium::extinction(const Vec3d &position,const Vec3d &tra
 }
 
 double PoissonEllipsoidMedium::track(PathSampleGenerator &sampler,const Ray &ray,bool collision,
-                                    LocalEllipsoid::Collision &result) const {
+                                    LocalEllipsoid::Collision &result,
+                                    const LocalEllipsoid::CandidateCallback &onCandidate) const {
     if (!_model || !_field) throw std::runtime_error("poisson_ellipsoid_local: prepareForRender must precede tracing");
     const V direction=eigen(Vec3d(ray.dir()));
     const double speed=direction.stableNorm();
@@ -195,14 +197,19 @@ double PoissonEllipsoidMedium::track(PathSampleGenerator &sampler,const Ray &ray
     // nearT is a geometry self-intersection epsilon, not a vacuum gap in this
     // continuous local law. Integrate from the actual current ray origin.
     return _model->track(*_field,eigen(Vec3d(ray.pos())),direction/speed,0,double(ray.farT())*speed,
-                         _trackingStep,rng,collision,result);
+                         _trackingStep,rng,collision,result,nullptr,onCandidate);
 }
 
 bool PoissonEllipsoidMedium::sampleDistance(PathSampleGenerator &sampler,const Ray &ray,
     MediumState &state,MediumSample &sample) const {
+    return sampleDistance(sampler,ray,state,sample,{});
+}
+
+bool PoissonEllipsoidMedium::sampleDistance(PathSampleGenerator &sampler,const Ray &ray,
+    MediumState &state,MediumSample &sample,const LocalEllipsoid::CandidateCallback &onCandidate) const {
     if (state.bounce>=_maxBounce) return false;
     LocalEllipsoid::Collision collision;
-    track(sampler,ray,true,collision);
+    track(sampler,ray,true,collision,onCandidate);
     sample=MediumSample{};
     sample.t=sample.continuedT=ray.farT(); sample.p=ray.hitpoint(); sample.exited=!collision.hit;
     sample.weight=sample.continuedWeight=Vec3f(1.f); sample.emission=Vec3f(0.f); sample.pdf=1;
@@ -220,6 +227,36 @@ bool PoissonEllipsoidMedium::sampleDistance(PathSampleGenerator &sampler,const R
         sample.eventContext=event; state.advance();
     }
     return true;
+}
+
+Vec3f PoissonEllipsoidMedium::candidateScattering(const LocalEllipsoid::Candidate &candidate,
+    const Vec3f &travel,const Vec3f &outgoing,double &density) const {
+    const V w=eigen(Vec3d(travel)).normalized(),o=eigen(Vec3d(outgoing)).normalized();
+    const double cosine=std::min(1.0,0.5*(o-w).norm());
+    V value=V::Zero(); density=0;
+    for (std::size_t i=0;i<_particles.size();++i) {
+        const double p=_model->directionIntensity(candidate.jet,w,o,i)/candidate.rate;
+        density+=p;
+        value+=p*eigen(Vec3d(reflectance(i,cosine)));
+    }
+    return vec(value);
+}
+
+bool PoissonEllipsoidMedium::hasCandidateLighting(const MediumSample &sample) const {
+    const auto *event=dynamic_cast<const EllipsoidEvent *>(sample.eventContext.get());
+    return event && event->owner==this && event->collision.directRate>0;
+}
+
+double PoissonEllipsoidMedium::candidateDirectionPdf(const MediumSample &sample,
+    const Vec3f &travel,const Vec3f &outgoing) const {
+    const auto *event=dynamic_cast<const EllipsoidEvent *>(sample.eventContext.get());
+    if (!event || event->owner!=this || !(event->collision.directRate>0))
+        throw std::runtime_error("ellipsoid direct lighting needs its candidate rate");
+    double density=0;
+    for (std::size_t i=0;i<_particles.size();++i)
+        density+=_model->directionIntensity(event->collision.jet,eigen(Vec3d(travel)),
+            eigen(Vec3d(outgoing)),i)/event->collision.directRate;
+    return density;
 }
 
 Vec3f PoissonEllipsoidMedium::transmittance(PathSampleGenerator &sampler,const Ray &ray,bool,bool,MediumState *) const {
