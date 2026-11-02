@@ -240,12 +240,15 @@ NormalSample Model::sampleNormal(const SdfJet &jet,const V &travel,cg::Random &r
 
 double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
     double begin,double end,double maximumStep,cg::Random &rng,bool collision,Collision &result,
-    TrackingStatistics *statistics,const CandidateCallback &onCandidate) const {
+    TrackingStatistics *statistics,const CandidateCallback &onCandidate,double densityScale) const {
     const V w=cg::normalizedOrThrow(travel);
     if (!origin.allFinite() || !(begin>=0) || !std::isfinite(begin) || !(end>=0) || !std::isfinite(end) ||
         !(maximumStep>0) || !std::isfinite(maximumStep))
         throw std::invalid_argument("ellipsoid tracking needs a finite ray interval and positive tracking_step");
+    if (!(densityScale>0) || !std::isfinite(densityScale))
+        throw std::invalid_argument("ellipsoid density multiplier must be positive and finite");
     result=Collision{}; result.distance=end; result.position=origin+end*w;
+    result.densityScale=densityScale;
     if (end<=begin) return 1;
     auto cursor=sdf.createRayCursor(origin,w);
     const auto global=sdf.globalMagnitudeBounds();
@@ -284,7 +287,7 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
                 coarseLimit>begin && std::isfinite(block.minimumValue) &&
                 global->maximumGradientNorm>=0 && std::isfinite(global->maximumGradientNorm)) {
                 total=updateRates(block.minimumValue,global->maximumGradientNorm,false);
-                if (total*(coarseLimit-begin)<=1) {
+                if (total*densityScale*(coarseLimit-begin)<=1) {
                     limit=coarseLimit;
                     coarse=true;
                     if (statistics) ++statistics->coarseIntervals;
@@ -309,7 +312,7 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
             // Refine costly intervals spanning several decay lengths. Keep the
             // same optical-depth clock across every subdivision and block.
             const double slope=std::max(std::abs(bounds.minimumDerivative),std::abs(bounds.maximumDerivative));
-            if (total*(limit-begin)>1 && std::isfinite(slope) && slope*(limit-begin)>decayLength_) {
+            if (total*densityScale*(limit-begin)>1 && std::isfinite(slope) && slope*(limit-begin)>decayLength_) {
                 const double refined=begin+decayLength_/slope;
                 if (refined>begin && refined<limit) {
                     limit=refined;
@@ -320,9 +323,15 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
                 }
             }
         }
+        const double scaledTotal=total*densityScale;
+        if (!std::isfinite(scaledTotal) || (total>0 && scaledTotal==0))
+            throw cg::NumericError(cg::NumericStatus::NeedHigherPrecision,
+                "ellipsoid scaled candidate rate is not representable");
         if (statistics) ++statistics->intervals;
         double t=begin,candidate;
-        while (clock.advance(rng,total,t,limit,candidate)) {
+        // Scale the clock, retaining base type weights and acceptance ratios:
+        // both target intensity and its majorant contain the same multiplier.
+        while (clock.advance(rng,scaledTotal,t,limit,candidate)) {
             if (statistics) ++statistics->candidates;
             t=candidate;
             const V position=origin+t*w;
@@ -353,7 +362,7 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
                 // Score BEFORE acceptance, including candidates later rejected.
                 if (directRate>0 && rng.openUniform01()<directRate/total) {
                     if (statistics) ++statistics->directCandidates;
-                    onCandidate({position,jet,directRate});
+                    onCandidate({position,jet,directRate*densityScale,directRate,densityScale});
                 }
             }
             const std::size_t i=choose(rates,total,rng);
@@ -366,7 +375,8 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
                 if (rng.openUniform01()<acceptance) {
                     if (statistics) ++statistics->collisions;
                     result.hit=true; result.distance=t; result.position=position;
-                    result.jet=jet; result.directRate=directRate;
+                    result.jet=jet; result.directRate=directRate*densityScale;
+                    result.baseDirectRate=directRate;
                     result.type=i; result.normal=(p.normalTransform*u).normalized();
                     return 1;
                 }

@@ -29,6 +29,8 @@ struct Collision : NormalSample {
     V position = V::Zero();
     SdfJet jet;
     double directRate = 0;
+    double baseDirectRate = 0;
+    double densityScale = 1;
 };
 
 // A thinned majorant event, before deciding whether a real collision occurs.
@@ -37,6 +39,10 @@ struct Candidate {
     V position;
     SdfJet jet;
     double rate;
+    // Unscaled proposal rate: intensity ratios use this to cancel the common
+    // multiplier without dividing two potentially extreme scaled quantities.
+    double baseRate = 0;
+    double densityScale = 1;
 };
 using CandidateCallback = std::function<void(const Candidate &)>;
 
@@ -83,11 +89,12 @@ public:
     // Finite physical-distance interval, unit travel direction. Marked delta
     // tracking samples distance/type/normal together; shadow calls use the
     // same marked process for ratio tracking. Neither uses angular quadrature.
+    // densityScale is fixed for this flight and shared by every grain type.
     double track(const ConditionalGpis::MeanField &sdf, const V &origin,
                  const V &travel, double begin, double end, double maximumStep,
                  ConditionalGpis::Random &rng, bool sampleCollision,
                  Collision &result, TrackingStatistics *statistics = nullptr,
-                 const CandidateCallback &onCandidate = {}) const;
+                 const CandidateCallback &onCandidate = {}, double densityScale = 1) const;
 };
 
 } // namespace Tungsten::LocalEllipsoid

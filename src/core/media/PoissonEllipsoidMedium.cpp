@@ -1,6 +1,7 @@
 #include "PoissonEllipsoidMedium.hpp"
 #include "GpisSdfGrid.hpp"
 #include "math/conditional/gpss/SdfMeanField.hpp"
+#include "math/GammaDensityMultiplier.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
 #include <complex>
@@ -39,6 +40,13 @@ struct EllipsoidEvent final : MediumEventContext {
     const PoissonEllipsoidMedium *owner=nullptr;
     LocalEllipsoid::Collision collision;
     V incoming;
+};
+
+struct EllipsoidFlight final : MediumPathContext {
+    const PoissonEllipsoidMedium *owner=nullptr;
+    PoissonEllipsoidMedium::FlightOrigin origin=PoissonEllipsoidMedium::FlightOrigin::External;
+    bool scaleSampled=false;
+    double densityScale=1;
 };
 
 // Condition on the sampled particle normal. Its smooth mirror/conductor law is
@@ -106,6 +114,16 @@ void PoissonEllipsoidMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_step",_trackingStep);
     value.getField("frame",_frame);
     value.getField("max_bounces",_maxBounce);
+    _densityMultiplierAlpha=0;
+    if (auto multiplier=value["density_multiplier"]) {
+        const auto type=multiplier.castField<std::string>("type");
+        if (type=="gamma_renewal") {
+            _densityMultiplierAlpha=multiplier.castField<double>("alpha");
+            if (!(_densityMultiplierAlpha>1) || !std::isfinite(_densityMultiplierAlpha))
+                multiplier.parseError("gamma_renewal requires finite alpha > 1");
+        } else if (type!="none")
+            multiplier.parseError("density_multiplier type must be none or gamma_renewal");
+    }
     if (!(_decayLength>0) || !std::isfinite(_decayLength) || !(_trackingStep>0) ||
         !std::isfinite(_trackingStep) || _maxBounce<0 || (_frame!="sdf" && _frame!="world"))
         value.parseError("positive finite decay_length/tracking_step, nonnegative max_bounces, and frame=sdf or world are required");
@@ -115,6 +133,8 @@ void PoissonEllipsoidMedium::fromJson(JsonPtr value,const Scene &scene) {
     _particles.clear();
     for (unsigned i=0;i<particles.size();++i) {
         const auto entry=particles[i];
+        if (entry["density_multiplier"])
+            entry.parseError("density_multiplier belongs to the medium and is shared by all particles");
         Particle p;
         p.semiaxes=entry.castField<Vec3d>("semiaxes");
         p.density=entry.castField<double>("density");
@@ -137,9 +157,13 @@ rapidjson::Value PoissonEllipsoidMedium::toJson(Allocator &allocator) const {
             "semiaxes",p.semiaxes,"rotation_degrees",p.rotation,"density",p.density,
             "material",rapidjson::Value(material)}),allocator);
     }
-    return JsonObject{JsonSerializable::toJson(allocator),allocator,
+    JsonObject result{JsonSerializable::toJson(allocator),allocator,
         "type","poisson_ellipsoid_local","sdf",*_mean,"decay_length",_decayLength,
         "tracking_step",_trackingStep,"frame",_frame,"max_bounces",_maxBounce,"particles",std::move(particles)};
+    if (hasDensityMultiplier())
+        result.add("density_multiplier",rapidjson::Value(JsonObject{allocator,
+            "type","gamma_renewal","alpha",_densityMultiplierAlpha}));
+    return result;
 }
 
 void PoissonEllipsoidMedium::loadResources() { _mean->loadResources(); }
@@ -180,8 +204,39 @@ double PoissonEllipsoidMedium::extinction(const Vec3d &position,const Vec3d &tra
     return _model->extinction(jet,eigen(travel),order);
 }
 
+void PoissonEllipsoidMedium::beginFlight(MediumState &state,FlightOrigin origin) const {
+    if (!hasDensityMultiplier()) {
+        state.pathContext.reset();
+        return;
+    }
+    auto flight=std::make_shared<EllipsoidFlight>();
+    flight->owner=this; flight->origin=origin;
+    state.pathContext=std::move(flight);
+    state.firstScatter=origin==FlightOrigin::External;
+}
+
+double PoissonEllipsoidMedium::flightDensityScale(PathSampleGenerator &sampler,
+    MediumState &state,FlightOrigin fallback) const {
+    if (!hasDensityMultiplier()) return 1;
+    auto flight=dynamic_cast<const EllipsoidFlight *>(state.pathContext.get());
+    if (!flight || flight->owner!=this) {
+        beginFlight(state,fallback);
+        flight=static_cast<const EllipsoidFlight *>(state.pathContext.get());
+    }
+    if (!flight->scaleSampled) {
+        auto sampled=std::make_shared<EllipsoidFlight>(*flight);
+        cg::Random rng(sampler);
+        sampled->densityScale=LocalEllipsoid::sampleGammaDensityMultiplier(rng,_densityMultiplierAlpha,
+            flight->origin==FlightOrigin::ParticleCollision);
+        sampled->scaleSampled=true;
+        state.pathContext=sampled;
+        return sampled->densityScale;
+    }
+    return flight->densityScale;
+}
+
 double PoissonEllipsoidMedium::track(PathSampleGenerator &sampler,const Ray &ray,bool collision,
-                                    LocalEllipsoid::Collision &result,
+                                    LocalEllipsoid::Collision &result,double densityScale,
                                     const LocalEllipsoid::CandidateCallback &onCandidate) const {
     if (!_model || !_field) throw std::runtime_error("poisson_ellipsoid_local: prepareForRender must precede tracing");
     const V direction=eigen(Vec3d(ray.dir()));
@@ -197,7 +252,7 @@ double PoissonEllipsoidMedium::track(PathSampleGenerator &sampler,const Ray &ray
     // nearT is a geometry self-intersection epsilon, not a vacuum gap in this
     // continuous local law. Integrate from the actual current ray origin.
     return _model->track(*_field,eigen(Vec3d(ray.pos())),direction/speed,0,double(ray.farT())*speed,
-                         _trackingStep,rng,collision,result,nullptr,onCandidate);
+                         _trackingStep,rng,collision,result,nullptr,onCandidate,densityScale);
 }
 
 bool PoissonEllipsoidMedium::sampleDistance(PathSampleGenerator &sampler,const Ray &ray,
@@ -209,13 +264,14 @@ bool PoissonEllipsoidMedium::sampleDistance(PathSampleGenerator &sampler,const R
     MediumState &state,MediumSample &sample,const LocalEllipsoid::CandidateCallback &onCandidate) const {
     if (state.bounce>=_maxBounce) return false;
     LocalEllipsoid::Collision collision;
-    track(sampler,ray,true,collision,onCandidate);
+    const double scale=ray.farT()>0 ? flightDensityScale(sampler,state,FlightOrigin::External) : 1;
+    track(sampler,ray,true,collision,scale,onCandidate);
     sample=MediumSample{};
     sample.t=sample.continuedT=ray.farT(); sample.p=ray.hitpoint(); sample.exited=!collision.hit;
     sample.weight=sample.continuedWeight=Vec3f(1.f); sample.emission=Vec3f(0.f); sample.pdf=1;
     sample.phase=_phaseFunction.get(); sample.rayInfo=state.info;
     sample.sparseConv1DSamplingScheme=SparseConv1DSamplingScheme::UNI;
-    state.pathContext.reset();
+    if (!hasDensityMultiplier()) state.pathContext.reset();
     if (collision.hit) {
         const V direction=eigen(Vec3d(ray.dir()));
         sample.t=float(collision.distance/direction.norm());
@@ -225,6 +281,7 @@ bool PoissonEllipsoidMedium::sampleDistance(PathSampleGenerator &sampler,const R
         auto event=std::make_shared<EllipsoidEvent>();
         event->owner=this; event->collision=collision; event->incoming=direction.normalized();
         sample.eventContext=event; state.advance();
+        beginFlight(state,FlightOrigin::ParticleCollision);
     }
     return true;
 }
@@ -233,9 +290,11 @@ Vec3f PoissonEllipsoidMedium::candidateScattering(const LocalEllipsoid::Candidat
     const Vec3f &travel,const Vec3f &outgoing,double &density) const {
     const V w=eigen(Vec3d(travel)).normalized(),o=eigen(Vec3d(outgoing)).normalized();
     const double cosine=std::min(1.0,0.5*(o-w).norm());
+    if (!(candidate.baseRate>0))
+        throw std::runtime_error("ellipsoid light candidate needs its base proposal rate");
     V value=V::Zero(); density=0;
     for (std::size_t i=0;i<_particles.size();++i) {
-        const double p=_model->directionIntensity(candidate.jet,w,o,i)/candidate.rate;
+        const double p=_model->directionIntensity(candidate.jet,w,o,i)/candidate.baseRate;
         density+=p;
         value+=p*eigen(Vec3d(reflectance(i,cosine)));
     }
@@ -244,24 +303,29 @@ Vec3f PoissonEllipsoidMedium::candidateScattering(const LocalEllipsoid::Candidat
 
 bool PoissonEllipsoidMedium::hasCandidateLighting(const MediumSample &sample) const {
     const auto *event=dynamic_cast<const EllipsoidEvent *>(sample.eventContext.get());
-    return event && event->owner==this && event->collision.directRate>0;
+    return event && event->owner==this && event->collision.baseDirectRate>0;
 }
 
 double PoissonEllipsoidMedium::candidateDirectionPdf(const MediumSample &sample,
     const Vec3f &travel,const Vec3f &outgoing) const {
     const auto *event=dynamic_cast<const EllipsoidEvent *>(sample.eventContext.get());
-    if (!event || event->owner!=this || !(event->collision.directRate>0))
+    if (!event || event->owner!=this || !(event->collision.baseDirectRate>0))
         throw std::runtime_error("ellipsoid direct lighting needs its candidate rate");
     double density=0;
     for (std::size_t i=0;i<_particles.size();++i)
         density+=_model->directionIntensity(event->collision.jet,eigen(Vec3d(travel)),
-            eigen(Vec3d(outgoing)),i)/event->collision.directRate;
+            eigen(Vec3d(outgoing)),i)/event->collision.baseDirectRate;
     return density;
 }
 
-Vec3f PoissonEllipsoidMedium::transmittance(PathSampleGenerator &sampler,const Ray &ray,bool,bool,MediumState *) const {
+Vec3f PoissonEllipsoidMedium::transmittance(PathSampleGenerator &sampler,const Ray &ray,
+    bool startOnSurface,bool,MediumState *state) const {
+    MediumState local{};
+    if (!state) { local.reset(); state=&local; }
+    const double scale=ray.farT()>0 ? flightDensityScale(sampler,*state,
+        startOnSurface ? FlightOrigin::External : FlightOrigin::ParticleCollision) : 1;
     LocalEllipsoid::Collision unused;
-    return Vec3f(float(track(sampler,ray,false,unused)));
+    return Vec3f(float(track(sampler,ray,false,unused,scale)));
 }
 float PoissonEllipsoidMedium::pdf(PathSampleGenerator &,const Ray &,bool,bool) const {
     throw std::runtime_error("poisson_ellipsoid_local supports path_tracer; marginalized distance PDFs for BDPT are unavailable");

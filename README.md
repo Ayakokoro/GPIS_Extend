@@ -111,6 +111,41 @@ transmittance by ratio tracking. `extinction(position, direction, order)` is a
 deterministic angular quadrature for inspection; transport does not use this
 approximate integral or a table of interpolated normals.
 
+An optional medium-level `density_multiplier` adds non-exponential free flights:
+
+```json
+"density_multiplier": {"type": "gamma_renewal", "alpha": 4.0}
+```
+
+All particle types share one multiplier `Z` within a free flight. External
+origins draw `Gamma(shape=alpha, rate=alpha)`; particle-collision origins draw
+`Gamma(shape=alpha+1, rate=alpha)`. For the original optical depth `tau`, their
+survival probabilities are respectively `(1+tau/alpha)^(-alpha)` and
+`(1+tau/alpha)^(-alpha-1)`. This is a renewal transport model, not exact
+conditioning of a persistent finite-particle realization. `alpha` must be
+finite and greater than one. Larger values approach the exponential model;
+omitting the option or using `{"type":"none"}` preserves the original draws.
+
+The multiplier stays fixed across null collisions, adaptive intervals and
+same-medium forward boundaries. A real particle collision (including a virtual
+collision for direct lighting) starts a fresh particle-origin flight. An
+ordinary surface reflection/refraction starts an external-origin flight.
+Entering a different medium starts a new external flight. Branch state is
+immutable and shared only until a branch starts or samples its own flight.
+
+Tracking scales both target intensity and its majorant, so the accepted
+conditional particle/normal distribution and material reflection weights stay
+unchanged. Shadows use the same conditional ratio tracker; candidate-light
+intensity ratios cancel the common multiplier. No angular quadrature or
+explicit optical-depth accumulation is added to rendering. This mode continues
+to support `path_tracer`; marginalized distance PDFs for BDPT are unavailable.
+The original `density` and `decay_length` parameters keep their meaning.
+`extinction(...)` continues to report the unscaled local coefficient, not the
+renewal hazard conditioned on a flight's age or sampled multiplier.
+The [Gamma shaderball example](data/example-scenes/poisson-ellipsoid-local/shaderball-gamma-renewal.json)
+uses two particle types (green mirror and red conductor), `decay_length=0.02`,
+and `alpha=4`, at 512 x 512 and 16 spp.
+
 The sampled normal is kept in the current collision context. Smooth particle
 reflection is a delta event conditional on that normal, using Tungsten's
 existing specular phase path. `sampleDistance()` returns the collision position

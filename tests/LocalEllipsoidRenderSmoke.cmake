@@ -1,5 +1,14 @@
 file(MAKE_DIRECTORY "${OUTPUT_DIR}")
 file(READ "${SCENE}" scene)
+if (MODE MATCHES "^gamma_")
+    string(REGEX REPLACE "^gamma_" "" MODE "${MODE}")
+    string(JSON scene SET "${scene}" media 0 density_multiplier "{\"type\":\"gamma_renewal\",\"alpha\":2}")
+    # Ordinary surface reflection in the SAME medium starts an external flight;
+    # the forward sheet only splits tracking and must retain the current scale.
+    string(JSON scene SET "${scene}" bsdfs 1 "{\"name\":\"white\",\"type\":\"lambert\",\"albedo\":1}")
+    string(JSON scene SET "${scene}" primitives 2 "{\"type\":\"sphere\",\"bsdf\":\"white\",\"int_medium\":\"ellipsoids\",\"ext_medium\":\"ellipsoids\",\"transform\":{\"scale\":0.65}}")
+    string(JSON scene SET "${scene}" primitives 3 "{\"type\":\"quad\",\"bsdf\":\"boundary\",\"int_medium\":\"ellipsoids\",\"ext_medium\":\"ellipsoids\",\"transform\":{\"position\":[0,-0.5,0],\"scale\":0.6,\"rotation\":[90,0,0]}}")
+endif()
 if (MODE STREQUAL "no_nee")
     string(JSON scene SET "${scene}" integrator enable_light_sampling false)
     string(JSON scene SET "${scene}" integrator enable_volume_light_sampling false)

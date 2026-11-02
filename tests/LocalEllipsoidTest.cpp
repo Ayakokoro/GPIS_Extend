@@ -1,4 +1,5 @@
 #include "math/LocalEllipsoid.hpp"
+#include "math/GammaDensityMultiplier.hpp"
 #include "media/PoissonEllipsoidMedium.hpp"
 #include "media/GpisSdfGrid.hpp"
 #include "io/JsonDocument.hpp"
@@ -314,6 +315,228 @@ std::string mediumJson(const std::string &sdf) {
                      {"semiaxes":[0.07,0.09,0.08],"density":8,
                       "material":{"type":"conductor","force_unit_fresnel":true}}]})";
 }
+
+void gammaFlights() {
+    const cg::ConstantMean field(0);
+    const V w(0,0,-1);
+    const std::vector<le::Grain> grains={le::Grain(V::Constant(0.2),V::Zero(),4),
+                                       le::Grain(V::Constant(0.3),V::Zero(),2)};
+    const le::Model model(grains,0.5);
+    const double k=pi*(4*0.04+2*0.09),distance=1.4;
+    for (double scale:{0.25,1.0,3.0}) {
+        auto scaledGrains=grains;
+        for (auto &grain:scaledGrains) grain.density*=scale;
+        const le::Model scaled(scaledGrains,0.5);
+        cg::Random a(8911),b(8911);
+        for (int i=0;i<500;++i) {
+            le::Collision x,y;
+            model.track(field,V::Zero(),w,0,distance,0.2,a,true,x,nullptr,{},scale);
+            scaled.track(field,V::Zero(),w,0,distance,0.2,b,true,y);
+            require(x.hit==y.hit,"fixed multiplier vs explicitly scaled densities");
+            close(x.distance,y.distance,1e-12,"scaled free-flight distance");
+            require(x.type==y.type && (x.normal-y.normal).norm()<1e-12,"scaled type and normal");
+        }
+    }
+    constexpr int count=16000;
+    for (double alpha:{2.0,8.0,1e6}) for (bool collisionOrigin:{false,true}) {
+        cg::Random rng(91337+int(alpha)+int(collisionOrigin));
+        int exits=0,hits=0,second=0;
+        double shadows=0,cosines=0,scales=0;
+        for (int i=0;i<count;++i) {
+            const double scale=le::sampleGammaDensityMultiplier(rng,alpha,collisionOrigin);
+            scales+=scale;
+            le::Collision hit;
+            model.track(field,V::Zero(),w,0,distance,0.2,rng,true,hit,nullptr,{},scale);
+            exits+=!hit.hit;
+            if (hit.hit) { ++hits; second+=hit.type==1; cosines+=hit.normal.z(); }
+            shadows+=model.track(field,V::Zero(),w,0,distance,0.2,rng,false,hit,nullptr,{},
+                le::sampleGammaDensityMultiplier(rng,alpha,collisionOrigin));
+        }
+        const double shape=alpha+int(collisionOrigin);
+        const double expected=std::exp(-shape*std::log1p(k*distance/alpha));
+        const double tolerance=6*std::sqrt(expected*(1-expected)/count)+0.001;
+        close(double(exits)/count,expected,tolerance,"Gamma flight survival");
+        close(shadows/count,expected,tolerance,"Gamma ratio tracking survival");
+        close(scales/count,shape/alpha,6*std::sqrt(shape/count)/alpha,"Gamma multiplier mean");
+        close(double(second)/hits,0.18/0.34,0.025,"Gamma common scale preserves type mixture");
+        close(cosines/hits,2.0/3,0.02,"Gamma common scale preserves conditional normals");
+        std::cout<<"gamma alpha="<<alpha<<", collision origin="<<collisionOrigin
+                 <<": survival="<<double(exits)/count<<", shadow="<<shadows/count
+                 <<", reference="<<expected<<"\n";
+    }
+}
+
+std::string gammaConfig() {
+    return R"({"type":"poisson_ellipsoid_local","sdf":{"type":"homogeneous","offset":0},
+        "decay_length":0.5,"tracking_step":0.3,"frame":"world",
+        "density_multiplier":{"type":"gamma_renewal","alpha":2},
+        "particles":[{"semiaxes":[0.2,0.2,0.2],"density":4,"material":{"type":"mirror","albedo":0.35}},
+                     {"semiaxes":[0.3,0.3,0.3],"density":2,"material":{"type":"mirror","albedo":0.9}}]})";
+}
+
+void gammaStateAndJson() {
+    auto medium=parse(gammaConfig());
+    const double distance=1.4,k=pi*0.34;
+    const Ray whole(Vec3f(0.f),Vec3f(0.f,0.f,-1.f),0,float(distance));
+    const Ray first(Vec3f(0.f),Vec3f(0.f,0.f,-1.f),0,float(distance/2));
+    const Ray second(Vec3f(0.f,0.f,-float(distance/2)),Vec3f(0.f,0.f,-1.f),0,float(distance/2));
+    constexpr int count=16000;
+    IndependentPathSampler rng(67123,false);
+    for (auto origin:{PoissonEllipsoidMedium::FlightOrigin::External,
+                      PoissonEllipsoidMedium::FlightOrigin::ParticleCollision}) {
+        const bool particle=origin==PoissonEllipsoidMedium::FlightOrigin::ParticleCollision;
+        const double expected=std::pow(1+k*distance/2,-(particle ? 3.0 : 2.0));
+        int fullExits=0,splitExits=0,hits=0;
+        double fullShadow=0,splitShadow=0,afterCollision=0;
+        for (int i=0;i<count;++i) {
+            rng.startPath(particle,i);
+            Medium::MediumState state{}; state.reset(); medium->beginFlight(state,origin);
+            MediumSample hit{};
+            require(medium->sampleDistance(rng,whole,state,hit),"Gamma medium flight");
+            fullExits+=hit.exited;
+            if (!hit.exited) {
+                ++hits;
+                const auto parent=state.pathContext;
+                auto branch=state;
+                afterCollision+=medium->transmittance(rng,whole,false,true,&branch).x();
+                require(state.pathContext==parent && branch.pathContext!=parent,
+                    "collision shadow samples a new scale without mutating parent");
+            }
+            state.reset(); medium->beginFlight(state,origin);
+            require(medium->sampleDistance(rng,first,state,hit),"Gamma split flight first");
+            if (hit.exited) {
+                const auto context=state.pathContext;
+                require(medium->sampleDistance(rng,second,state,hit),"Gamma split flight second");
+                splitExits+=hit.exited;
+                if (hit.exited) require(state.pathContext==context,"continued flight keeps its scale");
+            }
+            state.reset(); medium->beginFlight(state,origin);
+            fullShadow+=medium->transmittance(rng,whole,!particle,true,&state).x();
+            state.reset(); medium->beginFlight(state,origin);
+            const double a=medium->transmittance(rng,first,!particle,true,&state).x();
+            const auto parent=state.pathContext;
+            // A transparent boundary changes the legacy surface flag, but
+            // must not renew the flight or lose its particle-origin law.
+            const double b=medium->transmittance(rng,second,true,true,&state).x();
+            require(state.pathContext==parent,"split shadow keeps a single multiplier");
+            splitShadow+=a*b;
+            auto branch=state;
+            medium->beginFlight(branch,PoissonEllipsoidMedium::FlightOrigin::ParticleCollision);
+            require(state.pathContext==parent && branch.pathContext!=parent,"virtual collision forks state");
+        }
+        const double tolerance=6*std::sqrt(expected*(1-expected)/count)+0.001;
+        close(double(fullExits)/count,expected,tolerance,"Gamma medium API survival");
+        close(double(splitExits)/count,expected,tolerance,"Gamma split distance survival");
+        close(fullShadow/count,expected,tolerance,"Gamma medium API shadow");
+        close(splitShadow/count,expected,tolerance,"Gamma split shadow survival");
+        const double collisionExpected=std::pow(1+k*distance/2,-3.0);
+        close(afterCollision/hits,collisionExpected,6*std::sqrt(collisionExpected*(1-collisionExpected)/hits)+0.001,
+            "real collision renews with the density-weighted Gamma law");
+        std::cout<<"gamma state origin="<<particle<<": full="<<double(fullExits)/count
+                 <<", split="<<double(splitExits)/count<<", shadow="<<splitShadow/count<<"\n";
+    }
+    rapidjson::Document document;
+    auto encoded=medium->toJson(document.GetAllocator());
+    require(encoded.HasMember("density_multiplier") && encoded["density_multiplier"]["alpha"].GetDouble()==2,
+        "Gamma JSON retains parameters");
+    rapidjson::StringBuffer buffer; rapidjson::Writer<rapidjson::StringBuffer> writer(buffer); encoded.Accept(writer);
+    auto copy=parse(buffer.GetString());
+    require(copy->hasDensityMultiplier(),"Gamma JSON round trip enables model");
+    auto offText=gammaConfig();
+    const auto pos=offText.find(R"("type":"gamma_renewal","alpha":2)");
+    offText.replace(pos,std::string(R"("type":"gamma_renewal","alpha":2)").size(),R"("type":"none")");
+    auto off=parse(offText);
+    offText.erase(offText.find(R"("density_multiplier")"),std::string(R"("density_multiplier":{"type":"none"},)").size());
+    auto omitted=parse(offText);
+    IndependentPathSampler a(152,false),b(152,false);
+    for (int i=0;i<500;++i) {
+        a.startPath(0,i); b.startPath(0,i);
+        Medium::MediumState x{},y{}; x.reset(); y.reset(); MediumSample xs{},ys{};
+        off->sampleDistance(a,whole,x,xs); omitted->sampleDistance(b,whole,y,ys);
+        require(xs.exited==ys.exited && xs.t==ys.t && (xs.exited || xs.aniso==ys.aniso) && a.next1D()==b.next1D(),
+            "disabled multiplier preserves samples and random sequence");
+        a.startPath(0,i); b.startPath(0,i); x.reset(); y.reset();
+        medium->sampleDistance(a,whole,x,xs); copy->sampleDistance(b,whole,y,ys);
+        require(xs.exited==ys.exited && xs.t==ys.t && a.next1D()==b.next1D(),"Gamma round-trip samples");
+    }
+    for (const std::string invalid:{"0","1","-2"}) {
+        auto text=gammaConfig(); text.replace(text.find(R"("alpha":2)"),9,R"("alpha":)"+invalid);
+        bool rejected=false; try { parse(text); } catch (const std::exception &) { rejected=true; }
+        require(rejected,"invalid Gamma parameter rejected");
+    }
+}
+
+void gammaCandidateLighting() {
+    auto config=gammaConfig();
+    config.replace(config.find("[0.2,0.2,0.2]"),13,"[0.2,0.13,0.1]");
+    config.replace(config.find("[0.3,0.3,0.3]"),13,"[0.12,0.18,0.15]");
+    auto medium=parse(config);
+    const auto &model=medium->model();
+    const V travel=V(0.4,0.2,-1).normalized();
+    const auto extinction=[&](const V &w) {
+        double k=0;
+        for (const auto &g:model.grains()) k+=g.density*pi*g.determinant*(g.inverse*w).norm();
+        return k;
+    };
+    const auto light=[](const V &w) { return 1+0.6*w.x()+0.2*w.z(); };
+    const double length=2.0,shadowLength=0.8,k=extinction(travel),lightPdf=1/(4*pi);
+    const Ray ray(Vec3f(0.f),Vec3f(vec(travel)),0,float(length));
+    double angular=0;
+    constexpr int nz=180,np=360;
+    for (int z=0;z<nz;++z) for (int p=0;p<np;++p) {
+        const V n=sphereDirection(-1+2.0*(z+0.5)/nz,2*pi*(p+0.5)/np);
+        const V outgoing=travel-2*travel.dot(n)*n;
+        const double shadow=std::pow(1+extinction(outgoing)*shadowLength/2,-3.0);
+        for (std::size_t type=0;type<2;++type)
+            angular+=model.normalIntensity({0,V::Zero()},travel,type,n)*
+                medium->reflectance(type,-travel.dot(n)).x()*light(outgoing)*shadow*4*pi/(nz*np);
+    }
+    constexpr int count=26000;
+    IndependentPathSampler rng(16171,false);
+    for (bool particle:{false,true}) {
+        const double expected=(1-std::pow(1+k*length/2,-(particle ? 3.0:2.0)))*angular/k;
+        double sums[3]={},squares[3]={}; int nullScores=0;
+        for (int i=0;i<count;++i) {
+            rng.startPath(particle,i);
+            Medium::MediumState state{}; state.reset();
+            medium->beginFlight(state,particle ? PoissonEllipsoidMedium::FlightOrigin::ParticleCollision :
+                PoissonEllipsoidMedium::FlightOrigin::External);
+            double estimates[3]={}; int scores=0;
+            const auto score=[&](const le::Candidate &candidate) {
+                ++scores;
+                const V outgoing=sphereDirection(2*rng.next1D()-1,2*pi*rng.next1D());
+                double density;
+                const Vec3f f=medium->candidateScattering(candidate,ray.dir(),Vec3f(vec(outgoing)),density);
+                auto shadowState=state; shadowState.advance();
+                medium->beginFlight(shadowState,PoissonEllipsoidMedium::FlightOrigin::ParticleCollision);
+                const Ray shadow(Vec3f(vec(candidate.position)),Vec3f(vec(outgoing)),0,float(shadowLength));
+                const double value=f.x()*light(outgoing)*medium->transmittance(rng,shadow,false,true,&shadowState).x()/lightPdf;
+                estimates[0]+=value*le::Model::misWeight(lightPdf,density);
+                estimates[1]+=value;
+                close(candidate.rate,candidate.baseRate*candidate.densityScale,1e-12,"physical light proposal rate");
+            };
+            MediumSample hit{};
+            require(medium->sampleDistance(rng,ray,state,hit,score),"Gamma candidate lighting flight");
+            nullScores+=scores>int(!hit.exited);
+            if (!hit.exited) {
+                PhaseSample phase{}; require(hit.phase->sample(rng,ray.dir(),hit,phase),"Gamma phase sample");
+                auto shadowState=state;
+                const Ray shadow(hit.p,phase.w,0,float(shadowLength));
+                const double value=phase.weight.x()*light(V(phase.w.x(),phase.w.y(),phase.w.z()))*
+                    medium->transmittance(rng,shadow,false,true,&shadowState).x();
+                estimates[0]+=value*le::Model::misWeight(medium->candidateDirectionPdf(hit,ray.dir(),phase.w),lightPdf);
+                estimates[2]+=value;
+            }
+            for (int j=0;j<3;++j) { sums[j]+=estimates[j]; squares[j]+=estimates[j]*estimates[j]; }
+        }
+        for (int j=0;j<3;++j)
+            close(sums[j]/count,expected,6*std::sqrt(std::max(0.0,squares[j]/count-std::pow(sums[j]/count,2))/count)+0.0008,
+                "Gamma candidate MIS / NEE / phase with renewed shadow vs independent integral");
+        require(nullScores>0,"Gamma NEE must include rejected candidates");
+        std::cout<<"gamma lighting origin="<<particle<<": MIS="<<sums[0]/count<<", NEE="<<sums[1]/count
+                 <<", phase="<<sums[2]/count<<", reference="<<expected<<"\n";
+    }
+}
 SdfJet trilinear(const V &p) {
     return {0.1+0.4*p.z()+0.3*p.x()*p.z()+0.15*p.y()*p.z()+0.1*p.x()*p.y()*p.z(),
         V(0.3*p.z()+0.1*p.y()*p.z(),0.15*p.z()+0.1*p.x()*p.z(),
@@ -523,7 +746,8 @@ int main(int argc,char **argv) {
         require(argc==2,"expected fixture output directory");
         const auto output=std::filesystem::absolute(argv[1]); std::filesystem::create_directories(output);
         geometryAndNormals(); angularScattering(); planeFlights(); candidateLighting();
-        thinLayerFlights(); curvedFlights(); validation(); rendererAndGrid(output);
+        thinLayerFlights(); curvedFlights(); validation(); gammaFlights(); gammaStateAndJson(); gammaCandidateLighting();
+        rendererAndGrid(output);
         std::cout<<"local ellipsoid checks passed\n"; return 0;
     } catch (const std::exception &error) { std::cerr<<error.what()<<"\n"; return 1; }
 }

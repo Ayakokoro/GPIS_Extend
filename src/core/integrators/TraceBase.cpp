@@ -10,6 +10,14 @@
 
 namespace Tungsten {
 
+namespace {
+void beginEllipsoidSurfaceFlight(const Medium *medium,Medium::MediumState &state) {
+    const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
+    if (ellipsoid && ellipsoid->hasDensityMultiplier())
+        ellipsoid->beginFlight(state,PoissonEllipsoidMedium::FlightOrigin::External);
+}
+}
+
 TraceBase::TraceBase(TraceableScene *scene, const TraceSettings &settings, uint32 threadId)
 : _scene(scene),
   _settings(settings),
@@ -368,6 +376,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                 event.requestedLobe = BsdfLobes::AllButSpecular;
                 direct.f = event.info->bsdf->eval(event, false);
                 shadowState.firstScatter = true;
+                beginEllipsoidSurfaceFlight(shadowMedium,shadowState);
             } else {
                 direct.f = sample.phase->evalConnection(sampler, parentRay.dir(), ls.d, sample, shadowState.pathContext);
                 if (sample.phase->isSpecular())
@@ -420,6 +429,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                 p = event.info->p;
                 shadowMedium = event.info->primitive->selectMedium(medium, wo.dot(event.info->Ng) < 0.0f);
                 shadowState.firstScatter = true;
+                beginEllipsoidSurfaceFlight(shadowMedium,shadowState);
             } else {
                 if (sample.phase->isSpecular() &&
                     sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE)
@@ -615,6 +625,7 @@ Vec3f TraceBase::lightSample(const Primitive &light,
     Medium::MediumState mediumStateReplicate;
     mediumStateReplicate = *mediumState;
     mediumStateReplicate.firstScatter = true;
+    beginEllipsoidSurfaceFlight(medium,mediumStateReplicate);
     Vec3f e = attenuatedEmission(*event.sampler, light, medium, sample.dist, data, info, bounce, true, ray, &mediumStateReplicate, transmittance);
     if (e == 0.0f)
         return Vec3f(0.0f);
@@ -655,6 +666,7 @@ Vec3f TraceBase::bsdfSample(const Primitive &light,
     Medium::MediumState mediumStateReplicate;
     mediumStateReplicate = *mediumState;
     mediumStateReplicate.firstScatter = true;
+    beginEllipsoidSurfaceFlight(medium,mediumStateReplicate);
     Vec3f e = attenuatedEmission(*event.sampler, light, medium, -1.0f, data, info, bounce, true, ray, &mediumStateReplicate, nullptr);
 
     if (e == Vec3f(0.0f))
@@ -686,7 +698,10 @@ bool TraceBase::sampleMediumDistance(PathSampleGenerator &sampler,const Ray &ray
         if (f==0.f) return;
         auto shadowState=state;
         shadowState.advance();
-        shadowState.pathContext.reset();
+        // A light candidate is a virtual real collision even if the main
+        // path subsequently rejects it. Its outgoing flight has the particle
+        // origin law, independently of the incoming flight's latent scale.
+        ellipsoid->beginFlight(shadowState,PoissonEllipsoidMedium::FlightOrigin::ParticleCollision);
         ++shadowState.info.pixelSampleSegment.w();
         Ray shadow=ray.scatter(p,ls.d,0.f);
         shadow.setPrimaryRay(false);
@@ -1000,6 +1015,8 @@ bool TraceBase::finishSurface(SurfaceState &surface, SurfaceScatterEvent &event,
     medium = info.primitive->selectMedium(medium, geometricBackside);
     if (mediumState.pathContext ? medium != previousMedium : geometricBackside != (wi.dot(info.Ng) < 0.0f))
         mediumState.reset();
+    if (!surface.forward)
+        beginEllipsoidSurfaceFlight(medium,mediumState);
     ray = ray.scatter(ray.hitpoint(), surface.wo, info.epsilon);
     return true;
 }

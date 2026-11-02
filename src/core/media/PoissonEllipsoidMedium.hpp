@@ -22,10 +22,19 @@ class PoissonEllipsoidMedium final : public Medium {
     std::unique_ptr<LocalEllipsoid::Model> _model;
     std::vector<Particle> _particles;
     double _decayLength=0, _trackingStep=0;
+    double _densityMultiplierAlpha=0; // zero disables renewal without extra RNG draws
     std::string _frame="sdf";
     static Material readMaterial(JsonPtr value,Material defaults);
-    double track(PathSampleGenerator &,const Ray &,bool,LocalEllipsoid::Collision &,
+    double track(PathSampleGenerator &,const Ray &,bool,LocalEllipsoid::Collision &,double densityScale,
                  const LocalEllipsoid::CandidateCallback & = {}) const;
+public:
+    enum class FlightOrigin { External, ParticleCollision };
+    bool hasDensityMultiplier() const { return _densityMultiplierAlpha>0; }
+    // Starts a new branch-local flight; actual sampling is lazy. This does not
+    // reset bounce counters or mutate a context shared by another branch.
+    void beginFlight(MediumState &,FlightOrigin) const;
+private:
+    double flightDensityScale(PathSampleGenerator &,MediumState &,FlightOrigin fallback) const;
 public:
     PoissonEllipsoidMedium();
     ~PoissonEllipsoidMedium() override;
