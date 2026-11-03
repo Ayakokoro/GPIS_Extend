@@ -21,7 +21,8 @@ class PoissonEllipsoidMedium final : public Medium {
     std::shared_ptr<const ConditionalGpis::MeanField> _field;
     std::unique_ptr<LocalEllipsoid::Model> _model;
     std::vector<Particle> _particles;
-    double _decayLength=0, _trackingStep=0;
+    LocalEllipsoid::DensityProfile _densityProfile=LocalEllipsoid::DensityProfile::exponential(1);
+    double _trackingStep=0;
     double _densityMultiplierAlpha=0; // zero disables renewal without extra RNG draws
     std::string _frame="sdf";
     static Material readMaterial(JsonPtr value,Material defaults);

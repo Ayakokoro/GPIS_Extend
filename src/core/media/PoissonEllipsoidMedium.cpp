@@ -109,8 +109,24 @@ void PoissonEllipsoidMedium::fromJson(JsonPtr value,const Scene &scene) {
             grid.parseError("use an existing SDF with request_sdf=false and integration_method=raymarching");
     }
     _mean=scene.fetchMeanFunction(sdf);
-    _decayLength=value.castField<double>("decay_length");
-    _trackingStep=_decayLength;
+    const auto profile=value["density_profile"];
+    const std::string profileType=profile ? profile.castField<std::string>("type") : "exponential";
+    if (profileType=="gaussian") {
+        if (value["decay_length"])
+            value.parseError("gaussian density uses density_profile.stddev; remove exponential decay_length");
+        const double stddev=profile.castField<double>("stddev");
+        double centerHeight=0;
+        profile.getField("center_height",centerHeight);
+        try { _densityProfile=LocalEllipsoid::DensityProfile::gaussian(stddev,centerHeight); }
+        catch (const std::exception &error) { profile.parseError(error.what()); }
+    } else if (profileType=="exponential") {
+        const double decayLength=value.castField<double>("decay_length");
+        try { _densityProfile=LocalEllipsoid::DensityProfile::exponential(decayLength); }
+        catch (const std::exception &error) { value.parseError(error.what()); }
+    } else {
+        profile.parseError("density_profile type must be exponential or gaussian");
+    }
+    _trackingStep=_densityProfile.scale();
     value.getField("tracking_step",_trackingStep);
     value.getField("frame",_frame);
     value.getField("max_bounces",_maxBounce);
@@ -124,9 +140,9 @@ void PoissonEllipsoidMedium::fromJson(JsonPtr value,const Scene &scene) {
         } else if (type!="none")
             multiplier.parseError("density_multiplier type must be none or gamma_renewal");
     }
-    if (!(_decayLength>0) || !std::isfinite(_decayLength) || !(_trackingStep>0) ||
+    if (!(_trackingStep>0) ||
         !std::isfinite(_trackingStep) || _maxBounce<0 || (_frame!="sdf" && _frame!="world"))
-        value.parseError("positive finite decay_length/tracking_step, nonnegative max_bounces, and frame=sdf or world are required");
+        value.parseError("positive finite tracking_step, nonnegative max_bounces, and frame=sdf or world are required");
     const Material defaults=readMaterial(value["material"],Material{});
     const auto particles=value.getRequiredMember("particles");
     if (!particles.isArray() || particles.size()==0) particles.parseError("particles must be a nonempty array");
@@ -135,6 +151,8 @@ void PoissonEllipsoidMedium::fromJson(JsonPtr value,const Scene &scene) {
         const auto entry=particles[i];
         if (entry["density_multiplier"])
             entry.parseError("density_multiplier belongs to the medium and is shared by all particles");
+        if (entry["density_profile"])
+            entry.parseError("density_profile belongs to the medium and is shared by all particles");
         Particle p;
         p.semiaxes=entry.castField<Vec3d>("semiaxes");
         p.density=entry.castField<double>("density");
@@ -158,8 +176,12 @@ rapidjson::Value PoissonEllipsoidMedium::toJson(Allocator &allocator) const {
             "material",rapidjson::Value(material)}),allocator);
     }
     JsonObject result{JsonSerializable::toJson(allocator),allocator,
-        "type","poisson_ellipsoid_local","sdf",*_mean,"decay_length",_decayLength,
+        "type","poisson_ellipsoid_local","sdf",*_mean,
         "tracking_step",_trackingStep,"frame",_frame,"max_bounces",_maxBounce,"particles",std::move(particles)};
+    if (_densityProfile.isGaussian())
+        result.add("density_profile",rapidjson::Value(JsonObject{allocator,
+            "type","gaussian","center_height",_densityProfile.centerHeight(),"stddev",_densityProfile.scale()}));
+    else result.add("decay_length",_densityProfile.scale());
     if (hasDensityMultiplier())
         result.add("density_multiplier",rapidjson::Value(JsonObject{allocator,
             "type","gamma_renewal","alpha",_densityMultiplierAlpha}));
@@ -191,7 +213,7 @@ void PoissonEllipsoidMedium::prepareForRender() {
     if (!_field) throw std::runtime_error("poisson_ellipsoid_local requires a linear/spherical/constant SDF, a trilinear VDB, or certified procedural SDF queries");
     std::vector<LocalEllipsoid::Grain> grains;
     for (const auto &p:_particles) grains.emplace_back(eigen(p.semiaxes),eigen(p.rotation),p.density);
-    _model=std::make_unique<LocalEllipsoid::Model>(std::move(grains),_decayLength,_frame=="sdf");
+    _model=std::make_unique<LocalEllipsoid::Model>(std::move(grains),_densityProfile,_frame=="sdf");
 }
 
 SdfJet PoissonEllipsoidMedium::localPlane(const Vec3d &position) const {

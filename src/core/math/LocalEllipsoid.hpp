@@ -10,6 +10,28 @@ namespace Tungsten::LocalEllipsoid {
 using V = Eigen::Vector3d;
 using M = Eigen::Matrix3d;
 
+// Multiplies each grain's number density. Gaussian density is the peak
+// density, not a normalized probability density over height.
+class DensityProfile {
+public:
+    enum class Type { Exponential, Gaussian };
+    DensityProfile(Type type, double scale, double centerHeight = 0);
+    static DensityProfile exponential(double decayLength) {
+        return {Type::Exponential, decayLength};
+    }
+    static DensityProfile gaussian(double stddev, double centerHeight = 0) {
+        return {Type::Gaussian, stddev, centerHeight};
+    }
+    bool isGaussian() const { return type_ == Type::Gaussian; }
+    double scale() const { return scale_; }
+    double centerHeight() const { return centerHeight_; }
+    double logValue(double height) const;
+    double logMaximum(double minimumHeight, double maximumHeight) const;
+private:
+    Type type_;
+    double scale_, centerHeight_;
+};
+
 // Full ellipsoids. transform maps a unit sphere to the particle, before the
 // optional SDF tangent-frame rotation. Density is a number per unit volume.
 struct Grain {
@@ -55,7 +77,7 @@ struct TrackingStatistics {
 // No particle centers, previous tangent planes or empty-path history persist.
 class Model {
     std::vector<Grain> grains_;
-    double decayLength_;
+    DensityProfile densityProfile_;
     bool sdfFrame_;
     M frame(const V &gradient) const;
     struct Projection {
@@ -65,10 +87,14 @@ class Model {
         V spherePoint(double cosine, double azimuth) const;
     };
     Projection projection(std::size_t type, const V &gradient, const V &w) const;
+    double visibleLogDensity(const Projection &, const SdfJet &) const;
 public:
     Model(std::vector<Grain> grains, double decayLength, bool sdfFrame = true);
+    Model(std::vector<Grain> grains, DensityProfile densityProfile, bool sdfFrame = true);
     const std::vector<Grain> &grains() const { return grains_; }
-    double decayLength() const { return decayLength_; }
+    const DensityProfile &densityProfile() const { return densityProfile_; }
+    // Legacy exponential-profile accessor; new callers should use densityProfile().
+    double decayLength() const { return densityProfile_.scale(); }
 
     // Deterministic quadrature for inspection/validation, not used to decide
     // transport events. Raising order refines this numerical integral.

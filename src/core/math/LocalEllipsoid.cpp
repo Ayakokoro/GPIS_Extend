@@ -18,11 +18,13 @@ void validateJet(const SdfJet &jet) {
 double finiteExp(double logarithm) {
     const double value = std::exp(logarithm);
     if (!std::isfinite(value))
-        throw std::runtime_error("poisson_ellipsoid_local: rate overflow; check density, particle size and decay_length");
+        throw std::runtime_error("poisson_ellipsoid_local: rate overflow; check density, particle size and density profile");
     return value;
 }
 double checkedAcceptance(double logarithm) {
-    if (!std::isfinite(logarithm) || logarithm > 1e-9)
+    // A Gaussian can underflow to zero in its tails; -infinity is a valid
+    // log acceptance there. NaN and an exceeded majorant are still errors.
+    if (std::isnan(logarithm) || logarithm > 1e-9)
         throw std::runtime_error("poisson_ellipsoid_local: local collision intensity exceeds its certified majorant");
     return std::exp(std::min(0.0, logarithm));
 }
@@ -69,6 +71,27 @@ std::vector<std::pair<double,double>> quadrature(int order) {
 }
 }
 
+DensityProfile::DensityProfile(Type type,double scale,double centerHeight)
+    : type_(type),scale_(scale),centerHeight_(centerHeight) {
+    if (!(scale_>0) || !std::isfinite(scale_) || !std::isfinite(centerHeight_) ||
+        (type_!=Type::Exponential && type_!=Type::Gaussian))
+        throw std::invalid_argument("density profile requires a positive finite scale and finite center_height");
+}
+
+double DensityProfile::logValue(double height) const {
+    if (!isGaussian()) return -height/scale_;
+    const double distance=(height-centerHeight_)/scale_;
+    return (-0.5*distance)*distance;
+}
+
+double DensityProfile::logMaximum(double minimumHeight,double maximumHeight) const {
+    if (std::isnan(minimumHeight) || std::isnan(maximumHeight) || minimumHeight>maximumHeight)
+        throw std::runtime_error("invalid ellipsoid center-height bounds");
+    // Exponential density is monotone; a Gaussian has its maximum at the
+    // point in the interval closest to its peak, including an interior peak.
+    return logValue(isGaussian() ? std::clamp(centerHeight_,minimumHeight,maximumHeight) : minimumHeight);
+}
+
 Grain::Grain(const V &axes, const V &degrees, double numberDensity) : density(numberDensity) {
     if (!axes.allFinite() || axes.minCoeff()<=0 || !degrees.allFinite() ||
         !std::isfinite(density) || density<0)
@@ -88,9 +111,11 @@ Grain::Grain(const V &axes, const V &degrees, double numberDensity) : density(nu
 }
 
 Model::Model(std::vector<Grain> grains, double decayLength, bool sdfFrame)
-    : grains_(std::move(grains)),decayLength_(decayLength),sdfFrame_(sdfFrame) {
-    if (grains_.empty() || !(decayLength_>0) || !std::isfinite(decayLength_))
-        throw std::invalid_argument("ellipsoid model needs at least one type and a finite positive decay_length");
+    : Model(std::move(grains),DensityProfile::exponential(decayLength),sdfFrame) {}
+
+Model::Model(std::vector<Grain> grains,DensityProfile densityProfile,bool sdfFrame)
+    : grains_(std::move(grains)),densityProfile_(densityProfile),sdfFrame_(sdfFrame) {
+    if (grains_.empty()) throw std::invalid_argument("ellipsoid model needs at least one particle type");
 }
 
 M Model::frame(const V &gradient) const {
@@ -123,6 +148,16 @@ Model::Projection Model::projection(std::size_t type,const V &gradient,const V &
     return p;
 }
 
+double Model::visibleLogDensity(const Projection &p,const SdfJet &jet) const {
+    const V a=p.transform.transpose()*jet.gradient;
+    const double along=a.dot(p.incoming);
+    const double transverse=(a-along*p.incoming).norm();
+    // Both extrema of gradient.q over the visible sphere hemisphere.
+    const double maximum=along<=0 ? a.norm() : transverse;
+    const double minimum=along>=0 ? -a.norm() : -transverse;
+    return densityProfile_.logMaximum(jet.value-maximum,jet.value-minimum);
+}
+
 double Model::typeExtinction(const SdfJet &jet,const V &travel,std::size_t type,int order) const {
     validateJet(jet);
     const auto &grain=grains_.at(type);
@@ -134,7 +169,7 @@ double Model::typeExtinction(const SdfJet &jet,const V &travel,std::size_t type,
     for (const auto &node:nodes) for (int j=0;j<azimuths;++j) {
         const V q=p.transform*p.spherePoint(node.first,2*pi*(j+0.5)/azimuths);
         mean+=2*node.first*node.second/azimuths*
-            finiteExp((-jet.value+jet.gradient.dot(q))/decayLength_);
+            finiteExp(densityProfile_.logValue(jet.value-jet.gradient.dot(q)));
     }
     const double result=grain.density*p.area*mean;
     if (!std::isfinite(result)) throw std::runtime_error("ellipsoid extinction exceeds numerical range");
@@ -161,7 +196,7 @@ double Model::normalIntensity(const SdfJet &jet,const V &travel,std::size_t type
     // dA/dOmega = det(Q)/(m.Q.m)^2.
     const double jacobian=std::pow(grain.determinant/(support*support),2);
     return finiteExp(std::log(grain.density)+std::log(cosine)+std::log(jacobian)+
-                     (-jet.value+jet.gradient.dot(q))/decayLength_);
+                     densityProfile_.logValue(jet.value-jet.gradient.dot(q)));
 }
 
 double Model::directionIntensity(const SdfJet &jet,const V &travel,const V &outgoing,std::size_t type) const {
@@ -179,7 +214,7 @@ double Model::directionIntensity(const SdfJet &jet,const V &travel,const V &outg
     // This avoids a numerically unstable normalIntensity()/(4*cosine).
     return finiteExp(std::log(grain.density)-std::log(4.0)+
         2*(std::log(grain.determinant)-2*std::log(support))+
-        (-jet.value+jet.gradient.dot(q))/decayLength_);
+        densityProfile_.logValue(jet.value-jet.gradient.dot(q)));
 }
 
 double Model::visibleMajorant(const SdfJet &jet,const V &travel) const {
@@ -190,12 +225,8 @@ double Model::visibleMajorant(const SdfJet &jet,const V &travel) const {
         const auto &g=grains_[i];
         if (g.density==0) continue;
         const auto p=projection(i,jet.gradient,w);
-        const V a=p.transform.transpose()*jet.gradient;
-        const double along=a.dot(p.incoming);
-        // Maximize a.u on the visible sphere hemisphere u.incoming <= 0.
-        const double height=along<=0 ? a.norm() : (a-along*p.incoming).norm();
         result+=finiteExp(std::log(g.density)+std::log(p.area)+
-                          (-jet.value+height)/decayLength_+1e-12);
+                          visibleLogDensity(p,jet)+1e-12);
     }
     if (!std::isfinite(result)) throw std::runtime_error("ellipsoid visible majorant overflow");
     return result;
@@ -215,13 +246,17 @@ NormalSample Model::sampleNormal(const SdfJet &jet,const V &travel,cg::Random &r
     validateJet(jet);
     const V w=cg::normalizedOrThrow(travel);
     std::vector<Projection> projections;
-    std::vector<double> logWeights, weights;
+    std::vector<double> logWeights, weights, logBounds;
     double largest=-std::numeric_limits<double>::infinity();
     for (std::size_t i=0;i<grains_.size();++i) {
         projections.push_back(projection(i,jet.gradient,w));
         const auto &p=projections.back();
-        const double height=(p.transform.transpose()*jet.gradient).norm()/decayLength_;
-        const double logWeight=grains_[i].density>0 ? std::log(grains_[i].density)+std::log(p.area)+height :
+        // Only the exponential profile has a common height factor that can
+        // be cancelled before selecting a type and normal.
+        const double bound=densityProfile_.isGaussian() ? visibleLogDensity(p,jet) :
+            (p.transform.transpose()*jet.gradient).norm()/densityProfile_.scale();
+        logBounds.push_back(bound);
+        const double logWeight=grains_[i].density>0 ? std::log(grains_[i].density)+std::log(p.area)+bound :
             -std::numeric_limits<double>::infinity();
         logWeights.push_back(logWeight); largest=std::max(largest,logWeight);
     }
@@ -233,7 +268,10 @@ NormalSample Model::sampleNormal(const SdfJet &jet,const V &travel,cg::Random &r
         const auto &p=projections[i];
         const V u=p.spherePoint(std::sqrt(rng.openUniform01()),2*pi*rng.openUniform01());
         const V a=p.transform.transpose()*jet.gradient;
-        if (rng.openUniform01()<checkedAcceptance((a.dot(u)-a.norm())/decayLength_))
+        const double logAcceptance=densityProfile_.isGaussian() ?
+            densityProfile_.logValue(jet.value-a.dot(u))-logBounds[i] :
+            (a.dot(u)-a.norm())/densityProfile_.scale();
+        if (rng.openUniform01()<checkedAcceptance(logAcceptance))
             return {i,(p.normalTransform*u).normalized()};
     }
 }
@@ -255,15 +293,16 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
     cg::MajorantOpticalDepth clock;
     double weight=1;
     std::vector<double> rates(grains_.size()),logRates(grains_.size());
-    const auto updateRates=[&](double minimumValue,double gradientBound,bool strict=true) {
+    const auto updateRates=[&](double minimumValue,double maximumValue,double gradientBound,bool strict=true) {
         double total=0;
         for (std::size_t i=0;i<grains_.size();++i) {
             const auto &g=grains_[i];
             // In an SDF frame, F^T gradient = (0,0,|gradient|), even as
             // F rotates along the ray. Include the particle's local rotation.
             const double extent=sdfFrame_ ? g.normalRadius : g.radius;
+            const double offset=gradientBound*extent;
             logRates[i]=g.density>0 ? std::log(g.density)+std::log(g.maximumArea)+
-                (-minimumValue+gradientBound*extent)/decayLength_+1e-12 :
+                densityProfile_.logMaximum(minimumValue-offset,maximumValue+offset)+1e-12 :
                 -std::numeric_limits<double>::infinity();
             rates[i]=strict ? finiteExp(logRates[i]) : std::exp(logRates[i]);
             total+=rates[i];
@@ -284,9 +323,9 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
             double coarseLimit=limit;
             cg::MeanRayBounds block;
             if (cursor->coarseRayBounds(begin,coarseLimit,block) && block.certified &&
-                coarseLimit>begin && std::isfinite(block.minimumValue) &&
+                coarseLimit>begin && std::isfinite(block.minimumValue) && std::isfinite(block.maximumValue) &&
                 global->maximumGradientNorm>=0 && std::isfinite(global->maximumGradientNorm)) {
-                total=updateRates(block.minimumValue,global->maximumGradientNorm,false);
+                total=updateRates(block.minimumValue,block.maximumValue,global->maximumGradientNorm,false);
                 if (total*densityScale*(coarseLimit-begin)<=1) {
                     limit=coarseLimit;
                     coarse=true;
@@ -305,21 +344,21 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
             const double gradientBound=global ? global->maximumGradientNorm : spatial.maximumGradientNorm;
             SdfRayQueryOptions options; options.computeBeginDerivative=false;
             auto bounds=cursor ? cursor->rayBounds(begin,limit,options) : sdf.rayBounds(origin,w,begin,limit,options);
-            if (!bounds.certified || !std::isfinite(bounds.minimumValue) ||
+            if (!bounds.certified || !std::isfinite(bounds.minimumValue) || !std::isfinite(bounds.maximumValue) ||
                 !(gradientBound>=0) || !std::isfinite(gradientBound))
                 throw std::runtime_error("ellipsoid tracking requires finite certified SDF bounds");
-            total=updateRates(bounds.minimumValue,gradientBound);
-            // Refine costly intervals spanning several decay lengths. Keep the
+            total=updateRates(bounds.minimumValue,bounds.maximumValue,gradientBound);
+            // Refine costly intervals spanning several profile widths. Keep the
             // same optical-depth clock across every subdivision and block.
             const double slope=std::max(std::abs(bounds.minimumDerivative),std::abs(bounds.maximumDerivative));
-            if (total*densityScale*(limit-begin)>1 && std::isfinite(slope) && slope*(limit-begin)>decayLength_) {
-                const double refined=begin+decayLength_/slope;
+            if (total*densityScale*(limit-begin)>1 && std::isfinite(slope) && slope*(limit-begin)>densityProfile_.scale()) {
+                const double refined=begin+densityProfile_.scale()/slope;
                 if (refined>begin && refined<limit) {
                     limit=refined;
                     bounds=cursor ? cursor->rayBounds(begin,limit,options) : sdf.rayBounds(origin,w,begin,limit,options);
-                    if (!bounds.certified || !std::isfinite(bounds.minimumValue))
+                    if (!bounds.certified || !std::isfinite(bounds.minimumValue) || !std::isfinite(bounds.maximumValue))
                         throw std::runtime_error("ellipsoid tracking requires finite certified SDF bounds");
-                    total=updateRates(bounds.minimumValue,gradientBound);
+                    total=updateRates(bounds.minimumValue,bounds.maximumValue,gradientBound);
                 }
             }
         }
@@ -351,12 +390,19 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
                     const auto &g=grains_[i];
                     if (g.density==0) continue;
                     const auto p=projection(i,jet.gradient,w);
-                    const V a=p.transform.transpose()*jet.gradient/decayLength_;
+                    if (densityProfile_.isGaussian()) {
+                        // A visible-hemisphere bound is cheap, stays positive
+                        // wherever scattering is possible, and avoids angular
+                        // quadrature. Its intensity cancels in NEE/MIS.
+                        directRate+=finiteExp(std::log(g.density)+std::log(p.area)+visibleLogDensity(p,jet));
+                        continue;
+                    }
+                    const V a=p.transform.transpose()*jet.gradient/densityProfile_.scale();
                     const double along=a.dot(p.incoming);
                     const double maximum=along<=0 ? a.norm() : (a-along*p.incoming).norm();
                     const double variance=std::max(0.0,a.squaredNorm()/4-7*along*along/36);
                     const double moment=std::min(maximum,-2*along/3+variance/2);
-                    directRate+=finiteExp(std::log(g.density)+std::log(p.area)-jet.value/decayLength_+moment);
+                    directRate+=finiteExp(std::log(g.density)+std::log(p.area)-jet.value/densityProfile_.scale()+moment);
                 }
                 directRate=std::min(total,directRate);
                 // Score BEFORE acceptance, including candidates later rejected.
@@ -370,7 +416,7 @@ double Model::track(const cg::MeanField &sdf,const V &origin,const V &travel,
             const V u=p.spherePoint(std::sqrt(rng.openUniform01()),2*pi*rng.openUniform01());
             const V q=p.transform*u;
             const double acceptance=checkedAcceptance(std::log(grains_[i].density)+std::log(p.area)+
-                (-jet.value+jet.gradient.dot(q))/decayLength_-logRates[i]);
+                densityProfile_.logValue(jet.value-jet.gradient.dot(q))-logRates[i]);
             if (collision) {
                 if (rng.openUniform01()<acceptance) {
                     if (statistics) ++statistics->collisions;

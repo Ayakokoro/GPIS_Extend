@@ -111,6 +111,54 @@ transmittance by ratio tracking. `extinction(position, direction, order)` is a
 deterministic angular quadrature for inspection; transport does not use this
 approximate integral or a table of interpolated normals.
 
+### Gaussian height density
+
+To place a layer of particles around an SDF level, replace `decay_length` with:
+
+```json
+"density_profile": {
+    "type": "gaussian",
+    "center_height": 0.0,
+    "stddev": 0.02
+}
+```
+
+The center-density profile is
+`lambda_i(h) = particles[i].density * exp(-0.5 * ((h - center_height) / stddev)^2)`.
+Here `h = phi(x) - gradient(phi(x)).dot(q)` is the particle center height in
+the plane queried at the current candidate, including the full SDF gradient
+and finite ellipsoid offset `q`. `density` is the **peak** number per volume;
+there is no Gaussian PDF normalization factor. `center_height` defaults to
+zero, `stddev` must be finite and positive, and `tracking_step` defaults to
+`stddev`. Gaussian configurations must omit `decay_length`. Existing scenes
+without `density_profile` retain the exponential law (an explicit
+`{"type":"exponential"}` also uses the original top-level `decay_length`).
+
+This is a bell-shaped layer on both sides of the selected SDF level: density
+decreases both outward and inward. It is not a filled solid with a smooth
+boundary. At fixed particle sizes and peak density, shrinking `stddev` also
+reduces the number of particles per unit planar area, proportional to
+`sqrt(2*pi) * density * stddev`. The finite particle sizes also contribute to
+the thickness of the collision layer.
+
+Gaussian density is used consistently in extinction, type/normal sampling,
+scattering and direct lighting. The tracker bounds both ends of the possible
+center-height interval and includes an interior Gaussian peak. Sparse-block
+skipping and pointwise SDF/gradient queries remain available. Gaussian direct
+lighting uses a visible-hemisphere density bound; no angular quadrature is
+added to rendering. Without a density multiplier, this is ordinary Poisson
+transport, with transmittance `exp(-integral(extinction ds))`.
+
+The [Gaussian shaderball example](data/example-scenes/poisson-ellipsoid-local/shaderball-gaussian.json)
+uses two particle types (green mirror and red conductor), `stddev=0.02`,
+`center_height=0`, 512 x 512 pixels and 16 spp, without Gamma renewal:
+
+```powershell
+.\build\Release\tungsten.exe -t 8 -s 41 data/example-scenes/poisson-ellipsoid-local/shaderball-gaussian.json
+```
+
+### Gamma renewal
+
 An optional medium-level `density_multiplier` adds non-exponential free flights:
 
 ```json

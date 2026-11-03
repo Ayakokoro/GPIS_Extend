@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 
 using namespace Tungsten;
 namespace le=LocalEllipsoid;
@@ -314,6 +315,214 @@ std::string mediumJson(const std::string &sdf) {
                       "material":{"type":"mirror","albedo":1}},
                      {"semiaxes":[0.07,0.09,0.08],"density":8,
                       "material":{"type":"conductor","force_unit_fresnel":true}}]})";
+}
+
+std::string gaussianConfig(const std::string &sdf) {
+    auto text=mediumJson(sdf);
+    const std::string old=R"("decay_length":0.5)";
+    text.replace(text.find(old),old.size(),
+        R"("density_profile":{"type":"gaussian","stddev":0.15,"center_height":0.12})");
+    return text;
+}
+
+void gaussianNormals() {
+    const auto profile=le::DensityProfile::gaussian(0.14,0.06);
+    close(profile.logMaximum(-1,1),0,0,"Gaussian bound includes an interior peak");
+    close(profile.logMaximum(0.2,1),-0.5,1e-14,"Gaussian bound above peak");
+    close(profile.logMaximum(-1,-0.08),-0.5,1e-14,"Gaussian bound below peak");
+    const std::vector<le::Grain> grains={le::Grain(V(0.19,0.14,0.09),V(15,-20,30),10),
+                                       le::Grain(V(0.11,0.17,0.22),V(-10,15,0),6)};
+    const le::Model model(grains,profile,false);
+    const V w=V(0.2,-0.1,-1).normalized();
+    cg::Random rng(18571);
+    V means[2]; int heightIndex=0;
+    for (double height:{-0.22,0.38}) {
+        const SdfJet jet{height,V(0.3,-0.2,1.7)};
+        double mass=0,secondMass=0; V moment=V::Zero();
+        constexpr int nz=180,nphi=360;
+        // Independent solid-angle integral of the ellipsoid Gauss-map
+        // Jacobian and Gaussian CENTER density, including raw gradient scale.
+        for (int z=0;z<nz;++z) for (int p=0;p<nphi;++p) {
+            const V m=sphereDirection(-1+2.0*(z+0.5)/nz,2*pi*(p+0.5)/nphi);
+            const double cosine=std::max(0.0,-w.dot(m));
+            for (std::size_t i=0;i<grains.size();++i) {
+                const auto &grain=grains[i];
+                const le::M shape=grain.transform*grain.transform.transpose();
+                const double support2=m.dot(shape*m);
+                const V q=shape*m/std::sqrt(support2);
+                const double h=(height-jet.gradient.dot(q)-0.06)/0.14;
+                const double rate=grain.density*cosine*grain.determinant*grain.determinant/
+                    (support2*support2)*std::exp(-0.5*h*h);
+                const double contribution=rate*4*pi/(nz*nphi);
+                mass+=contribution; moment+=contribution*m;
+                if (i==1) secondMass+=contribution;
+                if (p%31==0 && z%13==0) {
+                    close(model.normalIntensity(jet,w,i,m),rate,1e-11,"Gaussian normal intensity uses center height");
+                    if (cosine>0) {
+                        const V outgoing=w+2*cosine*m;
+                        close(model.directionIntensity(jet,w,outgoing,i),rate/(4*cosine),1e-10,
+                              "Gaussian scattering has the matching reflection Jacobian");
+                    }
+                }
+            }
+        }
+        close(model.extinction(jet,w,64),mass,1e-3*mass,"Gaussian extinction vs independent angular integral");
+        for (const V &direction:{w,V(-w),V::UnitX().eval()})
+            require(model.visibleMajorant(jet,direction)>=model.extinction(jet,direction,64),
+                    "Gaussian visible density bound covers either side of the peak");
+        constexpr int count=18000;
+        V sampled=V::Zero(); int second=0;
+        for (int j=0;j<count;++j) {
+            const auto sample=model.sampleNormal(jet,w,rng);
+            sampled+=sample.normal; second+=sample.type==1;
+        }
+        means[heightIndex++]=sampled/count;
+        require((sampled/count-moment/mass).norm()<0.025,"Gaussian conditional normals vs independent integral");
+        close(double(second)/count,secondMass/mass,0.025,"Gaussian height-dependent mixture weights");
+    }
+    require((means[0]-means[1]).norm()>0.1,"Gaussian normal law must change with height");
+    std::cout<<"Gaussian normals: both sides, shifted peak, raw gradient, type weights and scattering passed\n";
+}
+
+void gaussianFlights() {
+    const cg::PlaneMean plane(V::UnitZ(),0);
+    constexpr double sigma=0.08,center=0.13,halfSpan=0.8;
+    const le::Model model({le::Grain(V::Constant(0.08),V::Zero(),150),
+                           le::Grain(V::Constant(0.12),V::Zero(),60)},
+                          le::DensityProfile::gaussian(sigma,center));
+    // Integrating through the whole plane eliminates every finite-particle
+    // height shift: optical depth = projected area * peak density * sqrt(2pi)*sigma.
+    // The finite endpoints are more than 8 sigma beyond all possible centers.
+    const double optical=std::sqrt(2*pi)*sigma*pi*(150*0.08*0.08+60*0.12*0.12);
+    const double expected=std::exp(-optical);
+    constexpr int count=10000;
+    constexpr double lightPdf=1/(4*pi);
+    for (double sign:{-1.0,1.0}) for (double step:{0.03,2.0}) {
+        cg::Random rng(27933+int(sign)+int(step*100));
+        const V origin(0,0,center-sign*halfSpan),w(0,0,sign);
+        int exits=0; double shadow=0,nee=0,nee2=0,mis=0,mis2=0;
+        le::TrackingStatistics stats;
+        for (int i=0;i<count;++i) {
+            double neeEstimate=0,misEstimate=0;
+            const auto score=[&](const le::Candidate &candidate) {
+                const V outgoing=sphereDirection(2*rng.openUniform01()-1,2*pi*rng.openUniform01());
+                double density=0;
+                for (std::size_t type=0;type<2;++type)
+                    density+=model.directionIntensity(candidate.jet,w,outgoing,type)/candidate.rate;
+                const double value=density/lightPdf;
+                neeEstimate+=value;
+                misEstimate+=value*le::Model::misWeight(lightPdf,density);
+            };
+            le::Collision hit;
+            model.track(plane,origin,w,0,2*halfSpan,step,rng,true,hit,&stats,score);
+            exits+=!hit.hit;
+            if (hit.hit) {
+                const V outgoing=w-2*w.dot(hit.normal)*hit.normal;
+                double density=0;
+                for (std::size_t type=0;type<2;++type)
+                    density+=model.directionIntensity(hit.jet,w,outgoing,type)/hit.directRate;
+                misEstimate+=le::Model::misWeight(density,lightPdf);
+            }
+            nee+=neeEstimate; nee2+=neeEstimate*neeEstimate;
+            mis+=misEstimate; mis2+=misEstimate*misEstimate;
+            shadow+=model.track(plane,origin,w,0,2*halfSpan,step,rng,false,hit);
+        }
+        const double tolerance=6*std::sqrt(expected*(1-expected)/count)+0.001;
+        close(double(exits)/count,expected,tolerance,"Gaussian shell survival in both directions");
+        close(shadow/count,expected,tolerance,"Gaussian shell ratio tracking");
+        const auto energyTolerance=[&](double sum,double square) {
+            return 6*std::sqrt(std::max(0.0,square/count-std::pow(sum/count,2))/count)+0.001;
+        };
+        close(nee/count,1-expected,energyTolerance(nee,nee2),"Gaussian candidate NEE energy");
+        close(mis/count,1-expected,energyTolerance(mis,mis2),"Gaussian candidate NEE and collision MIS energy");
+        require(stats.directCandidates>0,"Gaussian direct-light candidates are generated");
+        std::cout<<"Gaussian plane sign="<<sign<<", step="<<step<<": survival="<<double(exits)/count
+                 <<", shadow="<<shadow/count<<", reference="<<expected<<", MIS="<<mis/count<<"\n";
+    }
+    // A very thin layer with a huge finite center height should simply have
+    // zero representable density here, rather than generate NaN acceptances.
+    const le::Model tail({le::Grain(V::Constant(0.1),V::Zero(),1)},le::DensityProfile::gaussian(1e-100));
+    cg::ConstantMean farField(1e100); cg::Random rng(1); le::Collision hit;
+    close(tail.track(farField,V::Zero(),V::UnitZ(),0,1,0.2,rng,true,hit),1,0,"Gaussian underflow tail is transparent");
+    require(!hit.hit,"Gaussian tail cannot create a spurious collision");
+}
+
+void gaussianCurvedFlights() {
+    CurvedField field;
+    constexpr double radius=0.1,density=60,sigma=0.07,center=-0.3;
+    const le::Model model({le::Grain(V::Constant(radius),V::Zero(),density)},
+                          le::DensityProfile::gaussian(sigma,center));
+    double optical=0;
+    constexpr int steps=800,cosines=800;
+    for (int s=0;s<steps;++s) for (int c=0;c<cosines;++c) {
+        const double z=(s+0.5)/steps,u=(c+0.5)/cosines;
+        // Entry point q.z=-radius*u; gradient.z=-1.6*z.
+        const double h=(0.2-0.8*z*z-1.6*z*radius*u-center)/sigma;
+        optical+=density*pi*radius*radius*2*u*std::exp(-0.5*h*h)/(steps*cosines);
+    }
+    const double expected=std::exp(-optical);
+    const double frozen=std::exp(-density*pi*radius*radius*std::exp(-0.5*std::pow((0.2-center)/sigma,2)));
+    require(std::abs(expected-frozen)>0.1,"Gaussian curved fixture distinguishes a frozen plane");
+    constexpr int count=12000;
+    cg::Random rng(48519); int exits=0; double shadow=0;
+    for (int i=0;i<count;++i) {
+        le::Collision hit;
+        model.track(field,V::Zero(),V::UnitZ(),0,1,0.4,rng,true,hit);
+        exits+=!hit.hit;
+        shadow+=model.track(field,V::Zero(),V::UnitZ(),0,1,0.4,rng,false,hit);
+    }
+    const double tolerance=6*std::sqrt(expected*(1-expected)/count)+0.001;
+    close(double(exits)/count,expected,tolerance,"Gaussian curved free flight queries current SDF");
+    close(shadow/count,expected,tolerance,"Gaussian curved shadow queries current SDF");
+    require(field.queries>count,"Gaussian flights query SDF inside the ray");
+    std::cout<<"Gaussian curved: survival="<<double(exits)/count<<", shadow="<<shadow/count
+             <<", reference="<<expected<<", frozen="<<frozen<<"\n";
+}
+
+void gaussianJson() {
+    auto config=gaussianConfig(R"({"type":"homogeneous","offset":0.12})");
+    auto medium=parse(config);
+    require(!medium->hasDensityMultiplier(),"Gaussian profile uses ordinary Poisson flights by default");
+    double areaRate=0;
+    for (const auto &grain:medium->model().grains())
+        areaRate+=grain.density*pi*grain.determinant*(grain.inverse*V::UnitZ()).norm();
+    close(medium->extinction(Vec3d(0.0),Vec3d(0.0,0.0,1.0)),areaRate,1e-12,"Gaussian density means peak density");
+    rapidjson::Document document;
+    auto encoded=medium->toJson(document.GetAllocator());
+    require(!encoded.HasMember("decay_length") && encoded.HasMember("density_profile"),"Gaussian JSON writes only its profile");
+    close(encoded["density_profile"]["stddev"].GetDouble(),0.15,0,"Gaussian JSON width");
+    close(encoded["density_profile"]["center_height"].GetDouble(),0.12,0,"Gaussian JSON center");
+    rapidjson::StringBuffer buffer; rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    encoded.Accept(writer);
+    const auto copy=parse(buffer.GetString());
+    close(copy->extinction(Vec3d(0.0),Vec3d(0.0,0.0,1.0)),areaRate,1e-12,"Gaussian JSON round trip");
+    const std::string step=R"("tracking_step":0.12,)";
+    auto defaults=config; defaults.erase(defaults.find(step),step.size());
+    const std::string center=R"(,"center_height":0.12)";
+    defaults.erase(defaults.find(center),center.size());
+    auto defaultMedium=parse(defaults);
+    auto defaultJson=defaultMedium->toJson(document.GetAllocator());
+    close(defaultJson["tracking_step"].GetDouble(),0.15,0,"Gaussian default tracking step is stddev");
+    close(defaultJson["density_profile"]["center_height"].GetDouble(),0,0,"Gaussian default center is zero");
+    for (const std::string &replacement:{std::string(R"("stddev":0)"),std::string(R"("stddev":-0.1)"),
+                                         std::string(R"("width":0.1)")}) {
+        auto bad=config;
+        const std::string width=R"("stddev":0.15)";
+        bad.replace(bad.find(width),width.size(),replacement);
+        bool rejected=false;
+        try { parse(bad); } catch (const std::exception &) { rejected=true; }
+        require(rejected,"Gaussian invalid or missing stddev rejected");
+    }
+    auto ambiguous=config; ambiguous.insert(ambiguous.find(R"("density_profile")"),R"("decay_length":0.5,)");
+    bool rejected=false;
+    try { parse(ambiguous); } catch (const std::exception &) { rejected=true; }
+    require(rejected,"Gaussian does not silently ignore exponential decay_length");
+    for (double invalid:{0.0,-1.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+        rejected=false;
+        try { le::DensityProfile::gaussian(invalid); } catch (const std::exception &) { rejected=true; }
+        require(rejected,"Gaussian scale must be positive and finite");
+    }
+    std::cout<<"Gaussian JSON: peak density, defaults, round trip and invalid parameters passed\n";
 }
 
 void gammaFlights() {
@@ -643,6 +852,33 @@ void rendererAndGrid(const std::filesystem::path &output) {
                  <<", shadow="<<transmission/flights<<", reference="<<expected
                  <<", coarse intervals="<<stats.coarseIntervals<<"\n";
     }
+    // Gaussian density needs the UPPER SDF bound as well as the lower one,
+    // including when a coarse sparse block straddles the density peak.
+    const auto gaussian=parse(gaussianConfig(sdf));
+    double gaussianOptical=0;
+    for (int i=0;i<intervals;++i)
+        gaussianOptical+=gaussian->model().extinction(trilinear(origin+distance*(i+0.5)/intervals*direction),
+                                                     direction,24)*distance/intervals;
+    const double gaussianExpected=std::exp(-gaussianOptical);
+    for (int blockSize:{0,8}) {
+        field.buildMacrocells(blockSize);
+        cg::Random random(48763+blockSize);
+        le::TrackingStatistics stats;
+        constexpr int flights=7000;
+        int escapes=0; double transmission=0;
+        for (int i=0;i<flights;++i) {
+            le::Collision hit;
+            gaussian->model().track(field,origin,direction,0,distance,0.3,random,true,hit,&stats);
+            escapes+=!hit.hit;
+            transmission+=gaussian->model().track(field,origin,direction,0,distance,0.3,random,false,hit);
+        }
+        const double tolerance=6*std::sqrt(gaussianExpected*(1-gaussianExpected)/flights)+0.001;
+        close(double(escapes)/flights,gaussianExpected,tolerance,"Gaussian sparse-block survival vs analytic trilinear field");
+        close(transmission/flights,gaussianExpected,tolerance,"Gaussian sparse-block transmittance");
+        if (blockSize) require(stats.coarseIntervals>0 && stats.collisions>0,"Gaussian sparse blocks sample nonzero density");
+        std::cout<<"Gaussian blocks="<<blockSize<<": survival="<<double(escapes)/flights
+                 <<", shadow="<<transmission/flights<<", reference="<<gaussianExpected<<"\n";
+    }
     IndependentPathSampler rng(19471,false);
     constexpr int count=14000;
     int exits=0,hits=0; double shadows=0;
@@ -747,6 +983,7 @@ int main(int argc,char **argv) {
         const auto output=std::filesystem::absolute(argv[1]); std::filesystem::create_directories(output);
         geometryAndNormals(); angularScattering(); planeFlights(); candidateLighting();
         thinLayerFlights(); curvedFlights(); validation(); gammaFlights(); gammaStateAndJson(); gammaCandidateLighting();
+        gaussianNormals(); gaussianFlights(); gaussianCurvedFlights(); gaussianJson();
         rendererAndGrid(output);
         std::cout<<"local ellipsoid checks passed\n"; return 0;
     } catch (const std::exception &error) { std::cerr<<error.what()<<"\n"; return 1; }
