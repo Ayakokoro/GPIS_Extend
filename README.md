@@ -54,6 +54,17 @@ to build only the other medium implementations.
 
 # Scene Files
 
+## Empty-origin first-hit GPIS experiment
+
+`first_hit_gpis` samples a first intersection conditioned on a positive initial
+field value, then reuses the unchanged `classic_global` phase for direct-light
+shading. It stops continuation after that hit; light connections retain geometry
+shadows with unit GP transmittance. This is a first-hit preview, with numerical
+probability tolerances, rather than full GP path transport.
+
+See the [implementation and configuration notes](docs/first-hit-gpis.md) and
+[self-contained sphere scene](data/example-scenes/first-hit-gpis/scene.json).
+
 ## Pointwise local Poisson ellipsoids
 
 The independent `poisson_ellipsoid_local` medium evaluates the SDF value **and

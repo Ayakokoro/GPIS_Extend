@@ -307,6 +307,20 @@ if (TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalRenderSmoke.cmake")
 endif()
 
+option(TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS "Build experimental empty-origin GP first-hit tests" OFF)
+if (TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS)
+    enable_testing()
+    add_executable(first_hit_gpis_test tests/FirstHitGpisTest.cpp)
+    target_link_libraries(first_hit_gpis_test PRIVATE ${core_libs})
+    add_test(NAME first_hit_gpis COMMAND first_hit_gpis_test)
+    add_test(NAME first_hit_gpis_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:first_hit_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/first-hit-gpis/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/first-hit-gpis-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/FirstHitGpisRenderSmoke.cmake")
+endif()
+
 if (TUNGSTEN_ENABLE_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
