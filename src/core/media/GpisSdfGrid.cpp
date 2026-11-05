@@ -362,7 +362,10 @@ public:
         result.minimumDerivative=rb::down(derivativeMin-slopeError);
         result.maximumDerivative=rb::up(derivativeMax+slopeError);
         const Eigen::Vector3d point=_origin+middle*_direction;
-        result.midpointValue=_grid.evaluate(Vec3d(point.x(),point.y(),point.z()),nullptr);
+        {
+            cg::Profile::Scope detail(cg::Profile::Stage::BoundSdfPoint);
+            result.midpointValue=_grid.evaluate(Vec3d(point.x(),point.y(),point.z()),nullptr);
+        }
         // The midpoint is evaluated through the world transform. Its rounded
         // index coordinates can differ from the exact ray even inside the halo.
         const auto gradientMagnitude=block.minimumGradient.cwiseAbs().cwiseMax(block.maximumGradient.cwiseAbs());

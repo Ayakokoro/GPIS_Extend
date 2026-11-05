@@ -127,6 +127,21 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
             "rejected coarse window descends and is not retried per fine cell");
     }
 
+    // A resumed segment starts at birth age 0.4, not age zero. With ell=0.5
+    // along z, the same real grid must switch routing at the scaled birth age.
+    M precision=M::Identity();precision(2,2)=4;
+    f.kernel=cg::CovarianceKernel(1,precision);
+    for(bool collision:{false,true}) {
+        auto relaxed=settings;relaxed.macrocellFarMaxExpectedEvents=64;
+        relaxed.macrocellFarStartScale=1.3; // 0.65 > entire [0.4,0.6] segment
+        const auto near=trace(relaxed,collision);
+        check(near.fine>=4,"far relaxation preserves near-field fine traversal");
+        relaxed.macrocellFarStartScale=0.5; // 0.25 < resumed birth age
+        const auto far=trace(relaxed,collision);
+        check(far.coarse==1 && far.fine==0 && far.boundaries==0,
+            "far relaxation uses directional ell and retained conditioning age");
+    }
+
     // Independent uncached-hazard integration checks both tracking estimators.
     auto referenceField=f;referenceField.mean=std::make_shared<UncachedGridMean>(source);
     referenceField.kernel=cg::CovarianceKernel(0.4,M::Identity());
@@ -137,10 +152,10 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
     double optical=0;
     for(int i=0;i<10000;++i) optical+=reference.evaluate(0.4+1.6*(i+0.5)/10000).hazard.value*1.6/10000;
     const double expected=std::exp(-optical);
-    for(int width:{2,4}) for(double threshold:{0.1,8.0}) {
+    for(bool normalizedOnly:{false,true}) for(int width:{2,4}) for(double threshold:{0.1,8.0}) for(bool relax:{false,true}) {
         auto grid=std::make_shared<GpisSdfGrid>(*source);grid->buildMacrocells(width);
         auto field=referenceField;field.mean=grid;
-        const cg::ConditionalFlightKernel kernel(field,birth);
+        const cg::ConditionalFlightKernel kernel(field,birth,normalizedOnly);
         for(double lo=0.4;lo<2;) {
             double hi=2,maximum;
             check(kernel.coarseMajorant(lo,hi,maximum),"conditional coarse majorant is available");
@@ -151,7 +166,22 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
             }
             lo=hi;
         }
+        if(normalizedOnly) {
+            auto tailField=field;tailField.kernel=cg::CovarianceKernel(0.4,16*M::Identity());
+            const cg::ConditionalFlightKernel tail(tailField,birth,true,2),exact(tailField,birth);
+            for(double lo=0.51;lo<2;) {
+                double hi=2,maximum;
+                check(tail.coarseMajorant(lo,hi,maximum),"far tail uses a macrocell certificate");
+                for(int j=0;j<=32;++j)
+                    check(exact.evaluate(lo+(hi-lo)*j/32).hazard.value<=maximum*(1+1e-10),
+                        "far macrocell covers exact conditional hazard across fine cells");
+                lo=hi;
+            }
+        }
         settings.macrocellSize=width;settings.macrocellMaxExpectedEvents=threshold;
+        settings.normalizedBoundOnly=normalizedOnly;
+        settings.macrocellFarStartScale=0.8; // crosses the gate within this flight
+        settings.macrocellFarMaxExpectedEvents=relax ? 16 : 0;
         const cg::ConditionalSegment flight(field,birth,birth.birthPosition+0.4*birth.direction,
             birth.direction,1.6,settings);
         cg::Random rng(2026+width);
@@ -166,6 +196,8 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
         const double variance=std::max(0.0,(sum2-sum*sum/n)/(n-1));
         close(sum/n,expected,6*std::sqrt(variance/n)+1e-4,
             "macrocell ratio tracking preserves integrated-hazard survival");
+        if(relax) std::cout<<"far macrocell survival: width="<<width<<" near="<<threshold
+            <<" delta="<<double(escaped)/n<<" ratio="<<sum/n<<" expected="<<expected<<"\n";
     }
     std::cout<<"macrocells: "<<intervals<<" intervals / "<<points
         <<" reference points, coarse/fine routing, rejection reuse and survival laws passed\n";

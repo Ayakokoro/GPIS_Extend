@@ -126,9 +126,9 @@ inline void sdfChecks()
     cg::FlightState birth;birth.birthPosition=x;birth.birthGradient=V(0.2,0.1,1.0);birth.direction=V(0,0,1);
     // Include multi-cell and clamped intervals as well as individual cells:
     // both screening paths must cover the actual trilinear conditional hazard.
-    for(const V &w:std::array<V,3>{{V(0,0,1),V(0.4,-0.3,0.8).normalized(),V(-1,0,0)}}) {
+    for(int boundMode:{0,1,2}) for(const V &w:std::array<V,3>{{V(0,0,1),V(0.4,-0.3,0.8).normalized(),V(-1,0,0)}}) {
         auto observation=birth;observation.direction=w;observation.birthValue=0.1;
-        const cg::ConditionalFlightKernel kernel(f,observation);
+        const cg::ConditionalFlightKernel kernel(f,observation,boundMode!=0,boundMode==2 ? 2.0 : 0.0);
         const auto constantBirth=kernel.birthMajorant(3);
         const double constantTail=kernel.constantTailMajorant(constantBirth.split);
         for(int j=0;j<=200;++j) {
@@ -150,7 +150,7 @@ inline void sdfChecks()
                     "extended prefix crosses nonlinear grid cells and clamps conservatively");
             }
         }
-        for(const auto &span:std::array<std::pair<double,double>,3>{{{0.1,0.2},{0.2,1.5},{1.5,3.0}}}) {
+        for(const auto &span:std::array<std::pair<double,double>,5>{{{0.1,0.2},{0.2,1.5},{1.5,3.0},{2.01,3.0},{4.1,6.1}}}) {
             const double cheap=kernel.cheapIntervalMajorant(span.first,span.second);
             const double fine=kernel.intervalMajorant(span.first,span.second);
             const double adaptive=kernel.intervalMajorant(span.first,span.second,4);

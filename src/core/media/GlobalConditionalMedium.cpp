@@ -139,6 +139,10 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     if(majorantMode=="two_constants") _tracking.majorantMode=cg::ConditionalMajorantMode::TwoConstants;
     else if(majorantMode!="adaptive") value.parseError("tracking_majorant must be adaptive or two_constants");
     value.getField("tracking_constant_birth_length",_tracking.constantBirthLength);
+    value.getField("tracking_fixed_step_limit",_tracking.fixedStepLimit);
+    value.getField("tracking_normalized_bound_only",_tracking.normalizedBoundOnly);
+    value.getField("tracking_far_bound_start_scale",_tracking.farBoundStartScale);
+    value.getField("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold);
     _tracking.step=_trackingStep;
     value.getField("tracking_step_scale",_tracking.stepScale);
     value.getField("tracking_age_scale",_tracking.ageScale);
@@ -146,6 +150,8 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_tighten_expected_events",_tracking.tightenExpectedEvents);
     value.getField("tracking_macrocell_size",_tracking.macrocellSize);
     value.getField("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents);
+    value.getField("tracking_macrocell_far_start_scale",_tracking.macrocellFarStartScale);
+    value.getField("tracking_macrocell_far_max_expected_events",_tracking.macrocellFarMaxExpectedEvents);
     try { _tracking.validate(); }
     catch(const cg::NumericError &error) { value.parseError(error.what()); }
 }
@@ -155,12 +161,18 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_majorant",rapidjson::Value(
         _tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants ? "two_constants" : "adaptive",allocator),allocator);
     value.AddMember("tracking_constant_birth_length",_tracking.constantBirthLength,allocator);
+    value.AddMember("tracking_fixed_step_limit",_tracking.fixedStepLimit,allocator);
+    value.AddMember("tracking_normalized_bound_only",_tracking.normalizedBoundOnly,allocator);
+    value.AddMember("tracking_far_bound_start_scale",_tracking.farBoundStartScale,allocator);
+    value.AddMember("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold,allocator);
     value.AddMember("tracking_step_scale",_tracking.stepScale,allocator);
     value.AddMember("tracking_age_scale",_tracking.ageScale,allocator);
     value.AddMember("tracking_max_expected_events",_tracking.maxExpectedEvents,allocator);
     value.AddMember("tracking_tighten_expected_events",_tracking.tightenExpectedEvents,allocator);
     value.AddMember("tracking_macrocell_size",_tracking.macrocellSize,allocator);
     value.AddMember("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents,allocator);
+    value.AddMember("tracking_macrocell_far_start_scale",_tracking.macrocellFarStartScale,allocator);
+    value.AddMember("tracking_macrocell_far_max_expected_events",_tracking.macrocellFarMaxExpectedEvents,allocator);
     return value;
 }
 void GlobalConditionalMedium::prepareForRender() {

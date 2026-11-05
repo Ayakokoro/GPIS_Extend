@@ -3,6 +3,7 @@
 #include <rapidjson/writer.h>
 #include "ConditionalOpticalDepthChecks.hpp"
 #include "ConditionalRayConstantChecks.hpp"
+#include "ConditionalRouletteChecks.hpp"
 
 inline void trackingChecks()
 {
@@ -10,19 +11,24 @@ inline void trackingChecks()
     using Settings = cg::ConditionalTrackingSettings;
     opticalDepthChecks();
     rayConstantChecks();
+    shadowRouletteChecks();
     const auto defaults=makeMedium()->trackingSettings();
-    check(defaults.step==0 && defaults.stepScale==0.5 && defaults.ageScale==0.25 &&
+    check(defaults.shadowRouletteThreshold==0.1 && defaults.farBoundStartScale==0 && !defaults.normalizedBoundOnly && defaults.fixedStepLimit && defaults.step==0 && defaults.stepScale==0.5 && defaults.ageScale==0.25 &&
         defaults.maxExpectedEvents==64 && defaults.tightenExpectedEvents==4 &&
         defaults.macrocellSize==0 && defaults.macrocellMaxExpectedEvents==1 &&
+        defaults.macrocellFarStartScale==4 && defaults.macrocellFarMaxExpectedEvents==0 &&
         defaults.majorantMode==cg::ConditionalMajorantMode::Adaptive && defaults.constantBirthLength==0,
         "omitted tracking options preserve defaults");
-    auto medium=makeMedium(R"("tracking_step":0.2,"tracking_step_scale":2,
+    auto medium=makeMedium(R"("tracking_shadow_roulette_threshold":0.2,"tracking_far_bound_start_scale":4,"tracking_normalized_bound_only":true,"tracking_fixed_step_limit":false,"tracking_step":0.2,"tracking_step_scale":2,
         "tracking_age_scale":0.6,"tracking_max_expected_events":0.5,"tracking_tighten_expected_events":0.1,
-        "tracking_macrocell_size":4,"tracking_macrocell_max_expected_events":0.25)");
+        "tracking_macrocell_size":4,"tracking_macrocell_max_expected_events":0.25,
+        "tracking_macrocell_far_start_scale":3,"tracking_macrocell_far_max_expected_events":16)");
     const auto settings=medium->trackingSettings();
-    check(settings.step==0.2 && settings.stepScale==2 && settings.ageScale==0.6 &&
+    check(settings.shadowRouletteThreshold==0.2 && settings.farBoundStartScale==4 && settings.normalizedBoundOnly && !settings.fixedStepLimit && settings.step==0.2 && settings.stepScale==2 && settings.ageScale==0.6 &&
         settings.maxExpectedEvents==0.5 && settings.tightenExpectedEvents==0.1 &&
-        settings.macrocellSize==4 && settings.macrocellMaxExpectedEvents==0.25,"scene tracking options are loaded");
+        settings.macrocellSize==4 && settings.macrocellMaxExpectedEvents==0.25 &&
+        settings.macrocellFarStartScale==3 && settings.macrocellFarMaxExpectedEvents==16,
+        "scene tracking options are loaded");
     rapidjson::Document serialized;
     auto json=medium->toJson(serialized.GetAllocator());
     rapidjson::StringBuffer buffer;
@@ -32,11 +38,14 @@ inline void trackingChecks()
     Scene scene;
     const auto copy=std::dynamic_pointer_cast<GlobalConditionalMedium>(scene.fetchMedium(document));
     const auto restored=copy->trackingSettings();
-    check(restored.step==settings.step && restored.stepScale==settings.stepScale &&
+    check(restored.shadowRouletteThreshold==settings.shadowRouletteThreshold && restored.farBoundStartScale==settings.farBoundStartScale && restored.normalizedBoundOnly==settings.normalizedBoundOnly && restored.fixedStepLimit==settings.fixedStepLimit &&
+        restored.step==settings.step && restored.stepScale==settings.stepScale &&
         restored.ageScale==settings.ageScale && restored.maxExpectedEvents==settings.maxExpectedEvents &&
         restored.tightenExpectedEvents==settings.tightenExpectedEvents &&
         restored.macrocellSize==settings.macrocellSize &&
-        restored.macrocellMaxExpectedEvents==settings.macrocellMaxExpectedEvents,
+        restored.macrocellMaxExpectedEvents==settings.macrocellMaxExpectedEvents &&
+        restored.macrocellFarStartScale==settings.macrocellFarStartScale &&
+        restored.macrocellFarMaxExpectedEvents==settings.macrocellFarMaxExpectedEvents,
         "tracking settings survive scene serialization");
     // A bounded mean supports the opt-in mode; an unbounded plane must fail
     // explicitly at scene preparation instead of failing on its first ray.
@@ -79,18 +88,24 @@ inline void trackingChecks()
     check(unsupported,"unbounded mean rejects the global-bound mode before rendering");
     check(makeMedium(R"("tracking_tighten_expected_events":0)")->trackingSettings().tightenExpectedEvents==0,
         "zero tightening threshold is a supported fine-bound reference mode");
-    for(const char *invalid : {R"("tracking_constant_birth_length":-1)",R"("tracking_step":-1)",R"("tracking_step_scale":0)",
+    check(makeMedium(R"("tracking_shadow_roulette_threshold":0)")->trackingSettings().shadowRouletteThreshold==0,
+        "zero threshold disables shadow roulette");
+    for(const char *invalid : {R"("tracking_shadow_roulette_threshold":-0.1)",R"("tracking_shadow_roulette_threshold":1.1)",
+            R"("tracking_constant_birth_length":-1)",R"("tracking_step":-1)",R"("tracking_step_scale":0)",
             R"("tracking_age_scale":-1)",R"("tracking_max_expected_events":0)",
             R"("tracking_tighten_expected_events":-1)",R"("tracking_macrocell_size":3)",
             R"("tracking_macrocell_size":1)",R"("tracking_macrocell_size":128)",
             R"("tracking_macrocell_size":-8)",R"("tracking_macrocell_max_expected_events":0)",
+            R"("tracking_macrocell_far_start_scale":-1)",R"("tracking_macrocell_far_max_expected_events":-1)",
+            R"("tracking_macrocell_max_expected_events":4,"tracking_macrocell_far_max_expected_events":2)",
             R"("tracking_majorant":"invalid")"}) {
         bool rejected=false;
         try { makeMedium(invalid); } catch(const std::exception &) { rejected=true; }
         check(rejected,"invalid tracking configuration must fail during loading");
     }
-    for(auto member : {&Settings::constantBirthLength,&Settings::step,&Settings::stepScale,&Settings::ageScale,
-            &Settings::maxExpectedEvents,&Settings::tightenExpectedEvents,&Settings::macrocellMaxExpectedEvents})
+    for(auto member : {&Settings::shadowRouletteThreshold,&Settings::farBoundStartScale,&Settings::constantBirthLength,&Settings::step,&Settings::stepScale,&Settings::ageScale,
+            &Settings::maxExpectedEvents,&Settings::tightenExpectedEvents,&Settings::macrocellMaxExpectedEvents,
+            &Settings::macrocellFarStartScale,&Settings::macrocellFarMaxExpectedEvents})
         for(double invalid : {-1.0,std::numeric_limits<double>::infinity(),
                 std::numeric_limits<double>::quiet_NaN()}) {
             auto bad=defaults; bad.*member=invalid;
@@ -116,8 +131,8 @@ inline void trackingChecks()
     cg::GPSSField empty{mean,cg::CovarianceKernel(1,M::Identity()/(0.02*0.02)),
         {V::Constant(-10),V::Constant(10)}};
     cg::FlightState birth;birth.birthValue=10;
-    const auto partitions=[&](Settings options) {
-        cg::ConditionalSegment flight(empty,birth,V(0,0,0.2),V::UnitZ(),0.117,options);
+    const auto partitions=[&](Settings options,double age=0.2,double length=0.117) {
+        cg::ConditionalSegment flight(empty,birth,V(0,0,age),V::UnitZ(),length,options);
         mean->lengths.clear(); // Exclude the birth certificate's queries.
         cg::Random rng(773);double hit;
         close(flight.track(rng,false,hit),1,1e-12,"empty flight transmittance");
@@ -132,6 +147,20 @@ inline void trackingChecks()
     check(partitions(wider).size()==4,"absolute step overrides the kernel-scale setting");
     wider.ageScale=0.025;
     close(partitions(wider).front(),0.005,1e-14,"age growth still limits the ordinary step");
+
+    auto uncapped=defaults;uncapped.fixedStepLimit=false;
+    const auto ageLimited=partitions(uncapped);
+    check(ageLimited.size()==3,"uncapped mode ignores the implicit kernel-scale cap");
+    close(ageLimited[0],0.05,1e-14,"uncapped mode retains distance from the original birth");
+    close(ageLimited[1],0.0625,1e-14,"uncapped intervals grow with distance from birth");
+    uncapped.step=0.08;
+    const auto farIntervals=partitions(uncapped,1,0.6);
+    check(farIntervals.size()==3,"far uncapped flight uses age-grown intervals");
+    close(farIntervals[0],0.25,1e-14,"uncapped mode ignores the explicit 0.08 cap");
+    close(farIntervals[1],0.3125,1e-14,"far intervals keep growing after continuation");
+    close(farIntervals[2],0.0375,1e-14,"segment endpoint still clips uncapped intervals");
+    uncapped.ageScale=0.025;
+    close(partitions(uncapped).front(),0.005,1e-14,"uncapped mode still honors a small age scale");
 
     // Force refinement on a constant far-from-birth field and observe actual
     // bound queries. A collision must not evaluate deferred right siblings;
@@ -233,12 +262,14 @@ inline void trackingChecks()
     double integral=0;
     for(int i=0;i<10000;++i) integral+=referenceFlight.hazard(2*(i+0.5)/10000)*2/10000;
     const double survival=std::exp(-integral);
-    for(bool absolute : {false,true}) for(double threshold : {0.0,4.0,1e6}) {
+    for(bool normalizedOnly:{false,true}) for(int mode : {0,1,2}) for(double threshold : {0.0,4.0,1e6}) {
         auto options=defaults;options.stepScale=2;options.ageScale=0.5;
+        options.normalizedBoundOnly=normalizedOnly;
         options.tightenExpectedEvents=threshold;
-        if(absolute) { options.step=0.2;options.maxExpectedEvents=0.25; }
+        if(mode!=0) { options.step=0.2;options.maxExpectedEvents=0.25; }
+        if(mode==2) options.fixedStepLimit=false;
         const cg::ConditionalSegment flight(f,birth,origin,direction,2,options);
-        cg::Random rng(absolute?818:732);
+        cg::Random rng(732+86*mode);
         int escaped=0;double sum=0,sum2=0;
         constexpr int count=6000;
         for(int i=0;i<count;++i) {
@@ -250,6 +281,29 @@ inline void trackingChecks()
         const double variance=std::max(0.0,(sum2-sum*sum/count)/(count-1));
         close(sum/count,survival,6*std::sqrt(variance/count)+1e-4,
             "configured ratio tracking matches integrated hazard");
+    }
+    // Independently integrate the unchanged hazard across and after each
+    // far cutoff, including zero and positive birth observations.
+    f.kernel=cg::CovarianceKernel(1,M::Identity());
+    for(double f0:{0.0,0.3}) for(double age:{3.5,5.5}) for(double cutoff:{4.0,5.0}) {
+        cg::FlightState observation;observation.birthValue=f0;observation.birthGradient=V::UnitZ();
+        const cg::ConditionalFlightKernel exact(f,observation);
+        double optical=0;
+        for(int i=0;i<10000;++i) optical+=exact.evaluate(age+3*(i+0.5)/10000).hazard.value*3/10000;
+        const double expected=std::exp(-optical);
+        auto options=defaults;options.farBoundStartScale=cutoff;options.fixedStepLimit=false;
+        const cg::ConditionalSegment tail(f,observation,age*V::UnitZ(),V::UnitZ(),3,options);
+        cg::Random rng(853);int escaped=0;double sum=0,sum2=0;
+        constexpr int n=6000;
+        for(int i=0;i<n;++i) {
+            double hit;escaped+=tail.track(rng,true,hit)!=0;
+            const double tr=tail.track(rng,false,hit);sum+=tr;sum2+=tr*tr;
+        }
+        close(double(escaped)/n,expected,6*std::sqrt(expected*(1-expected)/n),
+            "far-tail delta tracking matches independently integrated survival");
+        const double variance=std::max(0.0,(sum2-sum*sum/n)/(n-1));
+        close(sum/n,expected,6*std::sqrt(variance/n)+1e-4,
+            "far-tail shadow ratio tracking matches independently integrated survival");
     }
     std::cout<<"tracking: carried optical depth, boundary events, draw reuse, JSON round trip, validation, "
         "actual interval sizes, deferred refinement, medium/shadow routing "

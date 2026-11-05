@@ -22,23 +22,34 @@ def main():
     parser.add_argument("--profile-executable", type=Path,
                         help="Separate instrumented build; plain timings use --executable")
     parser.add_argument("--baseline-executable", type=Path)
+    parser.add_argument("--reference-report", type=Path,
+                        help="Reuse one completed plain render per case from a matching report; only profiles are rerun")
     parser.add_argument("--output", type=Path, default=Path("build/conditional-profile"))
     parser.add_argument("--size", type=int, default=32)
     parser.add_argument("--spp", type=int, default=4)
     parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--affinity-mask", type=lambda value: int(value, 0),
+                        help="Windows process CPU affinity, e.g. 0x5555 for one thread per selected core")
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--profile-repeats", type=int, default=1)
     parser.add_argument("--steps", default="default,0.02,0.04")
     parser.add_argument("--age-scale", type=float)
     parser.add_argument("--max-expected-events", type=float)
     parser.add_argument("--tighten-expected-events", type=float)
     parser.add_argument("--macrocell-size", type=int)
     parser.add_argument("--macrocell-max-expected-events", type=float)
+    parser.add_argument("--cases-json", type=Path,
+                        help="JSON mapping case names to tracking_* medium overrides; replaces --steps cases")
     parser.add_argument("--no-profiles", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
-    if min(args.size, args.spp, args.threads, args.repeats) <= 0:
-        parser.error("size, spp, threads and repeats must be positive")
+    if min(args.size, args.spp, args.threads, args.repeats, args.profile_repeats) <= 0:
+        parser.error("size, spp, threads and repeat counts must be positive")
+    if args.affinity_mask is not None and (os.name != "nt" or args.affinity_mask <= 0):
+        parser.error("affinity-mask requires Windows and a positive processor mask")
+    if args.reference_report and (args.repeats != 1 or args.baseline_executable or args.no_profiles):
+        parser.error("reference-report requires repeats=1, profiles enabled, and no baseline-executable")
     source = args.scene.resolve()
     original = json.loads(source.read_text(encoding="utf-8"))
     indices = [i for i, medium in enumerate(original["media"])
@@ -61,6 +72,8 @@ def main():
                      ("size", "spp", "threads", "seed", "steps", "age_scale",
                       "max_expected_events", "tighten_expected_events", "macrocell_size",
                       "macrocell_max_expected_events", "no_profiles")}
+    if args.affinity_mask is not None:
+        configuration["affinity_mask"] = args.affinity_mask
     report = {"source": str(source), "scene_snapshot": original,
               "executable": str(executable), "configuration": configuration,
               "profile_executable": str(profile_executable),
@@ -101,6 +114,52 @@ def main():
             settings["tracking_macrocell_max_expected_events"] = args.macrocell_max_expected_events
         cases["step_" + step.replace(".", "_")] = settings
 
+    if args.cases_json:
+        cases = json.loads(args.cases_json.read_text(encoding="utf-8-sig"))
+        if not isinstance(cases, dict) or not cases or any(
+                not re.fullmatch(r"[A-Za-z0-9_]+", name) or not isinstance(settings, dict)
+                or any(not key.startswith("tracking_") for key in settings)
+                for name, settings in cases.items()):
+            parser.error("cases must map safe names to dictionaries of tracking_* overrides")
+        if args.resume:
+            if report.get("cases") != cases:
+                parser.error("saved benchmark cases differ")
+        else:
+            report["cases"] = cases
+    elif args.resume and "cases" in report:
+        parser.error("saved custom cases require --cases-json when resuming")
+
+    if args.reference_report:
+        reference_file = args.reference_report.resolve()
+        reference = json.loads(reference_file.read_text(encoding="utf-8"))
+        if reference["scene_snapshot"] != original:
+            parser.error("reference scene differs")
+        for key in ("size", "spp", "threads", "seed", "affinity_mask"):
+            if reference["configuration"].get(key) != configuration.get(key):
+                parser.error(f"reference configuration differs: {key}")
+        if reference["binary_sha256"].get(str(executable)) != binary_hashes[str(executable)]:
+            parser.error("plain executable differs from reference")
+        provenance = {"path": str(reference_file),
+                      "sha256": hashlib.sha256(reference_file.read_bytes()).hexdigest()}
+        if args.resume and report.get("reference_report") != provenance:
+            parser.error("saved reference report differs")
+        report["reference_report"] = provenance
+        for case, settings in cases.items():
+            label = case + "_plain_1"
+            candidates = [r for r in reference["runs"] if r["label"] == label
+                          and r["case"] == case and not r["profile_enabled"]]
+            if len(candidates) != 1:
+                parser.error(f"missing unique plain reference for {case}")
+            item = candidates[0]
+            if (item["settings"] != settings or item["executable"] != str(executable)
+                    or item["resolution"] != [args.size, args.size] or item["spp"] != args.spp
+                    or item["threads"] != args.threads or not Path(item["pfm"]).is_file()):
+                parser.error(f"reference run differs or image missing: {case}")
+            if not any(r["label"] == label for r in report["runs"]):
+                reused = copy.deepcopy(item)
+                reused["reused_from_report"] = str(reference_file)
+                report["runs"].append(reused)
+
     def run(label, case, settings, profile=False, binary=executable, warmup=False):
         existing = next((item for item in report["runs"] if item["label"] == label), None)
         if existing:
@@ -127,10 +186,60 @@ def main():
         log_file = output / (label + ".log")
         print("Rendering", label, flush=True)
         start = time.perf_counter()
+        affinity_resets = 0
+        affinity_reset_seconds = []
+        affinity_observations = {}
         with log_file.open("wb") as stream:
             process = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT,
                                        env=environment)
-            code = process.wait()
+            if args.affinity_mask is not None:
+                import ctypes
+                from ctypes import wintypes
+                set_affinity = ctypes.windll.kernel32.SetProcessAffinityMask
+                set_affinity.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+                set_affinity.restype = wintypes.BOOL
+                get_affinity = ctypes.windll.kernel32.GetProcessAffinityMask
+                get_affinity.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t),
+                                        ctypes.POINTER(ctypes.c_size_t)]
+                get_affinity.restype = wintypes.BOOL
+                if not set_affinity(int(process._handle), args.affinity_mask):
+                    error = ctypes.WinError()
+                    process.terminate()
+                    process.wait()
+                    raise error
+                # Runtime libraries can restore process affinity during scene
+                # initialization. Observe and enforce the requested benchmark
+                # placement instead of merely recording the launch-time mask.
+                while True:
+                    try:
+                        code = process.wait(timeout=0.25)
+                        break
+                    except subprocess.TimeoutExpired:
+                        current, system = ctypes.c_size_t(), ctypes.c_size_t()
+                        if not get_affinity(int(process._handle), ctypes.byref(current), ctypes.byref(system)):
+                            if process.poll() is not None:
+                                code = process.returncode
+                                break
+                            error = ctypes.WinError()
+                            process.terminate()
+                            process.wait()
+                            raise error
+                        key = hex(current.value)
+                        affinity_observations[key] = affinity_observations.get(key, 0) + 1
+                        if current.value != args.affinity_mask:
+                            if not set_affinity(int(process._handle), args.affinity_mask):
+                                error = ctypes.WinError()
+                                # A short warmup may exit after GetProcessAffinityMask.
+                                if process.poll() is not None:
+                                    code = process.returncode
+                                    break
+                                process.terminate()
+                                process.wait()
+                                raise error
+                            affinity_resets += 1
+                            affinity_reset_seconds.append(time.perf_counter() - start)
+            else:
+                code = process.wait()
             cpu = process_cpu_seconds(process)
         wall = time.perf_counter() - start
         log = log_file.read_text(encoding="utf-8", errors="replace")
@@ -146,6 +255,10 @@ def main():
                   "threads": args.threads, "wall_seconds": wall, "process_cpu_seconds": cpu,
                   "render_seconds": float(re.findall(r"Completed \d+/\d+ spp, ([\d.]+)/", log)[-1]),
                   "pfm": str(run_output / "scene.pfm"), "mean_rgb": sum(pixels) / len(pixels)}
+        if args.affinity_mask is not None:
+            result["affinity"] = {"requested": hex(args.affinity_mask),
+                                  "restored_count": affinity_resets, "reset_seconds": affinity_reset_seconds,
+                                  "observed_masks": affinity_observations}
         prefix = "GPIS conditional profile: "
         lines = [line[len(prefix):] for line in log.splitlines() if line.startswith(prefix)]
         if profile:
@@ -203,9 +316,12 @@ def main():
                 if baseline and case == "step_default":
                     check_parity(baseline, result)
     if not args.no_profiles:
-        for case, settings in cases.items():
-            result = run(f"{case}_profile", case, settings, profile=True, binary=profile_executable)
-            check_parity(references[case], result)
+        for repeat in range(args.profile_repeats):
+            for case, settings in cases.items():
+                suffix = "" if repeat == 0 else f"_{repeat+1}"
+                result = run(f"{case}_profile{suffix}", case, settings,
+                             profile=True, binary=profile_executable)
+                check_parity(references[case], result)
     report["plain_summary"] = {}
     for case in cases:
         runs = [r for r in report["runs"] if r["case"] == case
