@@ -307,6 +307,31 @@ if (TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalRenderSmoke.cmake")
 endif()
 
+option(TUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS "Build fixed-history GP transport checks" OFF)
+if (TUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS)
+    enable_testing()
+    add_executable(sparse_history_gpis_test tests/SparseHistoryGpisTest.cpp)
+    target_link_libraries(sparse_history_gpis_test PRIVATE ${core_libs})
+    foreach(mode gaussian local flight gradient medium grid)
+        add_test(NAME sparse_history_gpis_${mode} COMMAND sparse_history_gpis_test ${mode})
+    endforeach()
+    add_test(NAME sparse_history_gpis_lut COMMAND sparse_history_gpis_test lut
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/gpis/bivariate-normal-cdf-v1.bin")
+    add_test(NAME sparse_history_gpis_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:sparse_history_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/sparse-history-gpis/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/sparse-history-gpis-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SparseHistoryGpisRenderSmoke.cmake")
+    add_test(NAME sparse_history_gpis_lut_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:sparse_history_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/sparse-history-gpis/scene.json"
+        "-DCDF_TABLE=${CMAKE_CURRENT_SOURCE_DIR}/data/gpis/bivariate-normal-cdf-v1.bin"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/sparse-history-gpis-lut-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SparseHistoryGpisRenderSmoke.cmake")
+endif()
+
 option(TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS "Build experimental empty-origin GP first-hit tests" OFF)
 if (TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS)
     enable_testing()

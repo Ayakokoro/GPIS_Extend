@@ -65,6 +65,130 @@ probability tolerances, rather than full GP path transport.
 See the [implementation and configuration notes](docs/first-hit-gpis.md) and
 [self-contained sphere scene](data/example-scenes/first-hit-gpis/scene.json).
 
+## Fixed-history GPIS transport
+
+`sparse_history_gpis` integrates a sparse-history crossing hazard and supports
+multiple collisions with mirror, conductor, or Lambert micro-reflection. It
+uses no learned model. Start from the
+[self-contained sphere scene](data/example-scenes/sparse-history-gpis/scene.json),
+or retain a classic scene's `gaussian_process` and `material`, change the medium
+type, and remove `tracking_step`.
+The example starts at 32 x 32 and 1 spp because this mode evaluates numerical
+Gaussian probabilities during CPU transport.
+
+```json
+"type": "sparse_history_gpis",
+"sparse_history": {
+  "points": 2,
+  "max_step_over_length": 0.25,
+  "max_mean_range_over_sigma": 0.25,
+  "optical_depth_tolerance": 0.0001,
+  "distance_tolerance": 0.00001,
+  "max_subdivisions": 4096,
+  "probability_absolute_tolerance": 1e-9,
+  "probability_relative_tolerance": 0.0002,
+  "probability_initial_samples": 256,
+  "probability_max_samples": 8192
+}
+```
+
+`points` accepts 0, 1, or 2 **internal** history signs. An exterior flight uses
+the original Gaussian process and an additional `F(origin)>0` sign; it does
+not draw a fictitious known origin value or gradient. A reflected GP flight
+conditions on `F(origin)=0` and the full, unnormalized collision gradient.
+There is no positive-origin inequality on such a surface birth. Only the
+latest collision observation is carried across bounces.
+
+Geometry candidates are independent of integration nodes. Fixed physical
+correlation-length buckets contain grid cell boundaries and all roots of the
+cell's quadratic directional derivative. A sphere adds its closest approach;
+other procedural means use declared breakpoints and fixed derivative probes
+as a candidate heuristic. Selection uses only positions strictly before the
+query. With two points, the first is `t-min(ell,t/2)` and the second is the
+lowest standardized conditional mean in a different bucket, from the recent
+pool or its older minimum. With one point, selection takes the lowest score
+from this pool and the recent point. Coincident constraints are excluded.
+
+The local hazard is `p(F=0)*E[V+ 1_history | F=0]/P(F>0,history)`.
+Numerical Gaussian probabilities and crossing moments determine both distance
+and the collision speed distribution. Speed sampling uses a flux-normal
+proposal with historical acceptance, falling back to CDF inversion after 64
+unsuccessful proposals. Given the sampled speed, transverse
+gradient components are Gaussian. Mirror/conductor NEE and continuation share
+that speed and use the matching directional PDF; Lambert branches share one
+sampled full gradient. Shadow transmittance uses the same integrated hazard.
+
+One exponential threshold is carried through straight transparent boundaries,
+together with the original flight and physical age. Geometry `nearT` never
+cuts away part of the GP flight. A direction change at an ordinary surface
+starts an exterior-positive renewal approximation; it is not a GP zero.
+Each shadow branch has a separate context. Invalid outward surface births
+are counted and absorbed; other numerical failures are reported, not misses.
+
+This CPU reference supports isotropic stationary SE covariance and analytic,
+procedural `SdfQueries`, or trilinear VDB means. It approximates continuous
+first passage using finitely many history signs. Probability and optical-depth tolerances are numerical error
+estimates, not certified bounds. Tightening quadrature does not add history
+points. Near-singular probabilities can be expensive; validate low-resolution
+renders before increasing image size or sample count. Use `path_tracer` with
+`use_cuda_gpis: false` and `wavefront_gpis: false`;
+state-free distance PDFs for bidirectional transport are unsupported.
+The sign count is bounded, while the geometry cache retained for backwards
+queries grows with traversed cells. Probabilities too small to represent cause
+an explicit numerical failure instead of silently treating the flight as empty.
+
+```powershell
+cmake -S . -B build -DTUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS=ON
+cmake --build build --config Release --target tungsten sparse_history_gpis_test --parallel 4
+ctest --test-dir build -C Release -R "^sparse_history_gpis" --output-on-failure
+.\build\Release\tungsten.exe -t 4 -s 41 -d outputs/sparse-history-gpis data/example-scenes/sparse-history-gpis/scene.json
+```
+
+The optional CDF table backend replaces eligible bivariate probability
+integrals with cubic interpolation. Enable it inside `sparse_history`:
+
+```json
+"probability_method": "lut",
+"cdf_table": "../../gpis/bivariate-normal-cdf-v1.bin"
+```
+
+The file path is relative to the scene. The shared table in
+`data/gpis/bivariate-normal-cdf-v1.bin` is approximately 5.1 MB; all media loading
+the same path share its immutable storage. It tabulates the scene-independent
+function `Phi_2(a,b;rho)`, with correlation parameterized by `asin(rho)`.
+Each cell carries an interpolation-error estimate. A lookup is accepted only
+when its error is at most one quarter of the configured relative probability
+budget. Tails, nearly singular correlations, and insufficiently accurate cells
+use the numerical backend. Table errors propagate into the crossing moment;
+cancellation first retries the moment with numerical CDFs, then uses numerical
+speed integration if needed. These are numerical
+error estimates, not certified interval bounds.
+
+`probability_method: "numeric"` remains the default reference. Both backends
+use the same history selection and start conditions: the exterior origin sign
+is retained unless the existing probability-budget check permits pruning it.
+The table supports both one- and two-point models, but it only replaces
+bivariate subproblems. Higher-dimensional probabilities still require numerical
+work. The [LUT example](data/example-scenes/sparse-history-gpis/scene-lut.json)
+starts with one internal point. Collision speed rejection uses the same
+history acceptance function; its inverse-CDF fallback computes its own
+integral normalization rather than reusing an interpolated crossing moment.
+
+Regenerate the table with Python, NumPy and SciPy, or compare both backends
+at each of K=1 and K=2 with the supplied benchmark:
+
+```powershell
+python tools/generate_bivariate_normal_cdf_table.py
+.\build\Release\tungsten.exe -t 4 -s 41 -d outputs/sparse-history-gpis-lut data/example-scenes/sparse-history-gpis/scene-lut.json
+python tools/compare_sparse_history_lut.py
+```
+
+The comparison writes images, render timings, lookup acceptance counts and
+same-seed image differences to `outputs/sparse-history-lut/comparison.html`
+and `comparison.json`. Compare each K with itself; changing K also changes
+the finite-history model. Render teardown reports accepted table requests
+and numerical fallbacks.
+
 ## Pointwise local Poisson ellipsoids
 
 The independent `poisson_ellipsoid_local` medium evaluates the SDF value **and

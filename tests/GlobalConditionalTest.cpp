@@ -168,6 +168,7 @@ void renewedEndpointCoordinates() {
                 "renewed near-origin endpoint supports a changed continuation direction");
         }
     }
+}
 void endpointPrecision() {
     using namespace Tungsten;
     auto m=makeMedium();

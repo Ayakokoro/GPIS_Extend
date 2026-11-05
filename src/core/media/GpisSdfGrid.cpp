@@ -268,6 +268,39 @@ public:
         prepare(begin);
         return std::min(end,_end);
     }
+    bool appendStationaryPoints(double begin,double end,std::vector<double> &points) override {
+        if(!(begin>=0 && end>=begin) || !std::isfinite(end))
+            throw std::invalid_argument("invalid grid stationary-point interval");
+        for(double lo=begin;lo<end;) {
+            prepare(lo);
+            const double hi=std::min(end,_end);
+            if(!_usable || !(hi>lo)) return false;
+            if(!_constant) {
+                const double a=3*_value[3], b=2*_value[2], c=_value[1];
+                auto append=[&](double s) {
+                    const double t=_anchor+s/_rate;
+                    if(std::isfinite(t) && t>lo && t<hi) points.push_back(t);
+                };
+                if(a==0) {
+                    if(b!=0) append(-c/b);
+                } else {
+                    // Scale before forming the discriminant. The q formula
+                    // retains the small root when the other root is large.
+                    const double scale=std::max({std::abs(a),std::abs(b),std::abs(c)});
+                    const double aa=a/scale,bb=b/scale,cc=c/scale;
+                    const double discriminant=std::fma(bb,bb,-4*aa*cc);
+                    if(discriminant>=0) {
+                        const double root=std::sqrt(discriminant);
+                        const double q=-0.5*(bb+std::copysign(root,bb));
+                        if(q==0) append(-bb/(2*aa));
+                        else { append(q/aa); append(cc/q); }
+                    }
+                }
+            }
+            lo=hi;
+        }
+        return true;
+    }
     bool coarseRayBounds(double begin,double &end,cg::MeanRayBounds &result) override {
         if(!_grid.macrocellSize || !(begin>=0 && end>begin) || !std::isfinite(end) ||
            coordinateError(end).maxCoeff()>=1e-5) return false;

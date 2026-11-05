@@ -11,6 +11,7 @@
 #include "FirstHitGpisMedium.hpp"
 #include "ClassicLocalMedium.hpp"
 #include "GlobalConditionalMedium.hpp"
+#include "SparseHistoryGpisMedium.hpp"
 #include "PoissonEllipsoidMedium.hpp"
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
 #include "NeuralRenewalMedium.hpp"
@@ -34,6 +35,7 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"first_hit_gpis", std::make_shared<FirstHitGpisMedium>},
     {"classic_local", std::make_shared<ClassicLocalMedium>},
     {"global_conditional", std::make_shared<GlobalConditionalMedium>},
+    {"sparse_history_gpis", std::make_shared<SparseHistoryGpisMedium>},
     {"poisson_ellipsoid_local", std::make_shared<PoissonEllipsoidMedium>},
     NEURAL_RENEWAL_FACTORY_ENTRY
 }))
