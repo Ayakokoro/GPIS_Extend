@@ -332,6 +332,22 @@ if (TUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SparseHistoryGpisRenderSmoke.cmake")
 endif()
 
+option(TUNGSTEN_BUILD_SINGLE_HISTORY_GPIS_TESTS "Build fixed-bin single-history GP transport checks" OFF)
+if (TUNGSTEN_BUILD_SINGLE_HISTORY_GPIS_TESTS)
+    enable_testing()
+    add_executable(single_history_gpis_test tests/SingleHistoryGpisTest.cpp)
+    target_link_libraries(single_history_gpis_test PRIVATE ${core_libs})
+    foreach(mode local selector tracking inversion regular majorant macro pruning macro_candidates medium)
+        add_test(NAME single_history_gpis_${mode} COMMAND single_history_gpis_test ${mode})
+    endforeach()
+    add_test(NAME single_history_gpis_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:single_history_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/single-history-gpis/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/single-history-gpis-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SingleHistoryGpisRenderSmoke.cmake")
+endif()
+
 option(TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS "Build experimental empty-origin GP first-hit tests" OFF)
 if (TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS)
     enable_testing()

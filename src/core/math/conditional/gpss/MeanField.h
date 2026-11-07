@@ -40,9 +40,18 @@ class MeanRayCursor {
 public:
     struct Statistics {
         std::size_t cellBuilds=0, pointFallbacks=0, boundFallbacks=0, coarseQueries=0;
+        std::size_t macroBoundaryQueries=0;
     };
     virtual ~MeanRayCursor() = default;
+    // Optional exact state copy for independent point queries from the same
+    // initialized origin. An absent implementation requests reconstruction.
+    virtual std::unique_ptr<MeanRayCursor> clone() const { return nullptr; }
     virtual double nextBoundary(double begin,double end) = 0;
+    // Optional geometric macro traversal, independent of bound certificates.
+    // Clips end to a macro face, clamp boundary, or the requested end without
+    // preparing fine cells or reading field values. Width is in grid cells;
+    // this query does not require precomputed macrocell value bounds.
+    virtual bool nextMacroBoundary(double, double &, int) { return false; }
     virtual MeanRaySample sample(double t) = 0;
     virtual MeanJet evaluate(double t) = 0;
     // Append every interior stationary position of the represented mean.

@@ -44,6 +44,49 @@ double positiveOrthant(const Eigen::VectorXd &mean,
 double standardizedMean(const ConditionalGpis::GPSSField &field,
                         const Start &start, double distance);
 
+// Per-flight origin statistics for candidate heights. Independent cursor
+// copies preserve the reference point-query rounding and near-birth algebra;
+// query order never changes which polynomial anchor is used. The field must
+// outlive this evaluator and remain immutable for the flight.
+class HistoryCandidateEvaluator {
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
+public:
+    HistoryCandidateEvaluator(const ConditionalGpis::GPSSField &field, const Start &start);
+    ~HistoryCandidateEvaluator();
+    double standardizedMean(double distance) const;
+};
+
+struct HistoryCandidateStatistics {
+    double standardizedMean = 0;
+    double score = 0;
+};
+
+// Cheap single-point selection heuristic, not an error or majorant bound:
+// Mills(z_u)^2 * [r_tu^2 * (1-r_tu^2) + gamma_tu^2]. Camera starts use
+// the original Gaussian here; their positive start sign remains in LocalLaw.
+// Surface starts use the value-and-gradient conditioned Gaussian. Positions
+// are physical distances with 0 < historyDistance < currentDistance.
+HistoryCandidateStatistics historyCandidateStatistics(
+    const ConditionalGpis::GPSSField &field, const Start &start,
+    double currentDistance, double historyDistance);
+
+// Reuses the current-position part of the same selection score across a
+// candidate group, without querying the mean field or constructing a cursor.
+// Distances are normalized by the directional SE correlation length. Pass
+// Mills(z_u), not its square; the caller may cache it with the candidate.
+class HistoryCandidateScorer {
+    double _q;
+    bool _surface;
+    int _featureCount = 0;
+    Eigen::VectorXd _currentFeature, _speedFeature;
+    double _logCurrentVariance = 0, _currentVariance = 1;
+    double _speedVariance = 1, _speedRegression = 0;
+public:
+    HistoryCandidateScorer(double currentNormalizedDistance, bool surface);
+    double score(double historyNormalizedDistance, double inverseMills) const;
+};
+
 // One immutable local sparse-history model. Internal positions are physical
 // distances strictly between zero and distance; at most two are supported.
 class LocalLaw {

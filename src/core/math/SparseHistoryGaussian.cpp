@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <numeric>
 #include <optional>
+#include <sstream>
 
 namespace Tungsten::SparseHistoryGpis {
 namespace {
@@ -354,12 +355,16 @@ struct StartStatistics {
         if(surface && !(direction.dot(start.gradient)>0))
             throw NumericError(NumericStatus::NonPositiveSurfaceBirth,"sparse-history surface start must point to air");
     }
-    double mean(const cg::GPSSField &field,const Start &start,double t) const {
-        if(!surface) return (ray ? ray->sample(t).value:meanJet(field,start.origin+t*direction).value)/sigma;
+    double meanWithCursor(const cg::GPSSField &field,const Start &start,double t,
+                          cg::MeanRayCursor *cursor) const {
+        if(!surface) return (cursor ? cursor->sample(t).value:meanJet(field,start.origin+t*direction).value)/sigma;
         const double q=t*inverseLength;
-        const double difference=ray ? ray->valueDifference(t):field.mean->valueDifference(start.origin,t*direction);
+        const double difference=cursor ? cursor->valueDifference(t):field.mean->valueDifference(start.origin,t*direction);
         return (difference+t*deltaSlope+
                 std::expm1(-0.5*q*q)*(-birth.value+t*deltaSlope))/sigma;
+    }
+    double mean(const cg::GPSSField &field,const Start &start,double t) const {
+        return meanWithCursor(field,start,t,ray.get());
     }
 };
 
@@ -403,6 +408,238 @@ double standardizedMean(const cg::GPSSField &field,const Start &start,double dis
     if(distance==0 && s.surface) return std::numeric_limits<double>::infinity();
     const double q=distance*s.inverseLength;
     return s.mean(field,start,distance)/std::sqrt(valueCovariance(q,q,s.surface));
+}
+
+struct HistoryCandidateEvaluator::Impl {
+    const cg::GPSSField &field;
+    Start start;
+    StartStatistics statistics;
+    Impl(const cg::GPSSField &f,const Start &s):field(f),start(s),statistics(field,start) {}
+};
+
+HistoryCandidateEvaluator::HistoryCandidateEvaluator(const cg::GPSSField &field,const Start &start)
+    : _impl(std::make_unique<Impl>(field,start)) {}
+HistoryCandidateEvaluator::~HistoryCandidateEvaluator() = default;
+
+double HistoryCandidateEvaluator::standardizedMean(double distance) const
+{
+    if(!(distance>=0) || !std::isfinite(distance))
+        throw NumericError(NumericStatus::InvalidInput,"invalid sparse-history position");
+    const auto &p=*_impl;
+    const auto &s=p.statistics;
+    if(distance==0 && s.surface) return std::numeric_limits<double>::infinity();
+    auto ray=s.ray ? s.ray->clone():nullptr;
+    if(s.ray && !ray) {
+        // Uncopyable cursors retain the original initialization and query
+        // sequence. In particular, do not omit the birth-cell preparation.
+        ray=p.field.mean->createRayCursor(p.start.origin,s.direction);
+        if(ray) ray->evaluate(0);
+    }
+    const double q=distance*s.inverseLength;
+    return s.meanWithCursor(p.field,p.start,distance,ray.get())/
+        std::sqrt(valueCovariance(q,q,s.surface));
+}
+
+HistoryCandidateStatistics historyCandidateStatistics(
+    const cg::GPSSField &field,const Start &start,
+    double currentDistance,double historyDistance)
+{
+    if(!(historyDistance>0 && historyDistance<currentDistance) ||
+       !std::isfinite(currentDistance) || !std::isfinite(historyDistance))
+        throw NumericError(NumericStatus::InvalidInput,"invalid history candidate positions");
+    const StartStatistics s(field,start);
+    const double q=currentDistance*s.inverseLength,u=historyDistance*s.inverseLength;
+    if(!(u>0 && q>u) || !std::isfinite(q))
+        throw NumericError(NumericStatus::NeedHigherPrecision,"unresolved history candidate separation");
+    double historySd=1,r=0,unexplained=0,gamma=0;
+    if(q<=8) {
+        // Work with normalized features rather than covariance differences:
+        // the surface field variance is O(q^4), and the conditional slope
+        // variance is also small near a birth. Reorthogonalization removes
+        // roundoff left in their almost parallel leading feature.
+        const int count=std::max(24,int(std::ceil(q*q+14*q+50)));
+        Eigen::VectorXd current=feature(q,false,s.surface,count);
+        Eigen::VectorXd history=feature(u,false,s.surface,count);
+        Eigen::VectorXd speed=feature(q,true,s.surface,count);
+        const double currentSd=current.stableNorm();
+        historySd=history.stableNorm();
+        if(!(currentSd>0 && historySd>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate field variance underflow");
+        current/=currentSd; history/=historySd;
+        r=std::clamp(current.dot(history),0.0,1.0);
+        Eigen::VectorXd residual=history-current.dot(history)*current;
+        residual-=current.dot(residual)*current;
+        unexplained=std::clamp(residual.squaredNorm(),0.0,1.0);
+        speed-=current.dot(speed)*current;
+        speed-=current.dot(speed)*current;
+        const double speedSd=speed.stableNorm();
+        if(!(speedSd>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate slope variance underflow");
+        gamma=(speed/speedSd).dot(residual);
+    } else {
+        // log(1-(1+x)*exp(-x)), with its leading x^2 factored out.
+        // Besides the birth variance, this gives log correlations without
+        // losing 1-r^2 for an almost coincident history point.
+        const auto remainderSeries=[](double x) {
+            double term=0.5,sum=term;
+            for(int n=3;n<=30;++n) { term*=x/n;sum+=term; }
+            return sum;
+        };
+        const auto logRemainder=[&](double x) {
+            if(x<1) return 2*std::log(x)+std::log(remainderSeries(x))-x;
+            if(x>745) return 0.0;
+            return std::log1p(-(1+x)*std::exp(-x));
+        };
+        const double d=q-u;
+        double logR=-0.5*d*d,speedVariance=1,currentVariance=1;
+        double speedRegression=0,negativeLogDerivative=d;
+        if(s.surface) {
+            const double logCurrentVariance=logRemainder(q*q);
+            const double logHistoryVariance=logRemainder(u*u);
+            const double x=q*u;
+            currentVariance=std::exp(logCurrentVariance);
+            historySd=std::exp(0.5*logHistoryVariance);
+            logR+=logRemainder(x)-0.5*(logCurrentVariance+logHistoryVariance);
+            // -d_q log C_H(q,u). This form stays finite as u tends to zero.
+            if(x<1) negativeLogDerivative-=1/(q*remainderSeries(x));
+            else if(x<=745)
+                negativeLogDerivative-=u*x*std::exp(-x-logRemainder(x));
+            if(q<40) {
+                const double q2=q*q,e=std::exp(-q2);
+                speedRegression=-q*q2*e/currentVariance;
+                speedVariance=1-(1-q2+q2*q2)*e-
+                    speedRegression*speedRegression*currentVariance;
+            }
+        }
+        if(!(historySd>0 && speedVariance>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate variance underflow");
+        logR=std::min(0.0,logR);
+        r=std::exp(logR);
+        unexplained=-std::expm1(2*logR);
+        gamma=r*std::sqrt(currentVariance/speedVariance)*
+            (negativeLogDerivative-speedRegression);
+    }
+    const double z=s.mean(field,start,historyDistance)/historySd;
+    if(std::isnan(z))
+        throw NumericError(NumericStatus::NeedHigherPrecision,"nonfinite history candidate mean");
+    // Conditional correlation bounds also suppress harmless projection
+    // roundoff; no probability or majorant is being clamped here.
+    const double association=r*r*unexplained+std::min(unexplained,gamma*gamma);
+    if(!(association>0)) return {z,0};
+    const double mills=cg::normalPdfOverCdf(z);
+    const long double weighted=static_cast<long double>(mills)*std::sqrt(association);
+    const long double score=weighted*weighted;
+    // This is only a ranking score. Saturating an overflowing score does
+    // not cap the probability-dependent factor of a tracking majorant.
+    return {z,double(std::min(score,static_cast<long double>(std::numeric_limits<double>::max())))};
+}
+
+namespace {
+
+double candidateRemainderSeries(double x)
+{
+    double term=0.5,sum=term;
+    for(int n=3;n<=30;++n) { term*=x/n;sum+=term; }
+    return sum;
+}
+
+double candidateLogRemainder(double x)
+{
+    if(x<1) return 2*std::log(x)+std::log(candidateRemainderSeries(x))-x;
+    if(x>745) return 0.0;
+    return std::log1p(-(1+x)*std::exp(-x));
+}
+
+double weightedCandidateScore(double association,double inverseMills)
+{
+    if(!(association>0)) return 0;
+    const long double weighted=static_cast<long double>(inverseMills)*std::sqrt(association);
+    return double(std::min(weighted*weighted,
+        static_cast<long double>(std::numeric_limits<double>::max())));
+}
+
+} // namespace
+
+HistoryCandidateScorer::HistoryCandidateScorer(double currentNormalizedDistance,bool surface)
+    : _q(currentNormalizedDistance),_surface(surface)
+{
+    if(!(_q>0) || !std::isfinite(_q))
+        throw NumericError(NumericStatus::InvalidInput,"invalid history scorer position");
+    if(!_surface) return;
+    if(_q<=8) {
+        _featureCount=std::max(24,int(std::ceil(_q*_q+14*_q+50)));
+        _currentFeature=feature(_q,false,true,_featureCount);
+        const double currentSd=_currentFeature.stableNorm();
+        if(!(currentSd>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate field variance underflow");
+        _currentFeature/=currentSd;
+        _speedFeature=feature(_q,true,true,_featureCount);
+        _speedFeature-=_currentFeature.dot(_speedFeature)*_currentFeature;
+        _speedFeature-=_currentFeature.dot(_speedFeature)*_currentFeature;
+        const double speedSd=_speedFeature.stableNorm();
+        if(!(speedSd>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate slope variance underflow");
+        _speedFeature/=speedSd;
+    } else {
+        _logCurrentVariance=candidateLogRemainder(_q*_q);
+        _currentVariance=std::exp(_logCurrentVariance);
+        if(_q<40) {
+            const double q2=_q*_q,e=std::exp(-q2);
+            _speedRegression=-_q*q2*e/_currentVariance;
+            _speedVariance=1-(1-q2+q2*q2)*e-
+                _speedRegression*_speedRegression*_currentVariance;
+        }
+        if(!(_speedVariance>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate variance underflow");
+    }
+}
+
+double HistoryCandidateScorer::score(double u,double inverseMills) const
+{
+    if(!(u>0 && u<_q) || !std::isfinite(u))
+        throw NumericError(NumericStatus::InvalidInput,"invalid history scorer candidate position");
+    if(!(inverseMills>=0))
+        throw NumericError(NumericStatus::InvalidInput,"invalid history scorer inverse Mills ratio");
+    if(!_surface) {
+        // Raw stationary SE: r=exp(-d^2/2), gamma=d*r. This is exactly
+        // exp(-d^2)*[1-exp(-d^2)+d^2]. Keep the two squared terms separate
+        // so the speed term survives even when exp(-d^2) underflows.
+        const double d=_q-u,d2=d*d,r=std::exp(-0.5*d2);
+        const double unexplained=-std::expm1(-d2),gamma=d*r;
+        return weightedCandidateScore(r*r*unexplained+
+            std::min(unexplained,gamma*gamma),inverseMills);
+    }
+    double r=0,unexplained=0,gamma=0;
+    if(_featureCount) {
+        Eigen::VectorXd history=feature(u,false,true,_featureCount);
+        const double historySd=history.stableNorm();
+        if(!(historySd>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate field variance underflow");
+        history/=historySd;
+        r=std::clamp(_currentFeature.dot(history),0.0,1.0);
+        Eigen::VectorXd residual=history-_currentFeature.dot(history)*_currentFeature;
+        residual-=_currentFeature.dot(residual)*_currentFeature;
+        unexplained=std::clamp(residual.squaredNorm(),0.0,1.0);
+        gamma=_speedFeature.dot(residual);
+    } else {
+        const double d=_q-u,x=_q*u;
+        const double logHistoryVariance=candidateLogRemainder(u*u);
+        if(!(std::exp(0.5*logHistoryVariance)>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate variance underflow");
+        double logR=-0.5*d*d+candidateLogRemainder(x)-
+            0.5*(_logCurrentVariance+logHistoryVariance);
+        double negativeLogDerivative=d;
+        if(x<1) negativeLogDerivative-=1/(_q*candidateRemainderSeries(x));
+        else if(x<=745)
+            negativeLogDerivative-=u*x*std::exp(-x-candidateLogRemainder(x));
+        logR=std::min(0.0,logR);
+        r=std::exp(logR);
+        unexplained=-std::expm1(2*logR);
+        gamma=r*std::sqrt(_currentVariance/_speedVariance)*
+            (negativeLogDerivative-_speedRegression);
+    }
+    return weightedCandidateScore(r*r*unexplained+
+        std::min(unexplained,gamma*gamma),inverseMills);
 }
 
 struct LocalLaw::Impl {
@@ -477,9 +714,20 @@ struct LocalLaw::Impl {
                 const double tail2=std::log(maxU)+cg::normalLogCdf(a-maxU);
                 const double largest=std::max(tail1,tail2);
                 const double logTail=std::isfinite(largest) ? largest+std::log1p(std::exp(std::min(tail1,tail2)-largest)) : largest;
-                if(sum>0 && logTail-logScale<=std::log(settings.relativeTolerance*0.1*sum)) break;
+                // A selected flux can be subnormal. Multiplying it by the
+                // relative budget first can underflow to zero and make this
+                // test impossible to satisfy even with a negligible tail.
+                if(sum>0 && logTail-logScale<=std::log(sum)+
+                    std::log(settings.relativeTolerance)+std::log(0.1)) break;
                 if(logTail < std::log(std::numeric_limits<double>::min()) && sum==0) break;
-                if(iteration==31) throw NumericError(NumericStatus::IntegrationNotConverged,"sparse-history speed tail did not converge");
+                if(iteration==31) {
+                    std::ostringstream message;message.precision(17);
+                    message<<"sparse-history speed tail did not converge: a="<<a
+                        <<", sum="<<sum<<", logScale="<<logScale<<", maxU="<<maxU
+                        <<", logTail="<<logTail<<", mean="<<crossingMean.transpose()
+                        <<", covariance="<<crossingCovariance;
+                    throw NumericError(NumericStatus::IntegrationNotConverged,message.str());
+                }
                 const double next=maxU+std::max(4.0,0.25*maxU);
                 sum+=integrate(f,maxU,next,settings).value;maxU=next;
             }
