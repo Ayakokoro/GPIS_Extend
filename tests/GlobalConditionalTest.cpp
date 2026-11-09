@@ -168,6 +168,7 @@ void renewedEndpointCoordinates() {
                 "renewed near-origin endpoint supports a changed continuation direction");
         }
     }
+}
 void endpointPrecision() {
     using namespace Tungsten;
     auto m=makeMedium();
@@ -326,6 +327,7 @@ void stage2() {
 #include "ConditionalKnobChecks.hpp"
 #include "ConditionalSdfChecks.hpp"
 #include "ConditionalSurfaceBirthChecks.hpp"
+#include "ConditionalNonGpSurfaceChecks.hpp"
 #include "ConditionalBoundChecks.hpp"
 #include "ConditionalTrackingChecks.hpp"
 #include "ConditionalTrackingProbe.hpp"
@@ -443,6 +445,7 @@ int main(int argc,char **argv)
         if(stage=="endpoint_precision"||stage=="all") endpointPrecision();
         if(stage=="stage3"||stage=="all") stage3();
         if(stage=="surface_births"||stage=="all") surfaceBirthChecks();
+        if(stage=="non_gp_surface"||stage=="all") nonGpSurfaceChecks();
         if(stage=="sdf"||stage=="all") sdfChecks();
         if(stage=="knob"||stage=="all") knobChecks();
         if(stage=="bounds"||stage=="all") boundChecks();

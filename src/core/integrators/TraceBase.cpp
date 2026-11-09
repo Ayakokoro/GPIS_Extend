@@ -3,6 +3,7 @@
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
+#include "media/GlobalConditionalMedium.hpp"
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
 #include "media/NeuralRenewalMedium.hpp"
 #endif
@@ -905,7 +906,8 @@ bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumS
 }
 
 void TraceBase::beginSurface(SurfaceState &surface, SurfaceScatterEvent &event,
-        const Ray &ray, Vec3f &throughput) const
+        const Ray &ray, Vec3f &throughput, const Medium *medium,
+        Medium::MediumState &mediumState) const
 {
     Vec3f transparency = event.info->bsdf->eval(event.makeForwardEvent(), false);
     float transparencyScalar = transparency.avg();
@@ -916,6 +918,10 @@ void TraceBase::beginSurface(SurfaceState &surface, SurfaceScatterEvent &event,
         event.weight = transparency/transparencyScalar;
         event.sampledLobe = BsdfLobes::ForwardLobe;
         throughput *= event.weight;
+    } else if (const auto *conditional = dynamic_cast<const GlobalConditionalMedium *>(medium)) {
+        // Apply one surface policy before direct-light branches copy the state
+        // and before BSDF continuation. Forward boundaries keep their context.
+        conditional->prepareNonGpSurface(*event.sampler, event.info->p, ray.dir(), mediumState);
     }
 }
 
@@ -960,7 +966,7 @@ bool TraceBase::handleSurface(SurfaceScatterEvent &event, IntersectionTemporary 
         bool &wasSpecular, Medium::MediumState &mediumState, Vec3f *transmittance)
 {
     SurfaceState surface;
-    beginSurface(surface, event, ray, throughput);
+    beginSurface(surface, event, ray, throughput, medium, mediumState);
     if (!surface.forward && !adjoint && enableLightSampling && bounce < _settings.maxBounces - 1) {
         Medium::MediumState mediumStateBounceIncr = mediumState;
         mediumStateBounceIncr.info.pixelSampleSegment.w() += 1;

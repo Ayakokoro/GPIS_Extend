@@ -218,6 +218,15 @@ def report():
     payload = dict(modes=MODES, labels=LABELS, layers=LAYERS, width=256, height=256,
                    pixels=[dict(label=n, xy=p) for n, p in PIXELS], statistics=statistics,
                    images={mode: base64.b64encode(np.ascontiguousarray(data[mode].astype('<f4')).tobytes()).decode('ascii') for mode in MODES})
+    flip_info = {}
+    flip_path = OUT / 'flip/manifest.json'
+    if flip_path.exists():
+        flip = load(flip_path)
+        for name, digest in flip['source_sha256'].items():
+            assert sha(OUT / name) == digest, 'FLIP source changed: ' + name
+        payload['flip'] = flip['viewer']
+        flip_info['flip'] = dict(manifest='flip/manifest.json', sha256=sha(flip_path),
+                                 metrics='flip/metrics.csv', reference=flip['reference'], ppd=flip['tool']['ppd'])
     template = (Path(__file__).with_name('bounce_images_viewer.html')).read_text(encoding='utf-8')
     (OUT / 'comparison.html').write_text(template.replace('__PAYLOAD__', json.dumps(payload, separators=(',', ':'))), encoding='utf-8')
     save(OUT / 'manifest.json', dict(scene='gpis-scenes/shaderball/shaderball-stationary-270.json',
@@ -229,7 +238,7 @@ def report():
          termination_fraction_channels=['outward_crossing_rejected on the continuation path (not shadow rays)',
                                         'integrator bounce_limit', 'renderer-clamped sample'],
          source_provenance=provenance, validation=checks,
-         outputs={p.name: sha(p) for p in OUT.glob('*.png')}))
+         outputs={p.name: sha(p) for p in OUT.glob('*.png')}, **flip_info))
     print('Report:', str(OUT / 'comparison.html'), flush=True)
 
 

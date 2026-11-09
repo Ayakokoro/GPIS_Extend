@@ -104,6 +104,9 @@ int main(int argc, char **argv) {
                     ++verified;
                 }
                 tracer.setPathDiagnostics(nullptr);
+                // Keep the finite production estimate available for scientific
+                // diagnostics even when the ordinary film would discard it.
+                diagnostics.result["unclamped_radiance"]=D::vector(c);
                 bool clamped=std::isinf(c)||std::isnan(c)||c.max()>65536;
                 if(clamped) c=Vec3f(0.f);
                 diagnostics.result["pixel"]=p.at("xy");

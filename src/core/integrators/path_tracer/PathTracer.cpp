@@ -421,7 +421,7 @@ PathTracer::SampleStatus PathTracer::advanceSample(PathState &path, PathSampleGe
                 if (mediumBounces == 1 && !_settings.lowOrderScattering)
                     return finish(emission);
                 surfaceEvent = makeLocalScatterEvent(data, info, ray, &sampler);
-                beginSurface(path.surface, surfaceEvent, ray, throughput);
+                beginSurface(path.surface, surfaceEvent, ray, throughput, medium, state);
                 path.enableDirect = _settings.enableLightSampling &&
                     (mediumBounces > 0 || _settings.includeSurfaces);
             } else {

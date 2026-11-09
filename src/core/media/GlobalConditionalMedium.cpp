@@ -133,6 +133,11 @@ GlobalConditionalMedium::GlobalConditionalMedium() {
 }
 void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     ClassicGlobalMedium::fromJson(value,scene);
+    std::string surfacePolicy="retain_endpoint";
+    value.getField("non_gp_surface_policy",surfacePolicy);
+    if(surfacePolicy=="retain_endpoint") _nonGpSurfacePolicy=ConditionalNonGpSurfacePolicy::RetainEndpoint;
+    else if(surfacePolicy=="restart_exterior") _nonGpSurfacePolicy=ConditionalNonGpSurfacePolicy::RestartExterior;
+    else value.parseError("non_gp_surface_policy must be retain_endpoint or restart_exterior");
     _tracking=cg::ConditionalTrackingSettings{};
     std::string majorantMode="adaptive";
     value.getField("tracking_majorant",majorantMode);
@@ -152,6 +157,8 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
 rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     auto value=ClassicGlobalMedium::toJson(allocator);
     value["type"].SetString("global_conditional",allocator);
+    value.AddMember("non_gp_surface_policy",rapidjson::Value(
+        _nonGpSurfacePolicy==ConditionalNonGpSurfacePolicy::RetainEndpoint ? "retain_endpoint" : "restart_exterior",allocator),allocator);
     value.AddMember("tracking_majorant",rapidjson::Value(
         _tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants ? "two_constants" : "adaptive",allocator),allocator);
     value.AddMember("tracking_constant_birth_length",_tracking.constantBirthLength,allocator);
@@ -193,6 +200,25 @@ void GlobalConditionalMedium::teardownAfterRender() {
     std::cout<<"GPIS conditional discarded surface births: {\"paths\":"<<discardedSurfacePaths()
              <<",\"shadow_connections\":"<<discardedSurfaceConnections()<<"}\n";
     ClassicGlobalMedium::teardownAfterRender();
+}
+void GlobalConditionalMedium::prepareNonGpSurface(PathSampleGenerator &sampler,
+        const Vec3f &position,const Vec3f &incomingDirection,MediumState &state) const
+{
+    if(_nonGpSurfacePolicy==ConditionalNonGpSurfacePolicy::RetainEndpoint) return;
+    auto next=std::make_shared<ConditionalPathContext>();
+    next->owner=this;next->rayOrigin=position;next->position=eigen(position);
+    const auto previous=std::dynamic_pointer_cast<const ConditionalPathContext>(state.pathContext);
+    if(previous && previous->owner==this) {
+        if(previous->rayOrigin!=position)
+            throw cg::NumericError(cg::NumericStatus::InvalidInput,"non-GP surface lost its precise conditional endpoint");
+        next->position=previous->position;
+    }
+    // Discard the old value/gradient, but keep the geometric endpoint exact.
+    // Sample once so continuation and every surface connection share the same
+    // new exterior observation; the prior still imposes F(position)>0.
+    cg::Random rng(sampler);
+    next->birth=cg::startConditionalExterior(_field,next->position,eigen(incomingDirection).normalized(),rng);
+    state.pathContext=next;
 }
 std::shared_ptr<const ConditionalPathContext> GlobalConditionalMedium::context(
         PathSampleGenerator &sampler,const Ray &ray,const MediumState &s) const

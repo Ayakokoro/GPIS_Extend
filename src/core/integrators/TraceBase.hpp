@@ -109,7 +109,8 @@ protected:
     bool beginLightShadow(DirectLightingState &direct, Ray ray, const Medium *medium,
         float expectedDist, bool startsOnSurface, const Medium::MediumState &state);
     void beginSurface(SurfaceState &surface, SurfaceScatterEvent &event,
-        const Ray &ray, Vec3f &throughput) const;
+        const Ray &ray, Vec3f &throughput, const Medium *medium,
+        Medium::MediumState &mediumState) const;
     bool finishSurface(SurfaceState &surface, SurfaceScatterEvent &event,
         IntersectionTemporary &data, IntersectionInfo &info, const Medium *&medium,
         int bounce, bool adjoint, bool enableLightSampling, Ray &ray,

@@ -18,8 +18,8 @@
 using namespace Tungsten;
 using J=nlohmann::json;
 namespace fs=std::filesystem;
-constexpr int Layers=7;
-const char *Names[Layers]={"order00","order01","order02","order03","order04","order05plus","beauty"};
+constexpr int Layers=8;
+const char *Names[Layers]={"order00","order01","order02","order03","order04","order05plus","multiple","beauty"};
 
 void require(bool ok,const char *message) { if(!ok) throw std::runtime_error(message); }
 void writePfm(const fs::path &path,const std::vector<Vec3d> &pixels,int w,int h) {
@@ -86,13 +86,19 @@ int main(int argc,char **argv) {
                     }
                     const bool clamped=std::isinf(value)||std::isnan(value)||value.max()>65536;
                     if(clamped) {value=Vec3f(0.f);for(auto &v:contribution.radiance)v=Vec3d(0.0);}
-                    require(contribution.termination.find("runtime_error")!=0 && contribution.termination.find("nonfinite")!=0,"Path encountered an internal error");
+                    if (contribution.termination.find("runtime_error")==0 || contribution.termination.find("nonfinite")==0)
+                        throw std::runtime_error("Path encountered " + contribution.termination +
+                            " at pixel (" + std::to_string(x) + "," + std::to_string(y) +
+                            "), sample " + std::to_string(s));
                     Vec3d sum(0.0);for(const auto &v:contribution.radiance)sum+=v;
                     const double error=std::abs(sum-Vec3d(value)).max();
                     localError=std::max(localError,error);
                     require(error<=2e-6*(1.0+std::abs(Vec3d(value)).max()),"Bounce contributions do not sum to radiance");
+                    Vec3d multiple(0.0);
+                    for(int k=2;k<BounceContributions::BinCount;++k) multiple+=contribution.radiance[k];
                     for(int k=0;k<Layers;++k) {
-                        const Vec3d c=k==Layers-1?Vec3d(value):contribution.radiance[k];
+                        const Vec3d c=k==Layers-1?Vec3d(value):
+                            (k==Layers-2?multiple:contribution.radiance[k]);
                         auto &m=mean[k][pixel];const Vec3d delta=c-m;
                         m+=delta/double(s+1);variance[k][pixel]+=delta*(c-m);
                     }

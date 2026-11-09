@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Shaderball · 1–4 次反射贡献</title>
+<title>Shaderball · 各阶反射贡献与 FLIP</title>
 <style>
 :root{color-scheme:light;--ink:#1b2b3d;--muted:#596b7e;--line:#d9e1e9;--accent:#205b8b}
 *{box-sizing:border-box}body{margin:0;background:#f3f6f9;color:var(--ink);font:15px/1.65 system-ui,"Microsoft YaHei",sans-serif}
@@ -13,6 +13,7 @@ p{margin:8px 0}a{color:var(--accent)}.subtle{color:var(--muted)}.eyebrow{font-si
 label{white-space:nowrap}select{font:inherit;color:var(--ink);background:#f6f8fa;border:1px solid #bccbd8;padding:5px 8px;border-radius:4px}
 .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.card{background:#fff;border:1px solid var(--line);border-radius:7px;overflow:hidden}
 .card header{padding:8px 12px;font-size:14px;font-weight:650}.card canvas{width:100%;height:auto;display:block;cursor:crosshair;image-rendering:pixelated;background:#000}.card footer{padding:5px 10px;color:var(--muted);font-size:12px}
+.flip-title{padding:7px 10px;border-top:1px solid var(--line);font-size:12px;font-weight:650;background:#f1f4f8}.flip-scale{width:280px;max-width:100%;display:inline-block;vertical-align:middle;margin:6px 12px}.flip-scale img{display:block;width:100%;height:13px}.flip-ticks{display:flex;justify-content:space-between;font-size:11px}.flip-note{padding:12px 16px;background:#fff;border:1px solid var(--line);border-radius:8px}.flip-error{color:#aa2638}
 .section-title{display:flex;justify-content:space-between;align-items:baseline;gap:20px;margin:18px 0 8px}.section-title h2{margin:0}.section-title span{font-size:13px;color:var(--muted)}
 .readout{padding:18px;background:white;border:1px solid var(--line);border-radius:8px;margin-top:24px}.readout-controls{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
 .chart{width:100%;height:290px;display:block}.legend{display:flex;gap:15px;flex-wrap:wrap;font-size:13px}.legend i{display:inline-block;width:12px;height:9px;margin-right:5px}
@@ -24,7 +25,7 @@ table{border-collapse:collapse;width:100%;margin:10px 0;font-variant-numeric:tab
 <div class="eyebrow">GPIS SHADERBALL / BOUNCE CONTRIBUTIONS</div>
 <h1>凹槽差异从第几次反射开始？</h1>
 <p>四种模式采用原场景、ℓ=0.2、σ=0.02，统一 <b>256×256 · 128 spp</b>。以下图像按每条光路对相机亮度的贡献分类。</p>
-<p class="subtle">保留完整追踪至最大深度 20，再拆分出 1、2、3、4 次反射。NEE、MIS、俄罗斯轮盘与原有拒绝规则均沿用原设置。</p>
+<p class="subtle">保留完整追踪至最大深度 20，再拆分出 0、1、2、3、4、5+ 次贡献。NEE、MIS、俄罗斯轮盘与原有拒绝规则均沿用原设置。</p>
 <span class="badge">拆分之和已核验</span><span class="badge">与原 128 spp 图像逐像素一致（浮点容差内）</span><span class="badge">统一曝光 · 未降噪</span>
 <div class="controls">
 <label>贡献 <select id="kind"><option value="exact">恰好 k 次反射</option><option value="cumulative">累计到 k 次反射（含 0 次）</option></select></label>
@@ -32,6 +33,7 @@ table{border-collapse:collapse;width:100%;margin:10px 0;font-variant-numeric:tab
 <label>统一增益 <select id="gain"><option value="1">×1（原曝光）</option><option value="4">×4</option><option value="16">×16</option></select></label>
 <span class="subtle">点击图像查看同一位置的线性亮度</span>
 </div>
+<div id="flip-note" class="flip-note" hidden></div>
 <div id="images"></div>
 <div class="readout">
 <div class="readout-controls"><strong id="probeTitle"></strong><label>预设像素 <select id="pixel"></select></label><label>统计范围 <select id="radius"><option value="4">9×9 邻域均值</option><option value="0">单像素</option></select></label></div>
@@ -55,14 +57,20 @@ const arrays={};for(const m of D.modes){const s=atob(D.images[m]),u=new Uint8Arr
 delete D.images;document.querySelector('#payload').remove();
 const $=s=>document.querySelector(s), panels=[];let point=[165,83];
 const crops={full:[0,0,256,256],inner:[55,38,195,145],base:[60,145,216,213]};
+const flipCache=new Map();let flipGeneration=0;
+if(D.flip){
+ const note=$('#flip-note');note.hidden=false;
+ note.innerHTML=`<b>每张原图下方：相对同阶 GPIS global 的 LDR-FLIP</b><p>本地 FLIP ${D.flip.version} · ${D.flip.ppd} PPD。切换逐阶／累计或增益时，使用对应图像单独计算的误差；局部放大直接裁剪全图误差，均值始终为全图统计。</p><span>统一色标，越小越接近参考</span><span class="flip-scale"><img src="${D.flip.colorbar}" alt="FLIP 误差色标 0 到 1"><span class="flip-ticks"><span>0</span><span>0.25</span><span>0.5</span><span>0.75</span><span>1</span></span></span><p class="subtle">参考为同组 128 spp GPIS global，采样噪声也计入误差。GPIS 列显示自身比较的零误差。<a href="flip/metrics.csv">全图 FLIP 统计 CSV</a> · <a href="flip/manifest.json">计算参数与输入记录</a></p>`;
+}
 const params=new URLSearchParams(location.search);
 for(const id of ['kind','crop','gain']){const v=params.get(id),select=$('#'+id);if(v&&[...select.options].some(o=>o.value===v))select.value=v}
-for(const k of [6,1,2,3,4]){
+for(const k of [6,1,2,3,4,5,0]){
  const section=document.createElement('section');section.innerHTML=`<div class="section-title"><h2 data-order="${k}"></h2><span>${k===6?'含 0 次及 5+ 次贡献':'相同曝光，可直接比较亮暗'}</span></div><div class="grid"></div>`;
  for(let j=0;j<4;j++){
-  const c=document.createElement('article');c.className='card';c.innerHTML=`<header style="border-top:3px solid ${colors[j]}">${D.labels[j]}</header><canvas></canvas><footer></footer>`;
-  section.querySelector('.grid').appendChild(c);const cv=c.querySelector('canvas');panels.push({cv,k,m:D.modes[j],footer:c.querySelector('footer')});
-  cv.addEventListener('click',e=>{const b=cv.getBoundingClientRect(),r=crops[$('#crop').value];point=[Math.min(r[2]-1,r[0]+Math.floor((e.clientX-b.left)/b.width*(r[2]-r[0]))),Math.min(r[3]-1,r[1]+Math.floor((e.clientY-b.top)/b.height*(r[3]-r[1])))];$('#pixel').value='custom';updateProbe();drawPanels()});
+  const c=document.createElement('article');c.className='card';c.dataset.mode=D.modes[j];c.dataset.order=k;
+  c.innerHTML=`<header style="border-top:3px solid ${colors[j]}">${D.labels[j]}</header><canvas class="render-canvas" aria-label="${D.labels[j]} 渲染图"></canvas><footer class="render-footer"></footer>`+(D.flip?`<div class="flip-title">LDR-FLIP · ${D.modes[j]===D.flip.reference?'参考自身比较':'相对同阶 GPIS'}</div><canvas class="flip-canvas" aria-label="${D.labels[j]} FLIP 误差图"></canvas><footer class="flip-footer"></footer>`:'');
+  section.querySelector('.grid').appendChild(c);const cv=c.querySelector('.render-canvas');panels.push({cv,k,m:D.modes[j],footer:c.querySelector('.render-footer'),flip:c.querySelector('.flip-canvas'),flipFooter:c.querySelector('.flip-footer')});
+  for(const canvas of c.querySelectorAll('canvas'))canvas.addEventListener('click',e=>{const b=canvas.getBoundingClientRect(),r=crops[$('#crop').value];point=[Math.max(r[0],Math.min(r[2]-1,r[0]+Math.floor((e.clientX-b.left)/b.width*(r[2]-r[0])))),Math.max(r[1],Math.min(r[3]-1,r[1]+Math.floor((e.clientY-b.top)/b.height*(r[3]-r[1]))))];$('#pixel').value='custom';updateProbe();drawPanels()});
  }
  $('#images').appendChild(section);
 }
@@ -70,9 +78,27 @@ for(const p of D.pixels){const o=document.createElement('option');o.value=p.labe
 const custom=document.createElement('option');custom.value='custom';custom.textContent='点击位置';$('#pixel').appendChild(custom);$('#pixel').value='inner_right';
 $('#legend').innerHTML=D.labels.map((l,i)=>`<span><i style="background:${colors[i]}"></i>${l}</span>`).join('');
 function tone(v,g){let x=Math.max(0,v*g-.004);return Math.round(255*Math.min(1,x*(6.2*x+.5)/(x*(6.2*x+1.7)+.06)))}
+function flipLayer(k,cumulative){return k===6?'beauty':cumulative&&k>0?'cumulative0'+k:D.layers[k]}
+function loadFlip(src){
+ if(!flipCache.has(src))flipCache.set(src,new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>resolve(im);im.onerror=()=>{flipCache.delete(src);reject(new Error('无法载入 '+src))};im.src=src}));
+ return flipCache.get(src);
+}
+function drawFlip(cumulative,g,rect){
+ if(!D.flip)return;
+ const generation=++flipGeneration,[x0,y0,x1,y1]=rect;document.documentElement.dataset.flipReady='false';
+ const jobs=panels.map(async({flip,flipFooter,k,m})=>{
+  flip.width=x1-x0;flip.height=y1-y0;flipFooter.textContent='正在载入对应的 FLIP…';flipFooter.classList.remove('flip-error');
+  const entry=D.flip.entries[String(g)][flipLayer(k,cumulative)][m];
+  const im=await loadFlip(entry.map);if(generation!==flipGeneration)return;
+  const ctx=flip.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.drawImage(im,x0,y0,x1-x0,y1-y0,0,0,flip.width,flip.height);
+  flip.dataset.map=entry.map;flip.dataset.mean=entry.mean;
+  flipFooter.innerHTML=`全图 mean FLIP = <b>${entry.mean.toFixed(6)}</b><br><a href="${entry.map}" target="_blank" rel="noopener">原始误差图</a> · <a href="${entry.pooled}">统计</a>`;
+ });
+ Promise.all(jobs).then(()=>{if(generation===flipGeneration)document.documentElement.dataset.flipReady='true'}).catch(error=>{if(generation!==flipGeneration)return;document.documentElement.dataset.flipReady='error';for(const p of panels){p.flipFooter.textContent=error.message;p.flipFooter.classList.add('flip-error')}console.error(error)});
+}
 function drawPanels(){
  const cumulative=$('#kind').value==='cumulative',g=Number($('#gain').value),[x0,y0,x1,y1]=crops[$('#crop').value];
- for(const title of document.querySelectorAll('[data-order]')){const k=Number(title.dataset.order);title.textContent=k===6?'完整参考图':(cumulative?'累计到 ':'恰好 ')+k+' 次反射'+(cumulative?'':'的贡献')}
+ for(const title of document.querySelectorAll('h2[data-order]')){const k=Number(title.dataset.order);title.textContent=k===6?'完整渲染结果':k===0?'0 次贡献（直接可见光源）':k===5?(cumulative?'累计全部阶（含 0 次与 5+ 次）':'5+ 次反射的贡献'):(cumulative?'累计到 ':'恰好 ')+k+' 次反射'+(cumulative?'':'的贡献')}
  for(const {cv,k,m,footer} of panels){
   cv.width=x1-x0;cv.height=y1-y0;const ctx=cv.getContext('2d'),im=ctx.createImageData(cv.width,cv.height),a=arrays[m];
   for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++){
@@ -83,6 +109,7 @@ function drawPanels(){
   if(point[0]>=x0&&point[0]<x1&&point[1]>=y0&&point[1]<y1){ctx.strokeStyle='#ffce59';ctx.lineWidth=.8;ctx.strokeRect(point[0]-x0-3.5,point[1]-y0-3.5,8,8)}
   footer.textContent=`${x1-x0}×${y1-y0} 原图区域 · 增益 ×${g}`;
  }
+ drawFlip(cumulative,g,[x0,y0,x1,y1]);
 }
 function means(m){
  const r=Number($('#radius').value),a=arrays[m],v=new Array(7).fill(0);let n=0;

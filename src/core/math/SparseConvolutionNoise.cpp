@@ -5,6 +5,23 @@
 
 namespace Tungsten {
 
+namespace {
+struct CorrelatedGradientMoments {
+    double factor, variance;
+};
+
+CorrelatedGradientMoments correlatedGradientMoments(float distance) {
+    const double x = 0.5 * double(distance) * double(distance);
+    const double factor = 0.5 * std::exp(-0.5*x) * (1.0-x);
+    // 1/2 - 2*factor^2 loses all precision in float for short segments.
+    // Use 1-exp(-x)*(1-x)^2 in a cancellation-free form near the origin.
+    const double variance = x < 1.0
+        ? 0.5 * (-std::expm1(-x) + std::exp(-x)*x*(2.0-x))
+        : 0.5 - 2.0*factor*factor;
+    return {factor, variance};
+}
+}
+
 SparseConvolutionNoiseRealization::SparseConvolutionNoiseRealization(
         std::shared_ptr<GaussianProcess> gp, GPCorrelationContext ctxt,
         uint globalSeed, float impulseDensity, bool useSingleRealization,
@@ -174,9 +191,10 @@ Vec3f SparseConvolutionNoiseRealization::evaluateGradientNoise1D(const Vec3f& p,
                 // Considering/ignoring this covariance only makes a difference under the Renewal+ memory model
                 // This distinguishes between Renewal+ (consider) and Renewal Half+ (ignore)
                 // Not much difference in the final converged rendering, but NEE (and thus MIS) provides more noise reduction under Renewal Half+
-                float factor = std::exp(- tSegment * tSegment / 4.0) * (0.5 - tSegment * tSegment * 0.25);
+                const auto moments = correlatedGradientMoments(tSegment);
+                const double factor = moments.factor;
                 Eigen::VectorXd mu = factor * 2.0 * xy_1;
-                float cov = 0.5 - factor * factor * 2;
+                const double cov = moments.variance;
                 Eigen::VectorXd xy_2 = sample_standard_normal(2, sampler) * sqrt(cov) + mu;
                 grad_iso_ray = Vec3f(xy_2(0), xy_2(1), 0.f) + grad_iso_ray_base;
             }
@@ -216,10 +234,11 @@ Vec3f SparseConvolutionNoiseRealization::evaluateGradientNoise1D(const Vec3f& p,
                     std::cerr << "(Unidirectional) 1D CorrelationXY does not work for covariance kernel with non-stationary anisotropy!\n";
                 }
                 // Consider the correlation of gx and gy at ray start (tSegment == 0) and at ray end (here)
-                float factor = std::exp(- tSegment * tSegment / 4.0) * (0.5 - tSegment * tSegment * 0.25);
+                const auto moments = correlatedGradientMoments(tSegment);
+                const double factor = moments.factor;
                 Eigen::VectorXd mu_low = factor * 2.0 * xy_1_low;
                 Eigen::VectorXd mu_high = factor * 2.0 * xy_1_high;
-                float cov = 0.5 - factor * factor * 2;
+                const double cov = moments.variance;
                 Eigen::VectorXd xy_2_low = sample_standard_normal(2, sampler) * sqrt(cov) + mu_low;
                 Eigen::VectorXd xy_2_high = sample_standard_normal(2, sampler) * sqrt(cov) + mu_high;
                 grad_iso_ray_low = Vec3f(xy_2_low(0), xy_2_low(1), 0.f) + grad_iso_ray_base_low;
@@ -677,8 +696,10 @@ float SparseConvolutionNoiseRealization::neePDF(const Vec3f& rayDir, const Vec3f
     float pdf_area; // The PDF of sampling gx, gy in the isotropic ray space, under area measure
     UniformSampler sampler;
     if (!_multiResolutionGrid) {
-        // Different conditioning leads to different gx, gy distribution at the current vertex, thus different PDF evaluation routine
-        if (!(_ctxt == GPCorrelationContext::RenewalPlus && _correlationXY)) {
+        // Match evaluateGradientNoise1D: at tSegment == 0 it draws xy_1
+        // with variance 1/2, not the correlated endpoint xy_2. Using the
+        // endpoint density here would divide by its zero conditional variance.
+        if (!(_ctxt == GPCorrelationContext::RenewalPlus && _correlationXY) || tSegment == 0.0f) {
             sample_x = (grad_3d_iso_ray.x() - grad_constraint_3d.x()) * sqrt(2.0) * scaleX;
             sample_y = (grad_3d_iso_ray.y() - grad_constraint_3d.y()) * sqrt(2.0) * scaleY;
             pdf_area = exp(-sample_x * sample_x / 2.0) *
@@ -691,9 +712,10 @@ float SparseConvolutionNoiseRealization::neePDF(const Vec3f& rayDir, const Vec3f
             }
             sampler.set_state(MathUtil::xxhash32(info.pixelSampleSegment) + MathUtil::xxhash32(info.sceneSeed) + 1u);
             Eigen::VectorXd xy_1 = sample_standard_normal(2, sampler) / sqrt(2.f);
-            float factor = std::exp(- tSegment * tSegment / 4.0) * (0.5 - tSegment * tSegment * 0.25);
+            const auto moments = correlatedGradientMoments(tSegment);
+            const double factor = moments.factor;
             Eigen::VectorXd mu = factor * 2.0 * xy_1;
-            float cov = 0.5 - factor * factor * 2;
+            const double cov = moments.variance;
             sample_x = (grad_3d_iso_ray.x() - grad_constraint_3d.x() - mu(0)) / sqrt(cov);
             sample_y = (grad_3d_iso_ray.y() - grad_constraint_3d.y() - mu(1)) / sqrt(cov);
             pdf_area = exp(-sample_x * sample_x / 2.0) *
@@ -706,7 +728,8 @@ float SparseConvolutionNoiseRealization::neePDF(const Vec3f& rayDir, const Vec3f
         float nonStationaryScale = 1.0 / sqrt(sqr(multiResinfo.z() / multiResinfo.x()) + sqr(multiResinfo.w() / multiResinfo.y()));
         scaleX *= nonStationaryScale;
         scaleY *= nonStationaryScale;
-        if (!(_ctxt == GPCorrelationContext::RenewalPlus && _correlationXY)) {
+        // The multiresolution start-point sampler uses the same xy_1 rule.
+        if (!(_ctxt == GPCorrelationContext::RenewalPlus && _correlationXY) || tSegment == 0.0f) {
             sample_x = (grad_3d_iso_ray.x() - grad_constraint_3d.x()) * sqrt(2.0) * scaleX;
             sample_y = (grad_3d_iso_ray.y() - grad_constraint_3d.y()) * sqrt(2.0) * scaleY;
             pdf_area = exp(-sample_x * sample_x / 2.0) *
@@ -720,9 +743,10 @@ float SparseConvolutionNoiseRealization::neePDF(const Vec3f& rayDir, const Vec3f
             sampler.set_state(MathUtil::xxhash32(info.pixelSampleSegment) + MathUtil::xxhash32(info.sceneSeed) + 1u);
             Eigen::VectorXd xy_1 = sample_standard_normal(2, sampler) / sqrt(2.f);
             Eigen::VectorXd xy_2 = sample_standard_normal(2, sampler) / sqrt(2.f);
-            float factor = std::exp(- tSegment * tSegment / 4.0) * (0.5 - tSegment * tSegment * 0.25);
+            const auto moments = correlatedGradientMoments(tSegment);
+            const double factor = moments.factor;
             Eigen::VectorXd mu = factor * 2.0 * (xy_1 * multiResinfo.z() / multiResinfo.x() + xy_2 * multiResinfo.w() / multiResinfo.y());
-            float cov = 0.5 - factor * factor * 2;
+            const double cov = moments.variance;
             sample_x = (grad_3d_iso_ray.x() - grad_constraint_3d.x() - mu(0)) / sqrt(cov) * nonStationaryScale;
             sample_y = (grad_3d_iso_ray.y() - grad_constraint_3d.y() - mu(1)) / sqrt(cov) * nonStationaryScale;
             pdf_area = exp(-sample_x * sample_x / 2.0) *
