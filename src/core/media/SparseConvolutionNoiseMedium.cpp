@@ -217,6 +217,13 @@ namespace Tungsten {
 
         prepared.context = std::make_shared<GPContextSparseConvNoise>();
         prepared.context->noise = noise;
+        prepared.context->conditionedBirth = !state.firstScatter;
+        if (!state.firstScatter) {
+            prepared.context->birthValue = state.lastVal;
+            // conditioning() consumes floats, including after a hybrid hit.
+            prepared.context->birthGradient = Vec3d(Vec3f(state.lastAniso));
+        }
+        prepared.context->birthRayInfo = state.info;
         auto &request = prepared.request;
         request.purpose = GpRaySegmentRequest::Purpose::Path;
         request.medium = this;
@@ -232,6 +239,27 @@ namespace Tungsten {
         request.firstScatter = state.firstScatter;
         request.previousValue = state.firstScatter ? 0.0f : state.lastVal;
         request.previousGradient = state.firstScatter ? Vec3f(0.0f) : Vec3f(state.lastAniso);
+        if (state.distanceDiagnostic && state.distanceDiagnostic->collectFlight) {
+            using J = nlohmann::json;
+            auto vector = [](const auto &v) { return J::array({v.x(),v.y(),v.z()}); };
+            double value = prepared.context->birthValue;
+            Vec3d gradient = prepared.context->birthGradient;
+            if (!prepared.context->conditionedBirth) {
+                // Observe a copy of the same realization: never touch the
+                // transport RNG or the live realization's mutable cache.
+                auto observation = prepared.context->noise;
+                UniformSampler diagnosticSampler;
+                int id;
+                value = observation.evaluateValue(ray.pos(),0,ray.dir(),state.info,diagnosticSampler,id);
+                gradient = Vec3d(observation.evaluateGradient(ray.pos(),0,ray.dir(),state.info,diagnosticSampler));
+            }
+            state.distanceDiagnostic->flight = {
+                {"model","sparse_conv_noise"},{"birth_position",vector(ray.pos())},
+                {"birth_value",value},{"birth_gradient",vector(gradient)},
+                {"conditioned_birth",prepared.context->conditionedBirth},
+                {"origin",vector(ray.pos())},{"direction",vector(ray.dir())},
+                {"age_at_origin",0.0},{"near_t",ray.nearT()},{"max_distance",ray.farT()}};
+        }
     }
 
     bool SparseConvolutionNoiseMedium::finishGpisSegment(const Ray &ray, MediumState &state,

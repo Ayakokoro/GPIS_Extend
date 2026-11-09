@@ -66,9 +66,69 @@ inline void midpointReuseChecks()
     check(counted->beginDerivativeRequests>0,"birth certificate still requests its beginning derivative");
 }
 
+inline void farTailBoundChecks()
+{
+    int checked=0;
+    for(int shape=0;shape<3;++shape) for(double scale:{1e-4,1.0,1e4})
+        for(double sigma:{0.02,1.0}) for(double f0:{0.0,0.3})
+        for(double slope:{-4.0,0.02,6.0}) for(double cutoff:{2.0,4.0,5.0,16.0}) {
+            if(f0==0 && slope<=0) continue;
+            auto f=field();
+            if(shape==0) f.mean=std::make_shared<cg::ConstantMean>(0);
+            if(shape==2) f.mean=std::make_shared<cg::SphereMean>(V::Zero(),1);
+            f.kernel=cg::CovarianceKernel(sigma,scale*f.kernel.precision());
+            f.activeDomain={V::Constant(-1e6),V::Constant(1e6)};
+            cg::FlightState birth;
+            birth.birthPosition=V(0.2,-0.1,2);
+            birth.direction=V(0.2,0.1,1).normalized();
+            const double ell=1/std::sqrt(birth.direction.dot(f.kernel.precision()*birth.direction));
+            birth.birthValue=f0*sigma;
+            birth.birthGradient=birth.direction*slope*sigma/ell;
+            const cg::ConditionalFlightKernel exact(f,birth,true),tail(f,birth,true,cutoff);
+            for(double offset:{-0.01,0.0,0.01,2.0,8.0}) {
+                const double lo=(cutoff+offset)*ell,hi=lo+0.4*ell;
+                const double bound=tail.intervalMajorant(lo,hi);
+                if(offset<0) close(bound,exact.intervalMajorant(lo,hi),0,"cutoff-straddling interval retains original bound");
+                // Parent certificates must remain available even in the tail.
+                const double parent=std::min(bound,exact.intervalMajorant(lo,hi));
+                close(tail.intervalMajorant(lo,hi,4,parent),parent,0,"tail keeps a tighter inherited certificate");
+                for(int j=0;j<=24;++j) {
+                    const double t=lo+(hi-lo)*j/24;
+                    const auto h=exact.evaluate(t).hazard.value;
+                    check(h<=bound*(1+1e-10),"cached SE tail covers the exact conditional hazard");
+                    close(tail.evaluate(t).hazard.value,h,0,"tail option preserves pointwise extinction");
+                    ++checked;
+                }
+            }
+            const auto g=tail.hitStatistics((cutoff+0.5)*ell).collisionGradient;
+            const auto ref=exact.hitStatistics((cutoff+0.5)*ell).collisionGradient;
+            check(g.mean==ref.mean && g.covariance==ref.covariance,"tail option preserves collision gradient");
+        }
+    // A zero-mean tangent ray with an outgoing observed slope is a concrete
+    // counterexample to dropping the residual outright: h(4)>1/pi.
+    auto f=field();f.mean=std::make_shared<cg::ConstantMean>(0);
+    f.kernel=cg::CovarianceKernel(1,M::Identity());
+    cg::FlightState birth;birth.birthGradient=V::UnitZ();
+    const cg::ConditionalFlightKernel exact(f,birth),tail(f,birth,true,4);
+    close(exact.evaluate(4).hazard.value,0.3199744966067,1e-12,"far conditional hazard counterexample fixture");
+    check(tail.intervalMajorant(4.00001,4.1)>1/cg::kPi,"tail margin is not discarded at four lengths");
+    auto counted=std::make_shared<CountingBoundMean>(f.mean);counted->cacheMidpoint=false;f.mean=counted;
+    const cg::ConditionalFlightKernel cached(f,birth,true,4);
+    counted->pointQueries=0;
+    cached.intervalMajorant(4.1,4.3);cached.intervalMajorant(6,6.5);
+    check(counted->pointQueries==0,"tail certificate does not request an extra SDF midpoint");
+    for(double invalid:{-1.0,1.99,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+        bool rejected=false;
+        try { cg::ConditionalFlightKernel bad(f,birth,false,invalid); } catch(const cg::NumericError &) { rejected=true; }
+        check(rejected,"direct kernel rejects invalid tail cutoff");
+    }
+    std::cout<<"far SE tail: "<<checked<<" coverage points, cutoff crossing, anisotropic scales and gradient parity passed\n";
+}
+
 inline void boundChecks()
 {
     midpointReuseChecks();
+    farTailBoundChecks();
     namespace b = cg::MajorantBounds;
     // Exact binary fixtures: endpoints, an interior vertex, a boundary vertex,
     // a linear/constant polynomial, and a very small quadratic coefficient.
@@ -162,7 +222,7 @@ inline void boundChecks()
     }
 
     int flights=0,intervals=0;
-    for(int shape=0;shape<3;++shape) for(double scale:{1e-4,1.0,1e4})
+    for(bool normalizedOnly:{false,true}) for(int shape=0;shape<3;++shape) for(double scale:{1e-4,1.0,1e4})
         for(double sigma:{0.02,1.0}) for(double f0:{0.0,0.3}) for(double slope:{-0.5,0.02,1.5}) {
             if(f0==0 && slope<=0) continue;
             auto f=field();
@@ -177,7 +237,14 @@ inline void boundChecks()
             birth.birthValue=f0*sigma;
             birth.birthGradient=V(0.1,-0.2,0.3)*sigma/ell;
             birth.birthGradient+=birth.direction*(slope*sigma/ell-birth.direction.dot(birth.birthGradient));
-            cg::ConditionalFlightKernel flight(f,birth);
+            cg::ConditionalFlightKernel flight(f,birth,normalizedOnly);
+            const cg::ConditionalFlightKernel dual(f,birth);
+            if(normalizedOnly) {
+                const auto actual=flight.hitStatistics(ell).collisionGradient;
+                const auto original=dual.hitStatistics(ell).collisionGradient;
+                check(actual.mean==original.mean && actual.covariance==original.covariance,
+                    "bound choice preserves the conditioned collision gradient");
+            }
             const auto birthBound=flight.birthMajorant(3*ell);
             for(double fraction:{1e-6,0.001,0.1,0.5,1.0})
                 check(flight.evaluate(birthBound.split*fraction).hazard.value<=birthBound.maximum*(1+1e-10),
@@ -188,11 +255,17 @@ inline void boundChecks()
                 const double bound=flight.intervalMajorant(lo,hi);
                 const double cheap=flight.cheapIntervalMajorant(lo,hi);
                 const double adaptive=flight.intervalMajorant(lo,hi,4);
+                if(normalizedOnly) {
+                    check(bound>=dual.intervalMajorant(lo,hi) && cheap>=dual.cheapIntervalMajorant(lo,hi),
+                        "single normalized certificate never tightens the dual certificate");
+                }
                 check(bound<=adaptive && adaptive<=cheap,"adaptive majorant lies between fine and cheap bounds");
                 const double adjacent=hi<=birthBound.smoothEnd ?
                     flight.birthAdjacentMajorant(lo,hi,birthBound):bound;
                 for(int j=0;j<=24;++j) {
                     const double hazard=flight.evaluate(lo+(hi-lo)*j/24).hazard.value;
+                    close(hazard,dual.evaluate(lo+(hi-lo)*j/24).hazard.value,0,
+                        "bound choice preserves pointwise conditioned extinction");
                     check(hazard<=std::min(bound,adjacent)*(1+1e-10),
                         "normalized interval bounds cover the conditional hazard");
                     check(hazard<=cheap*(1+1e-10),"cheap interval bounds cover the conditional hazard");

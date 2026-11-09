@@ -7,6 +7,10 @@ enum class ConditionalMajorantMode { Adaptive, TwoConstants };
 struct ConditionalTrackingSettings {
     ConditionalMajorantMode majorantMode = ConditionalMajorantMode::Adaptive;
     double constantBirthLength = 0.0;  // two_constants: world distance to switch; 0 uses analytic birth split
+    bool fixedStepLimit = true;       // false disables step/stepScale caps; age growth still applies
+    bool normalizedBoundOnly = false; // experimental: skip the second, moment-form upper bound
+    double farBoundStartScale = 0.0;   // 0 disables; >=2 caches a certified SE tail envelope
+    double shadowRouletteThreshold = 0.1; // classic_global shadow roulette; 0 disables
     double step = 0.0;                 // world distance; 0 selects stepScale*ell
     double stepScale = 0.5;            // multiple of the directional GP length
     double ageScale = 0.25;            // maximum step / distance from birth
@@ -14,6 +18,8 @@ struct ConditionalTrackingSettings {
     double tightenExpectedEvents = 4.0;// run expensive bound above this; 0 always
     int macrocellSize = 0;             // 0 disables; power-of-two cell width, 2..64
     double macrocellMaxExpectedEvents = 1.0; // otherwise descend to fine cells
+    double macrocellFarStartScale = 4.0; // distance from conditioning birth / directional ell
+    double macrocellFarMaxExpectedEvents = 0.0; // 0 disables far-field relaxation
     void validate() const;
 };
 

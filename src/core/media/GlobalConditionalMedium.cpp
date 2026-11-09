@@ -4,6 +4,7 @@
 #include "math/conditional/transport/CollisionGradientSampler.h"
 #include "math/conditional/transport/DirectionalGradient.h"
 #include "math/ConditionalProfile.hpp"
+#include "math/FirstPassageGradient.hpp"
 #include "io/JsonObject.hpp"
 #include "phasefunctions/ObservedNormalScattering.hpp"
 #include <iostream>
@@ -14,6 +15,18 @@ namespace {
 Eigen::Vector3d eigen(const Vec3f &p) { return {p.x(),p.y(),p.z()}; }
 Eigen::Vector3d eigen(const Vec3d &p) { return {p.x(),p.y(),p.z()}; }
 Vec3f vec(const Eigen::Vector3d &p) { return Vec3f(float(p.x()),float(p.y()),float(p.z())); }
+void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathContext &c,const Ray &ray) {
+    if (!diagnostic || !diagnostic->collectFlight) return;
+    using J = nlohmann::json;
+    auto vector = [](const auto &v) { return J::array({v.x(),v.y(),v.z()}); };
+    const auto w=eigen(ray.dir()).normalized();
+    diagnostic->flight = {{"model","global_conditional"},
+        {"birth_position",vector(c.birth.birthPosition)},{"birth_value",c.birth.birthValue},
+        {"birth_gradient",vector(c.birth.birthGradient)},{"conditioned_birth",true},
+        {"origin",vector(c.position)},{"direction",vector(w)},
+        {"age_at_origin",(c.position-c.birth.birthPosition).dot(w)},
+        {"near_t",ray.nearT()},{"max_distance",double(ray.farT())*eigen(ray.dir()).norm()}};
+}
 class LinearSdf final : public cg::MeanField {
     Eigen::Vector3d _ref,_g;
     double _minimum;
@@ -62,17 +75,26 @@ std::shared_ptr<const ConditionalPathContext> successor(const ConditionalEventCo
 // reflection direction and unnormalized collision gradient.
 class ConditionalPhase : public PhaseFunction {
     const GlobalConditionalMedium &_medium;
+    bool _delta;
     const ConditionalEventContext &event(const MediumSample &s) const {
         const auto *e=dynamic_cast<const ConditionalEventContext *>(s.eventContext.get());
         if(!e || e->owner!=&_medium) throw cg::NumericError(cg::NumericStatus::InvalidInput,"missing conditional collision state");
         return *e;
     }
 public:
-    explicit ConditionalPhase(const GlobalConditionalMedium &m):_medium(m) {}
+    explicit ConditionalPhase(const GlobalConditionalMedium &m,bool delta=false):_medium(m),_delta(delta) {}
+    bool isSpecular() const override { return _delta && !_medium.hasDiffuseMicroMaterial(); }
     float pdf(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
         if(_medium.hasDiffuseMicroMaterial()) return observedCosinePdf(wo,s);
         cg::Profile::Scope profile(cg::Profile::Stage::PhasePdf,cg::Profile::Domain::Phase);
         const auto &e=event(s);
+        if(e.correctedGradient) {
+            if(_delta) return 0;
+            const float result=float(e.correctedGradient->phasePdf(eigen(wo)));
+            if(!(result>=0) || !std::isfinite(result))
+                throw cg::NumericError(cg::NumericStatus::NeedHigherPrecision,"conditional FP phase PDF overflow");
+            return result;
+        }
         try {
             const float result=float(ClassicGlobal::GaussianNdf(e.gradient.covariance).phasePdf(e.gradient.mean,eigen(wi).normalized(),eigen(wo).normalized()));
             if(!(result>=0) || !std::isfinite(result))
@@ -99,6 +121,12 @@ public:
             state=successor(e,eigen(s.aniso),wo,s.p);
             return value;
         }
+        if(e.correctedGradient) {
+            const auto g=e.correctedGradient->gradientForDirection(eigen(wo));
+            if(!g) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional FP connection lost gradient support");
+            state=successor(e,*g,wo,s.p);
+            return value;
+        }
         const Eigen::Vector3d h=(eigen(wo).normalized()-eigen(wi).normalized()).normalized();
         cg::Random rng(sampler);
         const Eigen::Vector3d g=cg::sampleDirectionalGradient(e.gradient,h,rng);
@@ -116,13 +144,18 @@ public:
             return r.pdf>0 && eigen(r.w).dot(eigen(s.aniso))>0;
         }
         const Eigen::Vector3d w=eigen(wi).normalized();
-        const Eigen::Vector3d g=cg::sampleFluxWeightedGradient(e.gradient,w,rng);
+        const Eigen::Vector3d g=e.correctedGradient ? e.correctedGradient->sample(rng) :
+            cg::sampleFluxWeightedGradient(e.gradient,w,rng);
         const Eigen::Vector3d n=g.normalized();
-        r.w=vec(w-2*w.dot(n)*n).normalized();
+        r.w=vec(e.correctedGradient ? Eigen::Vector3d(w-(2*e.derivative/g.squaredNorm())*g) :
+                                    Eigen::Vector3d(w-2*w.dot(n)*n)).normalized();
         if(!(eigen(r.w).dot(g)>0))
             throw cg::NumericError(cg::NumericStatus::NeedHigherPrecision,"reflected float direction lost positive-side support");
-        r.weight=_medium.reflectance(std::abs(w.dot(n)));
-        r.pdf=pdf(wi,r.w,s);
+        r.weight=_medium.reflectance(e.correctedGradient ? -e.derivative/g.norm() : std::abs(w.dot(n)));
+        // Use the sampled gradient before rounding the outgoing ray to float.
+        r.pdf=e.correctedGradient ? (_delta ? 1. : e.correctedGradient->phasePdfForGradient(g)) : pdf(wi,r.w,s);
+        if(e.correctedGradient && (!(r.pdf>0) || !std::isfinite(r.pdf)))
+            throw cg::NumericError(cg::NumericStatus::NeedHigherPrecision,"invalid conditional sampled phase PDF");
         r.pathContext=successor(e,g,r.w,s.p);
         return true;
     }
@@ -130,20 +163,38 @@ public:
 }
 GlobalConditionalMedium::GlobalConditionalMedium() {
     _phaseFunction=std::make_shared<ConditionalPhase>(*this);
+    _deltaPhase=std::make_shared<ConditionalPhase>(*this,true);
 }
 void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     ClassicGlobalMedium::fromJson(value,scene);
+<<<<<<< HEAD
     std::string surfacePolicy="retain_endpoint";
     value.getField("non_gp_surface_policy",surfacePolicy);
     if(surfacePolicy=="retain_endpoint") _nonGpSurfacePolicy=ConditionalNonGpSurfacePolicy::RetainEndpoint;
     else if(surfacePolicy=="restart_exterior") _nonGpSurfacePolicy=ConditionalNonGpSurfacePolicy::RestartExterior;
     else value.parseError("non_gp_surface_policy must be retain_endpoint or restart_exterior");
+=======
+    _fpGradient=false; _bridgeCorrection=true;
+    _anchorSelection=FirstPassageGradient::AnchorSelection::Fixed5Snr;
+    if(auto settings=value["fp_gradient"]) {
+        settings.getField("enabled",_fpGradient);
+        settings.getField("bridge_correction",_bridgeCorrection);
+        std::string selection="fixed5_snr";
+        settings.getField("anchor_selection",selection);
+        try { _anchorSelection=FirstPassageGradient::parseAnchorSelection(selection); }
+        catch(const std::invalid_argument &e) { settings.parseError(e.what()); }
+    }
+>>>>>>> d4b61d14429005304c384839e4cca24acb319986
     _tracking=cg::ConditionalTrackingSettings{};
     std::string majorantMode="adaptive";
     value.getField("tracking_majorant",majorantMode);
     if(majorantMode=="two_constants") _tracking.majorantMode=cg::ConditionalMajorantMode::TwoConstants;
     else if(majorantMode!="adaptive") value.parseError("tracking_majorant must be adaptive or two_constants");
     value.getField("tracking_constant_birth_length",_tracking.constantBirthLength);
+    value.getField("tracking_fixed_step_limit",_tracking.fixedStepLimit);
+    value.getField("tracking_normalized_bound_only",_tracking.normalizedBoundOnly);
+    value.getField("tracking_far_bound_start_scale",_tracking.farBoundStartScale);
+    value.getField("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold);
     _tracking.step=_trackingStep;
     value.getField("tracking_step_scale",_tracking.stepScale);
     value.getField("tracking_age_scale",_tracking.ageScale);
@@ -151,6 +202,8 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_tighten_expected_events",_tracking.tightenExpectedEvents);
     value.getField("tracking_macrocell_size",_tracking.macrocellSize);
     value.getField("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents);
+    value.getField("tracking_macrocell_far_start_scale",_tracking.macrocellFarStartScale);
+    value.getField("tracking_macrocell_far_max_expected_events",_tracking.macrocellFarMaxExpectedEvents);
     try { _tracking.validate(); }
     catch(const cg::NumericError &error) { value.parseError(error.what()); }
 }
@@ -159,18 +212,29 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value["type"].SetString("global_conditional",allocator);
     value.AddMember("non_gp_surface_policy",rapidjson::Value(
         _nonGpSurfacePolicy==ConditionalNonGpSurfacePolicy::RetainEndpoint ? "retain_endpoint" : "restart_exterior",allocator),allocator);
+    value.AddMember("fp_gradient",rapidjson::Value(JsonObject{allocator,"enabled",_fpGradient,
+        "bridge_correction",_bridgeCorrection,
+        "anchor_selection",FirstPassageGradient::anchorSelectionName(_anchorSelection)}),allocator);
     value.AddMember("tracking_majorant",rapidjson::Value(
         _tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants ? "two_constants" : "adaptive",allocator),allocator);
     value.AddMember("tracking_constant_birth_length",_tracking.constantBirthLength,allocator);
+    value.AddMember("tracking_fixed_step_limit",_tracking.fixedStepLimit,allocator);
+    value.AddMember("tracking_normalized_bound_only",_tracking.normalizedBoundOnly,allocator);
+    value.AddMember("tracking_far_bound_start_scale",_tracking.farBoundStartScale,allocator);
+    value.AddMember("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold,allocator);
     value.AddMember("tracking_step_scale",_tracking.stepScale,allocator);
     value.AddMember("tracking_age_scale",_tracking.ageScale,allocator);
     value.AddMember("tracking_max_expected_events",_tracking.maxExpectedEvents,allocator);
     value.AddMember("tracking_tighten_expected_events",_tracking.tightenExpectedEvents,allocator);
     value.AddMember("tracking_macrocell_size",_tracking.macrocellSize,allocator);
     value.AddMember("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents,allocator);
+    value.AddMember("tracking_macrocell_far_start_scale",_tracking.macrocellFarStartScale,allocator);
+    value.AddMember("tracking_macrocell_far_max_expected_events",_tracking.macrocellFarMaxExpectedEvents,allocator);
     return value;
 }
 void GlobalConditionalMedium::prepareForRender() {
+    _correctedCollisions.store(0,std::memory_order_relaxed);
+    _gradientFallbacks.store(0,std::memory_order_relaxed);
     _discardedSurfacePaths.store(0,std::memory_order_relaxed);
     _discardedSurfaceConnections.store(0,std::memory_order_relaxed);
     if(!dynamic_cast<SquaredExponentialCovariance *>(_covariance.get()))
@@ -197,6 +261,9 @@ void GlobalConditionalMedium::prepareForRender() {
         throw std::runtime_error("tracking_majorant two_constants requires a clamped VDB SDF or constant mean with global bounds");
 }
 void GlobalConditionalMedium::teardownAfterRender() {
+    if(_fpGradient)
+        std::cout<<"GPIS conditional FP-gradient statistics: {\"collisions\":"<<correctedCollisions()
+                 <<",\"sampling_fallbacks\":"<<gradientFallbacks()<<"}\n";
     std::cout<<"GPIS conditional discarded surface births: {\"paths\":"<<discardedSurfacePaths()
              <<",\"shadow_connections\":"<<discardedSurfaceConnections()<<"}\n";
     ClassicGlobalMedium::teardownAfterRender();
@@ -242,6 +309,7 @@ try
     if(!std::isfinite(ray.farT()) || ray.farT()<0)
         throw cg::NumericError(cg::NumericStatus::InvalidInput,"global_conditional needs a finite boundary-enclosed segment");
     const auto c=context(sampler,ray,state);
+    observeBirth(state.distanceDiagnostic,*c,ray);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     // Geometry nearT suppresses self-intersections only. It must not cut out
@@ -249,6 +317,8 @@ try
     cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking);
     cg::Random rng(sampler); double t;
     const bool escaped=segment.track(rng,true,t)!=0;
+    if (state.distanceDiagnostic && state.distanceDiagnostic->collectFlight)
+        state.distanceDiagnostic->flight["sampled_distance"] = t;
     const Eigen::Vector3d p=c->position+t*w;
     sample.t=float(t/speed); sample.continuedT=sample.t;
     sample.p=escaped ? ray.hitpoint():vec(p);
@@ -269,10 +339,32 @@ try
         next->position=next->birth.birthPosition;
     } else {
         auto e=std::make_shared<ConditionalEventContext>();
-        e->owner=this; e->position=p; e->gradient=segment.gradient(t);
+        e->owner=this; e->position=p;
+        if(_fpGradient) {
+            // Tracking has already accepted this collision. Keep its conditional
+            // hazard, distance and weight; replace only the normalized gradient law.
+            const auto &birth=c->birth;
+            const double age=(c->position-birth.birthPosition).dot(w)+t;
+            const double gamma=std::sqrt(w.dot(_field.kernel.metric()*w));
+            const auto startMean=_field.mean->evaluate(birth.birthPosition);
+            const auto endMean=_field.mean->evaluate(p);
+            const FirstPassageGradient::Input input{_field.kernel.sigma(),gamma,age,
+                birth.birthValue,w.dot(birth.birthGradient),startMean.value,
+                w.dot(startMean.gradient),w.dot(endMean.gradient),
+                [&](double s) { return _field.mean->evaluate(birth.birthPosition+s*w).value; }};
+            const FirstPassageGradient::Law law(input,_bridgeCorrection,_anchorSelection);
+            bool fallback=false;
+            e->derivative=law.sample(rng,&fallback);
+            e->correctedGradient.emplace(_field.kernel,w,gamma*age,e->derivative,
+                endMean.gradient,startMean.gradient,birth.birthGradient);
+            if(e->correctedGradient->isDelta()) sample.phase=_deltaPhase.get();
+            _correctedCollisions.fetch_add(1,std::memory_order_relaxed);
+            if(fallback) _gradientFallbacks.fetch_add(1,std::memory_order_relaxed);
+        } else e->gradient=segment.gradient(t);
         sample.eventContext=e;
         if(hasDiffuseMicroMaterial()) {
-            const auto g=cg::sampleFluxWeightedGradient(e->gradient,w,rng);
+            const auto g=e->correctedGradient ? e->correctedGradient->sample(rng) :
+                cg::sampleFluxWeightedGradient(e->gradient,w,rng);
             sample.aniso=Vec3d(g.x(),g.y(),g.z());
         }
         state.advance();
@@ -293,6 +385,7 @@ try
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Shadow);
     if(!state) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional transmittance requires path state");
     const auto c=context(sampler,ray,*state);
+    observeBirth(state->distanceDiagnostic,*c,ray);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking);

@@ -228,6 +228,24 @@ if (OpenVDB_FOUND AND OpenEXR_FOUND AND TBB_FOUND)
 endif()
 
 option(TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS "Build SDF-only classic_global tests" OFF)
+option(TUNGSTEN_BUILD_LOCAL_ELLIPSOID_TESTS "Build pointwise local Poisson ellipsoid tests" OFF)
+if (TUNGSTEN_BUILD_LOCAL_ELLIPSOID_TESTS)
+    enable_testing()
+    add_executable(local_ellipsoid_test tests/LocalEllipsoidTest.cpp)
+    target_link_libraries(local_ellipsoid_test PRIVATE ${core_libs})
+    add_test(NAME local_ellipsoid COMMAND local_ellipsoid_test "${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-test")
+    set_tests_properties(local_ellipsoid PROPERTIES FIXTURES_SETUP local_ellipsoid_field)
+    foreach(mode nee no_nee wavefront surface_only volume_only
+                 gamma_nee gamma_no_nee gamma_wavefront gamma_surface_only gamma_volume_only
+                 gaussian_nee gaussian_no_nee gaussian_wavefront)
+        add_test(NAME local_ellipsoid_${mode}_render COMMAND ${CMAKE_COMMAND}
+            "-DRENDERER=$<TARGET_FILE:tungsten>" "-DCHECKER=$<TARGET_FILE:local_ellipsoid_test>"
+            "-DSCENE=${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-test/scene.json"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/local-ellipsoid-${mode}-render"
+            "-DMODE=${mode}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/LocalEllipsoidRenderSmoke.cmake")
+        set_tests_properties(local_ellipsoid_${mode}_render PROPERTIES FIXTURES_REQUIRED local_ellipsoid_field)
+    endforeach()
+endif()
 option(TUNGSTEN_BUILD_GLOBAL_CONDITIONAL_TESTS "Build SDF-only conditional GP transport tests" OFF)
 if (TUNGSTEN_BUILD_GLOBAL_CONDITIONAL_TESTS)
     enable_testing()
@@ -288,6 +306,98 @@ if (TUNGSTEN_BUILD_CLASSIC_GLOBAL_TESTS)
         "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global/scene.json"
         "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/classic-global-render-test"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalRenderSmoke.cmake")
+endif()
+
+option(TUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS "Build fixed-history GP transport checks" OFF)
+if (TUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS)
+    enable_testing()
+    add_executable(sparse_history_gpis_test tests/SparseHistoryGpisTest.cpp)
+    target_link_libraries(sparse_history_gpis_test PRIVATE ${core_libs})
+    foreach(mode gaussian local flight gradient medium grid)
+        add_test(NAME sparse_history_gpis_${mode} COMMAND sparse_history_gpis_test ${mode})
+    endforeach()
+    add_test(NAME sparse_history_gpis_lut COMMAND sparse_history_gpis_test lut
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/gpis/bivariate-normal-cdf-v1.bin")
+    add_test(NAME sparse_history_gpis_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:sparse_history_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/sparse-history-gpis/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/sparse-history-gpis-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SparseHistoryGpisRenderSmoke.cmake")
+    add_test(NAME sparse_history_gpis_lut_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:sparse_history_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/sparse-history-gpis/scene.json"
+        "-DCDF_TABLE=${CMAKE_CURRENT_SOURCE_DIR}/data/gpis/bivariate-normal-cdf-v1.bin"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/sparse-history-gpis-lut-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SparseHistoryGpisRenderSmoke.cmake")
+endif()
+
+option(TUNGSTEN_BUILD_FP_GRADIENT_TESTS "Build classic and conditional transport / first-passage gradient checks" OFF)
+if (TUNGSTEN_BUILD_FP_GRADIENT_TESTS)
+    enable_testing()
+    add_executable(classic_global_fp_gradient_test tests/ClassicGlobalFpGradientTest.cpp)
+    target_link_libraries(classic_global_fp_gradient_test PRIVATE ${core_libs})
+    add_executable(global_conditional_fp_gradient_test tests/GlobalConditionalFpGradientTest.cpp)
+    target_link_libraries(global_conditional_fp_gradient_test PRIVATE ${core_libs})
+    add_executable(renewal_plus_fp_gradient_test tests/RenewalPlusFpGradientTest.cpp)
+    target_link_libraries(renewal_plus_fp_gradient_test PRIVATE ${core_libs})
+    foreach(mode transport wavefront settings)
+        add_test(NAME renewal_plus_fp_gradient_${mode} COMMAND renewal_plus_fp_gradient_test ${mode})
+    endforeach()
+    add_executable(fp_gradient_rays EXCLUDE_FROM_ALL tools/surface_compare/gradient_rays.cpp)
+    target_link_libraries(fp_gradient_rays PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    add_executable(pixel_flights EXCLUDE_FROM_ALL tools/surface_compare/pixel_flights.cpp)
+    target_link_libraries(pixel_flights PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    foreach(mode transport phase)
+        add_test(NAME global_conditional_fp_gradient_${mode} COMMAND global_conditional_fp_gradient_test ${mode})
+    endforeach()
+    foreach(mode mirror lambert conductor no_nee wavefront)
+        add_test(NAME global_conditional_fp_gradient_${mode}_render COMMAND ${CMAKE_COMMAND}
+            "-DRENDERER=$<TARGET_FILE:tungsten>" "-DCHECKER=$<TARGET_FILE:global_conditional_fp_gradient_test>"
+            "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/global-conditional-fp-gradient/scene.json"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/global-conditional-fp-gradient-${mode}-render-test"
+            "-DMODE=${mode}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/GlobalConditionalFpGradientRenderSmoke.cmake")
+    endforeach()
+    foreach(mode distribution transport phase)
+        add_test(NAME classic_global_fp_gradient_${mode} COMMAND classic_global_fp_gradient_test ${mode})
+    endforeach()
+    add_test(NAME classic_global_fp_gradient_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:classic_global_fp_gradient_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global-fp-gradient/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/classic-global-fp-gradient-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalFpGradientRenderSmoke.cmake")
+endif()
+
+option(TUNGSTEN_BUILD_SINGLE_HISTORY_GPIS_TESTS "Build fixed-bin single-history GP transport checks" OFF)
+if (TUNGSTEN_BUILD_SINGLE_HISTORY_GPIS_TESTS)
+    enable_testing()
+    add_executable(single_history_gpis_test tests/SingleHistoryGpisTest.cpp)
+    target_link_libraries(single_history_gpis_test PRIVATE ${core_libs})
+    foreach(mode local selector tracking inversion regular majorant macro pruning macro_candidates medium)
+        add_test(NAME single_history_gpis_${mode} COMMAND single_history_gpis_test ${mode})
+    endforeach()
+    add_test(NAME single_history_gpis_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:single_history_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/single-history-gpis/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/single-history-gpis-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SingleHistoryGpisRenderSmoke.cmake")
+endif()
+
+option(TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS "Build experimental empty-origin GP first-hit tests" OFF)
+if (TUNGSTEN_BUILD_FIRST_HIT_GPIS_TESTS)
+    enable_testing()
+    add_executable(first_hit_gpis_test tests/FirstHitGpisTest.cpp)
+    target_link_libraries(first_hit_gpis_test PRIVATE ${core_libs})
+    add_test(NAME first_hit_gpis COMMAND first_hit_gpis_test)
+    add_test(NAME first_hit_gpis_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:first_hit_gpis_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/first-hit-gpis/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/first-hit-gpis-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/FirstHitGpisRenderSmoke.cmake")
 endif()
 
 if (TUNGSTEN_ENABLE_CUDA)

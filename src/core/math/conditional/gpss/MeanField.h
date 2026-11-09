@@ -40,11 +40,24 @@ class MeanRayCursor {
 public:
     struct Statistics {
         std::size_t cellBuilds=0, pointFallbacks=0, boundFallbacks=0, coarseQueries=0;
+        std::size_t macroBoundaryQueries=0;
     };
     virtual ~MeanRayCursor() = default;
+    // Optional exact state copy for independent point queries from the same
+    // initialized origin. An absent implementation requests reconstruction.
+    virtual std::unique_ptr<MeanRayCursor> clone() const { return nullptr; }
     virtual double nextBoundary(double begin,double end) = 0;
+    // Optional geometric macro traversal, independent of bound certificates.
+    // Clips end to a macro face, clamp boundary, or the requested end without
+    // preparing fine cells or reading field values. Width is in grid cells;
+    // this query does not require precomputed macrocell value bounds.
+    virtual bool nextMacroBoundary(double, double &, int) { return false; }
     virtual MeanRaySample sample(double t) = 0;
     virtual MeanJet evaluate(double t) = 0;
+    // Append every interior stationary position of the represented mean.
+    // Returns false when this cursor cannot enumerate all roots. This is a
+    // geometry query: its output is independent of integration sample nodes.
+    virtual bool appendStationaryPoints(double, double, std::vector<double>&) { return false; }
     // Optional error for cancellation-safe midpoint enclosures near birth.
     virtual double valueDifference(double t,double *error=nullptr) = 0;
     virtual MeanRayBounds rayBounds(double begin,double end,
@@ -127,6 +140,8 @@ class SphereMean final : public MeanField {
 public:
     const char* typeName() const override { return "sphere"; }
     SphereMean(Point3 center, double radius);
+    const Point3 &center() const { return center_; }
+    double radius() const { return radius_; }
     MeanJet evaluate(const Point3& x) const override;
     double valueDifference(const Point3& x, const Vector3& displacement) const override;
     BoundsSummary bounds(const Bounds3& domain) const override;

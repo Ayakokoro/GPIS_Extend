@@ -45,6 +45,74 @@ and analytic gradient through `ProceduralMean`; neither uses a separate knob
 formula. Existing classic images may change slightly because its gradient
 previously used a fixed 0.001 finite difference.
 
+## Experimental first-passage gradient correction
+
+Enable the single-anchor gradient approximation while keeping
+conditional transport by adding this to a `global_conditional` medium:
+
+```json
+"fp_gradient": {"enabled": true, "bridge_correction": true, "anchor_selection": "fixed5_snr"}
+```
+
+The switch defaults to false. A self-contained sphere scene is available at
+[`data/example-scenes/global-conditional-fp-gradient/scene.json`](../data/example-scenes/global-conditional-fp-gradient/scene.json).
+This uses the same `FirstPassageGradient::Law` as `classic_global_fp_gradient`,
+including its direct single-point Gaussian positivity factor. The default
+`fixed5_snr` selector evaluates exactly five fixed midpoints in the last
+`min(t,1.5/gamma)` of the flight, using the actual SDF and exact SE covariance.
+It selects the smallest `p(s)+q(s)*u0` at the uncorrected negative-flux mode
+and freezes that one anchor for gradient sampling. There is no refinement.
+Set `anchor_selection` to `hermite` to reproduce the original document selector.
+Existing scenes with correction enabled and no selector now use `fixed5_snr`.
+It requires the same stationary SE covariance as
+ordinary `global_conditional` and supports mirror, conductor and Lambert materials.
+
+Collision tracking runs first with the existing conditional hazard and weight.
+At the accepted location, the gradient sampler receives the actual latest birth
+value, full gradient, double-precision birth/hit positions, physical flight
+distance and directional covariance scale. It samples the inward axial derivative
+from the corrected law, then uses the exact SE transverse conditional Gaussian.
+No additional crossing-flux factor is applied to that distribution.
+
+The axial observation is shared by continuation and direct-light sampling.
+Mirror/conductor continuation samples the transverse gradient and evaluates the
+corresponding fixed-axial phase PDF; a light connection reconstructs the gradient
+consistent with its outgoing direction. Both produce an ordinary
+`ConditionalPathContext` with a zero field value and the full outgoing gradient.
+Lambert scattering shares the full sampled gradient across both strategies.
+Geometry endpoint renewal and the existing unsupported-surface-birth policy
+continue to apply.
+
+`sampleDistance` and `transmittance` retain the same conditional transport law.
+For an identical incoming observation and RNG state, the accepted distance or
+shadow weight is unchanged. Subsequent paths generally change because the
+corrected collision gradient becomes their new conditioning observation.
+This is an experimental combination of conditional-hazard transport and an
+approximate first-passage gradient law; it does not implement an exact
+first-passage distance distribution or insert the gradient normalizer into the
+extinction coefficient.
+
+Set `bridge_correction` to false with `enabled` true for the uncorrected Rice
+axial law using the same latent-gradient/MIS construction. Its marginalized
+gradient distribution matches the ordinary conditional collision law, but it
+uses different random draws and a different MIS conditioning strategy.
+Set `enabled` to false to recover the original path, phase and random sequence.
+
+Build/run the focused integration checks (configure with
+`TUNGSTEN_BUILD_FP_GRADIENT_TESTS=ON`):
+
+```powershell
+cmake --build build --config Release --target tungsten global_conditional_fp_gradient_test --parallel 4
+ctest --test-dir build -C Release -R global_conditional_fp_gradient --output-on-failure
+```
+
+The tests check unchanged distance/shadow tracking for fixed incoming states,
+birth/flight inputs against the production gradient law, endpoint renewal,
+disabled-mode identity, phase normalization and outgoing conditional states for
+all three materials. Render checks cover those materials, NEE disabled, and
+wavefront execution. Teardown reports corrected collision and sampling fallback
+counts separately from the existing discarded-surface counters.
+
 ## Baking the knob mean
 
 `bake_sdf_mean` samples the same `ProceduralMean::evaluateJet` used by the
@@ -416,9 +484,11 @@ This samples the same piecewise-majorant Poisson process while avoiding a
 random draw and logarithm for every empty interval. Random-number consumption,
 and consequently individual rendered pixels, can differ from earlier builds.
 
-The medium exposes seven tracking settings directly in its JSON object:
+The medium exposes adaptive tracking settings directly in its JSON object:
 
 ```json
+"tracking_shadow_roulette_threshold": 0.1,
+"tracking_fixed_step_limit": true,
 "tracking_step": 0.0,
 "tracking_step_scale": 0.5,
 "tracking_age_scale": 0.25,
@@ -429,6 +499,17 @@ The medium exposes seven tracking settings directly in its JSON object:
 ```
 
 These are the defaults; individual scene presets may override them.
+`tracking_shadow_roulette_threshold` applies only to shadow ratio tracking.
+After a candidate reduces the weight to `w < threshold`, the estimator survives
+with probability `w/threshold`, and a survivor's weight becomes `threshold`.
+The default `0.1` matches `classic_global`. Zero disables roulette for comparison;
+the accepted range is `[0,1]`. Zero weights still terminate immediately.
+Roulette preserves the expected transmittance but adds variance and changes
+random-number consumption. Collision tracking, hazards, bounds and collision
+gradients are unchanged. Instrumented builds report `shadow_roulette_tests`,
+`shadow_roulette_terminated` and `shadow_roulette_survived` separately from
+`zero_weight` exits.
+
 `tracking_step > 0` sets the ordinary interval length cap in world units.
 At `tracking_step == 0`, the cap is
 `tracking_step_scale / sqrt(w^T P w)`, using the normalized travel direction.
@@ -436,6 +517,124 @@ An explicit positive step overrides the scale setting. For the isotropic
 shaderball with length scale `0.02`, scale values `0.5`, `1` and `2` give
 ordinary caps `0.01`, `0.02` and `0.04`; alternatively set `tracking_step`
 directly to one of these world distances.
+
+Set `tracking_fixed_step_limit` to `false` to disable both the absolute and
+kernel-scale caps. The age-dependent limit still applies: outside the birth
+interval, lengths grow as `tracking_age_scale * distance_from_birth`, clipped
+to the remaining segment and the accepted macrocell or fine-cell boundary.
+The original birth distance is retained across straight continuations.
+Event-count refinement and the certified majorant checks remain active.
+Setting `tracking_step` to zero alone does not disable the cap. The switch
+defaults to `true` and has no effect in `tracking_majorant: "two_constants"`.
+
+`tracking_normalized_bound_only: true` is an experimental bound-cost option.
+It uses only the standardized moment upper bound, skipping the original
+moment-form bound and its dedicated slope-standard-deviation conversion.
+The default is `false`, which takes the minimum of both valid bounds.
+Both fine and macrocell intervals, including Taylor-adjacent intervals, use
+the choice; the initial birth envelope, pointwise conditional extinction,
+gradient distribution and observation renewal are unchanged. A single bound
+can be looser, affecting candidate counts and random-number consumption.
+The option is shared by collision and shadow tracking. It does not alter the
+separate global tail formula in `two_constants` mode.
+
+The initial single-bound experiment is recorded in
+`outputs/single-bound-experiment-20261105/comparison.html`. On the shaderball
+at 128x128 / 8 spp, four interleaved ordinary-build runs per case gave median
+times of 10.775 s (dual) and 10.375 s (normalized only), a 3.71% reduction.
+With 32-cell macrocells, far threshold 64 and no fixed step cap, diagnostic
+counts changed by +0.77% for total candidates, -49.77% for bound flux calls
+and -33.87% for bound CDF calls. These are one-scene pilot results; the option
+remains opt-in. Coverage and survival-law checks run both bound choices.
+
+The 512x512 / 16 spp follow-up used the same ordinary binary, fixed seed and
+eight threads (affinity 0x5555), in dual/single/single/dual order. Dual-bound
+times were 480.92 and 494.58 s; single-bound times were 434.76 and 491.54 s.
+The medians were 487.75 and 463.15 s (5.04% less wall time), but paired savings
+were 9.60% and 0.61%. Process CPU-time medians differed by only 0.85%, so these
+two repeats do not establish a stable 5% gain. Repeated images matched exactly
+within each configuration, and the dual result matched the previous uncapped
+512 reference. The main measurements contain no profiling instrumentation;
+operation counts in the report remain the separate 128-square measurements.
+
+`tracking_far_bound_start_scale` is an independent experimental SE-tail
+certificate. Zero (the default) disables it; positive values must be at least
+2, measured in the directional correlation length from the retained birth.
+Fine and macrocell bounds use it only when the entire interval starts beyond
+that age. Intervals straddling the cutoff retain the ordinary certificate.
+Birth and Taylor bounds, pointwise extinction, gradient sampling, positive
+camera observations and zero-valued surface observations are unchanged.
+The separate `two_constants` global-tail formula is also unchanged.
+
+The envelope is initialized lazily on the first eligible interval and cached
+per flight kernel. Write a = w^T P w, q = sqrt(a)*t, df = f0-m(x0) and
+dk = w dot (g0-grad m(x0)). For q >= Q >= 2 it encloses the conditional mean
+corrections by
+
+```
+epsilonF = (abs(df) + Q*abs(dk)/sqrt(a)) * exp(-Q^2/2)
+epsilonK = (sqrt(a)*Q*abs(df) + (Q^2-1)*abs(dk)) * exp(-Q^2/2)
+Vmin = 1 - (1+Q^2)*exp(-Q^2)
+s in [sigma*sqrt(Vmin), sigma]
+s'/s in [0, sqrt(a)*Q^3*exp(-Q^2)/Vmin].
+```
+
+These polynomial-times-exponential envelopes decrease for Q >= 2. The far
+reducer uses the single normalized bound with kappa <= sqrt(a), independent
+of `tracking_normalized_bound_only` (which still controls the near region).
+For x=q^2, the exact normalized variance N/V^2 <= 1 follows from
+`V^2-N = x*exp(-x)*(x-2+(x+2)*exp(-x)) >= 0`; the last bracket vanishes at
+zero and has derivative `1-(1+x)*exp(-x) >= 0`.
+
+The macrocell/fine SDF certificate supplies mean and directional derivative
+ranges. Expanding them by the cached residuals and applying the monotone
+Mills/flux reducer gives a valid conditional majorant, approaching the
+unconditional form as Q increases. It does not replace the target hazard by
+an unconditional approximation. Outward-rounded arithmetic and existing
+roundoff guards are retained; Q above 8 conservatively uses the Q=8 envelope
+to avoid polynomial overflow. A nonfinite final envelope falls back to the
+ordinary interval construction. Parent certificates remain available. The far
+branch bypasses per-interval tightening even with a zero
+`tracking_tighten_expected_events`; expected-event subdivision still applies.
+
+This skips repeated conditional mean extrema, endpoint SE variance bounds
+and extra midpoint queries in the tail. It still queries SDF bounds, and a
+looser envelope can increase candidate evaluations or subdivision. Profile
+counters `far_bound_setups`, `far_bound_accepted`, `far_bound_fallbacks` and
+the `bound_far_tail` stage record the actual use. Coverage checks include
+45,000 points across different shapes, anisotropic kernel scales, noise
+amplitudes, observed values/slopes, cutoff crossings and large cutoffs.
+Tracking tests compare delta/ratio survival against independently integrated
+unchanged hazards, and grid checks cover fine and macrocell certificates.
+The experiment scripts and measurements are in
+`outputs/se-tail-bound-experiment-20261105/`.
+
+In the 128x128 / 8 spp pilot, four ordinary runs per configuration gave
+medians of 10.810 s (single-normalized reference), 10.320 s (Q=4) and
+10.595 s (Q=5). The Q=4 median reduction was 4.53%, with timing variability;
+the pilot alone does not establish a large-resolution gain. At Q=4, candidate
+counts rose from 22,351,393 to 53,864,462, and fine grid-cell builds rose
+from 12,984,603 to 25,214,608. The cache served 16,247,721 bound queries with
+537,711 initializations and zero nonfinite fallbacks. It skips the ordinary
+midpoint tightening as well as the birth-residual interval algebra, so the
+candidate increase must not be interpreted as evidence that the SE residual
+itself remains large. The experiment measures this complete cheaper bound.
+
+The subsequent 512x512 / 16 spp ABBA comparison used Q=4, selected from the
+pilot, against the same single-normalized reference. Reference times were
+361.02 and 446.48 s; tail times were 420.83 and 469.23 s. The tail median was
+445.03 s versus 403.75 s, a 10.22% regression. Paired regressions were 16.57%
+and 5.10%; process CPU-time medians increased 9.55% (these also include
+loading/saving). Timings varied considerably, but neither pair accelerated.
+Q=5 was only measured at pilot resolution. The option remains disabled by
+default. Further optimization should separate cached SE residuals from the
+geometric interval tightening before treating this as a faster far path.
+Both builds passed all eight relevant CTests. Same-case repetitions and
+plain/profile images matched exactly; the disabled option also matched the
+previous single-bound images at both resolutions. Cross-case images differ
+because proposal processes consume different random numbers; this is not a
+standalone statistical image-bias test. Diagnostic counts above are from
+128x128, not extrapolated to 512x512.
 
 Outside the separately certified birth interval, the proposed length is
 `min(cap, tracking_age_scale * distance_from_birth)`. Geometry endpoints and
@@ -735,6 +934,26 @@ profiles, event counts and image parity results. Repetitions alternate the
 order of step sizes. Profiled/unprofiled images must match exactly for each
 configuration; images across different tracking settings are not expected to
 match because random-number consumption changes.
+
+Detailed bound scopes separate macrocell queries (`bound_sdf_coarse`), fine
+SDF ranges (`bound_sdf_fine`), explicit midpoint/value-difference queries,
+conditional mean/derivative enclosure (`bound_algebra`), moment preparation
+and application, Mills ratio, crossing flux, and normal CDF/logCDF calls.
+The existing `se_variance` and `exp_polynomial` scopes retain their meanings.
+Macrocell midpoint interpolation is nested inside the coarse query; CDF
+calls are nested inside Mills/flux calculations. Use **exclusive** times to
+combine these categories. Fine-range timing does not cover every cell build
+elsewhere in traversal or birth setup. Generic `sdf_*` stages being zero does
+not mean the accelerated cursor performed no SDF work.
+
+`tools/summarize_conditional_bounds.py` compares detailed profiles to an older
+instrumented control and ordinary image references. It verifies image parity,
+original stage calls, work counters, interval partitions, and conservation of
+the bound timing partition; its HTML report separates path and shadow work.
+The 2026-11-05 experiment and commands are under
+`outputs/bound-detail-profile-20261105/`. These fine scopes introduce measurable
+instrumentation overhead, so their proportions diagnose cost but do not directly
+predict uninstrumented speedups. Ordinary builds still compile out all timers.
 
 The following measurements precede the PointJet optimization. Measured on
 2026-10-20, Windows, Intel Core i9-13900HX, Release CPU, two

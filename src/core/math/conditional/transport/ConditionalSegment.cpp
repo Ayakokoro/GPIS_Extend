@@ -15,6 +15,10 @@ FlightState alongDirection(FlightState birth,const Vector3 &direction)
 }
 void ConditionalTrackingSettings::validate() const
 {
+    if (!(shadowRouletteThreshold>=0 && shadowRouletteThreshold<=1) || !std::isfinite(shadowRouletteThreshold))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_shadow_roulette_threshold must be finite and between zero and one");
+    if (!std::isfinite(farBoundStartScale) || (farBoundStartScale!=0 && farBoundStartScale<2))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_far_bound_start_scale must be zero or at least two");
     if(majorantMode!=ConditionalMajorantMode::Adaptive && majorantMode!=ConditionalMajorantMode::TwoConstants)
         throw NumericError(NumericStatus::InvalidInput,"invalid conditional majorant mode");
     if(!(constantBirthLength>=0) || !std::isfinite(constantBirthLength))
@@ -33,11 +37,17 @@ void ConditionalTrackingSettings::validate() const
         throw NumericError(NumericStatus::InvalidInput,"tracking_macrocell_size must be 0 or a power of two from 2 to 64");
     if(!(macrocellMaxExpectedEvents>0) || !std::isfinite(macrocellMaxExpectedEvents))
         throw NumericError(NumericStatus::InvalidInput,"tracking_macrocell_max_expected_events must be finite and positive");
+    if(!(macrocellFarStartScale>=0) || !std::isfinite(macrocellFarStartScale))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_macrocell_far_start_scale must be finite and nonnegative");
+    if(!(macrocellFarMaxExpectedEvents>=0) || !std::isfinite(macrocellFarMaxExpectedEvents) ||
+       (macrocellFarMaxExpectedEvents>0 && macrocellFarMaxExpectedEvents<macrocellMaxExpectedEvents))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_macrocell_far_max_expected_events must be zero or at least the near threshold");
 }
 ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         const Point3 &o,const Vector3 &w,double length,const ConditionalTrackingSettings &tracking)
     : _field(f),_origin(o),_w(normalizedOrThrow(w)),_length(length),
-      _age((o-s.birthPosition).dot(_w)),_tracking(tracking),_straight(f,alongDirection(s,_w))
+      _age((o-s.birthPosition).dot(_w)),_tracking(tracking),
+      _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale)
 {
     _tracking.validate();
     if (!(length>=0) || !std::isfinite(length))
@@ -124,13 +134,18 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
     const bool twoConstants=_tracking.majorantMode==ConditionalMajorantMode::TwoConstants;
     hit=_length;
     const double ell=1/std::sqrt(_w.dot(_field.kernel.precision()*_w));
-    const double maximumStep=_tracking.step>0 ? _tracking.step : _tracking.stepScale*ell;
+    const double maximumStep=_tracking.fixedStepLimit
+        ? (_tracking.step>0 ? _tracking.step : _tracking.stepScale*ell)
+        : std::numeric_limits<double>::infinity();
     double weight=1;
     MajorantOpticalDepth opticalDepth;
     double coarseRetryAt=0,coarseMaximum=std::numeric_limits<double>::infinity();
     struct PendingInterval {
         double begin,end,maximum;
         bool tighten;
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+        Profile::IntervalLimit limit=Profile::IntervalLimit::TwoConstants;
+#endif
     };
     std::vector<PendingInterval> pending;
     for(double lo=0;lo<_length;) {
@@ -145,12 +160,27 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             hi=lo<split ? std::min(_length,split) : _length;
             pending.push_back({lo,hi,lo<split ? _birthBound.maximum : _tailMaximum,false});
             Profile::count(Profile::Counter::ProposedIntervals);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            Profile::partition(Profile::PartitionPhase::Initial,Profile::IntervalLimit::TwoConstants,(_age+lo)/ell,(hi-lo)/ell);
+            Profile::partition(Profile::PartitionPhase::Proposed,Profile::IntervalLimit::TwoConstants,(_age+lo)/ell,(hi-lo)/ell);
+#endif
         }
         if(pending.empty()) {
             Profile::count(Profile::Counter::ProposedIntervals);
             hi=std::min(_length,lo+std::min(maximumStep,_tracking.ageScale*(_age+lo)));
-            if(_age+lo<_birthBound.split)
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            auto limit=hi==_length ? Profile::IntervalLimit::SegmentEnd :
+                maximumStep<=_tracking.ageScale*(_age+lo) ? Profile::IntervalLimit::Step : Profile::IntervalLimit::Age;
+#endif
+            if(_age+lo<_birthBound.split) {
                 hi=std::min(_length,_birthBound.split-_age);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+                limit=hi==_length ? Profile::IntervalLimit::SegmentEnd : Profile::IntervalLimit::Birth;
+#endif
+            }
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            Profile::partition(Profile::PartitionPhase::Initial,limit,(_age+lo)/ell,(hi-lo)/ell);
+#endif
             bool coarse=false;
             if(_tracking.macrocellSize && _age+lo>=_birthBound.smoothEnd && lo>=coarseRetryAt) {
                 double end=_age+hi,maximum;
@@ -161,8 +191,17 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                     if(clipped>lo) {
                         coarseRetryAt=clipped;
                         coarseMaximum=maximum;
+                        // Only change the proposal partition. Keep the exact
+                        // birth-conditioned hazard and the same certified bound.
+                        // Age includes any straight continuation from the birth.
+                        const double eventLimit=_tracking.macrocellFarMaxExpectedEvents>0 &&
+                            _age+lo>=_tracking.macrocellFarStartScale*ell
+                            ? _tracking.macrocellFarMaxExpectedEvents : _tracking.macrocellMaxExpectedEvents;
                         if(std::isfinite(maximum) && maximum*(clipped-lo)<=
-                                std::min(_tracking.macrocellMaxExpectedEvents,_tracking.maxExpectedEvents)) {
+                                std::min(eventLimit,_tracking.maxExpectedEvents)) {
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+                            if(clipped<hi) limit=Profile::IntervalLimit::MacroBoundary;
+#endif
                             hi=clipped;
                             coarse=true;
                             Profile::count(Profile::Counter::MacroAccepted);
@@ -172,7 +211,12 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             }
             if(!coarse) {
                 const double boundary=_straight.nextMeanBoundary(_age+lo,_age+hi);
-                if(boundary<_age+hi) hi=boundary-_age;
+                if(boundary<_age+hi) {
+                    hi=boundary-_age;
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+                    limit=Profile::IntervalLimit::FineBoundary;
+#endif
+                }
             }
             if(!(hi>lo)) {
                 std::ostringstream message;
@@ -184,6 +228,10 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             // Do not retry that window for each of its fine interpolation cells.
             const double parent=hi<=coarseRetryAt ? coarseMaximum : std::numeric_limits<double>::infinity();
             pending.push_back({lo,hi,coarse ? coarseMaximum : majorant(lo,hi,parent),false});
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            pending.back().limit=limit;
+            Profile::partition(Profile::PartitionPhase::Proposed,limit,(_age+lo)/ell,(hi-lo)/ell);
+#endif
         }
         auto b=pending.back(); pending.pop_back();
         lo=b.begin;
@@ -197,12 +245,18 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             // it only if tracking reaches it; a collision in the left half
             // should not pay for SDF queries beyond the collision.
             pending.push_back({mid,hi,b.maximum,true});
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            pending.back().limit=b.limit=Profile::IntervalLimit::EventThreshold;
+#endif
             hi=mid; b.maximum=majorant(lo,hi,b.maximum);
         }
         ++work.intervals;
         Profile::count(Profile::Counter::ProcessedIntervals);
         if(b.maximum==0) Profile::count(Profile::Counter::ZeroRateIntervals);
         Profile::IntervalWork intervalWork;
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+        Profile::ProcessedInterval partitionWork(b.limit,(_age+lo)/ell,lo,hi,b.maximum,ell,traversed,intervalWork.candidates);
+#endif
         double t=lo;
         if(b.maximum>0) for(;;) {
             double next;
@@ -225,6 +279,17 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                 Profile::count(Profile::Counter::RatioEvents);
                 weight*=1-acceptance;
                 if(weight==0) { Profile::count(Profile::Counter::ZeroWeight);return 0; }
+                if(weight<_tracking.shadowRouletteThreshold) {
+                    Profile::count(Profile::Counter::ShadowRouletteTests);
+                    // Survive with weight/threshold and compensate the surviving
+                    // estimator. This changes variance, not its expectation.
+                    if(rng.openUniform01()>=weight/_tracking.shadowRouletteThreshold) {
+                        Profile::count(Profile::Counter::ShadowRouletteTerminated);
+                        return 0;
+                    }
+                    Profile::count(Profile::Counter::ShadowRouletteSurvived);
+                    weight=_tracking.shadowRouletteThreshold;
+                }
             }
         }
         lo=hi;

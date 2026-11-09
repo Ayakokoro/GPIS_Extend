@@ -62,6 +62,9 @@ public:
         const char *failure = "sample_distance_failed";
         bool hasCandidate = false;
         Vec3d position = Vec3d(0.0), gradient = Vec3d(0.0);
+        // Expensive observational data is enabled only by the pixel debugger.
+        bool collectFlight = false;
+        nlohmann::json flight;
     };
 
     struct MediumState

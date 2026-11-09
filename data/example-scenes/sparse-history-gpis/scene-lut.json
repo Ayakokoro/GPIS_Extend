@@ -1,0 +1,43 @@
+{
+  "media": [{
+    "name": "sparse_history_surface",
+    "type": "sparse_history_gpis",
+    "gaussian_process": {
+      "type": "standard",
+      "mean": {"type": "spherical", "center": [0, 0, 0], "radius": 0.6},
+      "covariance": {"type": "squared_exponential", "sigma": 0.08, "lengthScale": 0.25}
+    },
+    "material": {"type": "mirror", "albedo": [0.2, 0.5, 0.8]},
+    "max_bounces": 4,
+    "sparse_history": {
+      "points": 1,
+      "probability_method": "lut",
+      "cdf_table": "../../gpis/bivariate-normal-cdf-v1.bin",
+      "max_step_over_length": 0.25,
+      "max_mean_range_over_sigma": 0.25,
+      "optical_depth_tolerance": 0.0001,
+      "distance_tolerance": 0.00001
+    }
+  }],
+  "bsdfs": [{"name": "boundary", "type": "forward", "albedo": 1}],
+  "primitives": [
+    {"name": "finite_process_bounds", "type": "cube", "bsdf": "boundary",
+     "int_medium": "sparse_history_surface", "transform": {"scale": [2.4, 2.4, 2.4]}},
+    {"type": "infinite_sphere", "emission": [1, 1, 1], "sample": true}
+  ],
+  "camera": {
+    "type": "pinhole", "resolution": [32, 32], "fov": 30,
+    "transform": {"position": [2.4, -3.6, 2.1], "look_at": [0, 0, 0], "up": [0, 0, 1]},
+    "tonemap": "filmic", "reconstruction_filter": "tent"
+  },
+  "integrator": {
+    "type": "path_tracer", "max_bounces": 6, "min_bounces": 0,
+    "enable_light_sampling": true, "enable_volume_light_sampling": true,
+    "use_cuda_gpis": false, "wavefront_gpis": false
+  },
+  "renderer": {
+    "spp": 1, "spp_step": 1, "adaptive_sampling": false,
+    "output_file": "sparse-history-gpis-lut.png", "hdr_output_file": "sparse-history-gpis-lut.exr",
+    "overwrite_output_files": true
+  }
+}

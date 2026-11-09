@@ -1,0 +1,117 @@
+{
+  "media": [
+    {
+      "name": "grains",
+      "type": "poisson_ellipsoid_local",
+      "sdf": {
+        "type": "procedural",
+        "func": "knob",
+        "transform": {
+          "position": [0, 0.8, 0],
+          "scale": 1,
+          "rotation": [0, 0, 0]
+        }
+      },
+      "decay_length": 0.001,
+      "tracking_step": 0.01,
+      "frame": "sdf",
+      "max_bounces": 128,
+      "particles": [
+        {
+          "semiaxes": [0.007, 0.007, 0.004],
+          "rotation_degrees": [0, 0, 0],
+          "density": 200000,
+          "material": {
+            "type": "mirror",
+            "albedo": [0.15, 0.8, 0.5]
+          }
+        }
+      ]
+    }
+  ],
+  "bsdfs": [
+    {"name": "ground", "type": "lambert", "albedo": 1},
+    {"name": "light", "type": "null", "albedo": 1},
+    {"name": "boundary", "type": "forward", "albedo": 1}
+  ],
+  "primitives": [
+    {
+      "name": "floor",
+      "type": "quad",
+      "bsdf": "ground",
+      "transform": {
+        "position": [0, 0, 0],
+        "scale": [30, 30, 30],
+        "rotation": [0, 90, 0]
+      }
+    },
+    {
+      "name": "processBox",
+      "type": "cube",
+      "bsdf": "boundary",
+      "int_medium": "grains",
+      "transform": {
+        "position": [0, 1.001, 0],
+        "scale": 3,
+        "rotation": [0, 0, 0]
+      }
+    },
+    {
+      "name": "key",
+      "type": "quad",
+      "bsdf": "light",
+      "power": [300, 300, 200],
+      "transform": {
+        "position": [0, 5, 2.01],
+        "scale": 5,
+        "rotation": [160, 0, 0]
+      }
+    },
+    {
+      "name": "environment",
+      "type": "infinite_sphere",
+      "bsdf": "light",
+      "power": [2.5, 2.5, 1.5],
+      "sample": true,
+      "transform": {
+        "position": [0, 0, 1.17369],
+        "rotation": [0, -67.2614, 0]
+      }
+    }
+  ],
+  "camera": {
+    "type": "pinhole",
+    "resolution": [512, 512],
+    "fov": 20,
+    "tonemap": "filmic",
+    "reconstruction_filter": "tent",
+    "transform": {
+      "position": [2, 3, 7],
+      "look_at": [0, 0.6, 0],
+      "up": [0, 1, 0]
+    }
+  },
+  "integrator": {
+    "type": "path_tracer",
+    "min_bounces": 0,
+    "max_bounces": 128,
+    "enable_consistency_checks": false,
+    "enable_two_sided_shading": true,
+    "enable_light_sampling": true,
+    "enable_volume_light_sampling": true,
+    "independent_path_sampling": true,
+    "wavefront_gpis": false,
+    "use_cuda_gpis": false
+  },
+  "renderer": {
+    "spp": 256,
+    "spp_step": 16,
+    "adaptive_sampling": false,
+    "stratified_sampler": false,
+    "enable_resume_render": false,
+    "overwrite_output_files": true,
+    "output_directory": "../../../outputs/poisson_ellipsoid_local/shaderball",
+    "output_file": "render.png",
+    "hdr_output_file": "render.exr"
+  }
+}

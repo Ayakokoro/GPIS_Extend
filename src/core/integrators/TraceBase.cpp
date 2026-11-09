@@ -2,13 +2,23 @@
 #include "BounceContributions.hpp"
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
+#include "media/GlobalConditionalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
 #include "media/GlobalConditionalMedium.hpp"
+#include "media/PoissonEllipsoidMedium.hpp"
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
 #include "media/NeuralRenewalMedium.hpp"
 #endif
 
 namespace Tungsten {
+
+namespace {
+void beginEllipsoidSurfaceFlight(const Medium *medium,Medium::MediumState &state) {
+    const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
+    if (ellipsoid && ellipsoid->hasDensityMultiplier())
+        ellipsoid->beginFlight(state,PoissonEllipsoidMedium::FlightOrigin::External);
+}
+}
 
 TraceBase::TraceBase(TraceableScene *scene, const TraceSettings &settings, uint32 threadId)
 : _scene(scene),
@@ -31,7 +41,8 @@ TraceBase::TraceBase(TraceableScene *scene, const TraceSettings &settings, uint3
         auto *cube = dynamic_cast<Cube *>(prim.get());
         if (cube && (dynamic_cast<const GaussianProcessMedium *>(cube->intMedium().get()) ||
                      dynamic_cast<const ClassicLocalMedium *>(cube->intMedium().get()) ||
-                     dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get())
+                     dynamic_cast<const ClassicGlobalMedium *>(cube->intMedium().get()) ||
+                     dynamic_cast<const PoissonEllipsoidMedium *>(cube->intMedium().get())
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
                      || dynamic_cast<const NeuralRenewalMedium *>(cube->intMedium().get())
 #endif
@@ -45,7 +56,7 @@ bool TraceBase::intersectScene(Ray &ray, const Medium *medium,
         IntersectionTemporary &data, IntersectionInfo &info) const
 {
     bool hit = _scene->intersect(ray, data, info);
-    // BVH traversal also ignores exits before nearT. Query the current GP/classic
+    // BVH traversal also ignores exits before nearT. Query the current process
     // boundary directly so a transparent boundary still updates medium state.
     if (medium) {
         for (const auto *cube : _gpisBoundaryCubes) {
@@ -131,6 +142,9 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
     }
 
     int count = 0;
+    const int connectionIndex = _pathDiagnostics && !_pathDiagnostics->events.empty() &&
+        _pathDiagnostics->events.back().value("type",std::string()) == "connection"
+        ? int(_pathDiagnostics->events.size())-1 : -1;
     do {
         count ++;
         bool didHit = intersectScene(ray, medium, data, info) && info.primitive != endCap;
@@ -159,6 +173,13 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
         }
 
         if (medium) {
+            Medium::DistanceDiagnostic diagnostic;
+            auto *previousDiagnostic = mediumStateIter.distanceDiagnostic;
+            if (_pathDiagnostics && !ComputePdfs) {
+                diagnostic.collectFlight = true;
+                mediumStateIter.distanceDiagnostic = &diagnostic;
+            }
+            const Vec3f throughputBefore = throughput;
             if (ComputePdfs) {
                 float forward, backward;
                 throughput *= medium->transmittanceAndPdfs(sampler, ray, startsOnSurface, didHit || endsOnSurface, mediumState, forward, backward);
@@ -166,6 +187,14 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
                 pdfBackward *= backward;
             } else {
                 throughput *= medium->transmittance(sampler, ray, startsOnSurface, endsOnSurface, &mediumStateIter);
+            }
+            mediumStateIter.distanceDiagnostic = previousDiagnostic;
+            if (_pathDiagnostics && !ComputePdfs) {
+                using D = PathTraceDiagnostics;
+                _pathDiagnostics->add("shadow_segment",{{"connection_index",connectionIndex},
+                    {"origin",D::vector(ray.pos())},{"outgoing",D::vector(ray.dir())},
+                    {"length",ray.farT()},{"bounce",bounce},{"flight",diagnostic.flight},
+                    {"throughput_before",D::vector(throughputBefore)},{"throughput_after",D::vector(throughput)}});
             }
         }
         if (info.primitive == nullptr || info.primitive == endCap)
@@ -367,6 +396,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                 event.requestedLobe = BsdfLobes::AllButSpecular;
                 direct.f = event.info->bsdf->eval(event, false);
                 shadowState.firstScatter = true;
+                beginEllipsoidSurfaceFlight(shadowMedium,shadowState);
             } else {
                 direct.f = sample.phase->evalConnection(sampler, parentRay.dir(), ls.d, sample, shadowState.pathContext);
                 if (sample.phase->isSpecular())
@@ -419,6 +449,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                 p = event.info->p;
                 shadowMedium = event.info->primitive->selectMedium(medium, wo.dot(event.info->Ng) < 0.0f);
                 shadowState.firstScatter = true;
+                beginEllipsoidSurfaceFlight(shadowMedium,shadowState);
             } else {
                 if (sample.phase->isSpecular() &&
                     sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE)
@@ -447,10 +478,9 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                             light.directPdf(_threadId, direct.lightData, direct.lightInfo, event.info->p));
                     } else {
                         direct.result = e*direct.phaseSample.weight;
-                        if (!sample.phase->isSpecular() ||
-                            sample.sparseConv1DSamplingScheme != SparseConv1DSamplingScheme::UNI)
-                            direct.result *= SampleWarp::powerHeuristic(direct.phaseSample.pdf,
-                                light.directPdf(_threadId, direct.lightData, direct.lightInfo, sample.p));
+                        direct.result *= float(volumeScatterMisWeight(medium,sample,parentRay.dir(),
+                            direct.phaseSample.w,direct.phaseSample.pdf,
+                            light.directPdf(_threadId,direct.lightData,direct.lightInfo,sample.p)));
                     }
                 }
             }
@@ -615,6 +645,7 @@ Vec3f TraceBase::lightSample(const Primitive &light,
     Medium::MediumState mediumStateReplicate;
     mediumStateReplicate = *mediumState;
     mediumStateReplicate.firstScatter = true;
+    beginEllipsoidSurfaceFlight(medium,mediumStateReplicate);
     Vec3f e = attenuatedEmission(*event.sampler, light, medium, sample.dist, data, info, bounce, true, ray, &mediumStateReplicate, transmittance);
     if (e == 0.0f)
         return Vec3f(0.0f);
@@ -655,6 +686,7 @@ Vec3f TraceBase::bsdfSample(const Primitive &light,
     Medium::MediumState mediumStateReplicate;
     mediumStateReplicate = *mediumState;
     mediumStateReplicate.firstScatter = true;
+    beginEllipsoidSurfaceFlight(medium,mediumStateReplicate);
     Vec3f e = attenuatedEmission(*event.sampler, light, medium, -1.0f, data, info, bounce, true, ray, &mediumStateReplicate, nullptr);
 
     if (e == Vec3f(0.0f))
@@ -665,6 +697,59 @@ Vec3f TraceBase::bsdfSample(const Primitive &light,
     bsdfF *= SampleWarp::powerHeuristic(event.pdf, light.directPdf(_threadId, data, info, event.info->p));
 
     return bsdfF;
+}
+
+bool TraceBase::sampleMediumDistance(PathSampleGenerator &sampler,const Ray &ray,const Medium *medium,
+    Medium::MediumState &state,MediumSample &sample,int bounce,bool enableDirect,Vec3f &directEmission)
+{
+    directEmission=Vec3f(0.f);
+    const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
+    if (!ellipsoid || !enableDirect || bounce>=_settings.maxBounces-1 || _scene->lights().empty())
+        return medium->sampleDistance(sampler,ray,state,sample);
+    const auto illuminate=[&](const LocalEllipsoid::Candidate &candidate) {
+        const Vec3f p(float(candidate.position.x()),float(candidate.position.y()),float(candidate.position.z()));
+        float lightWeight;
+        const Primitive *light=chooseLight(sampler,p,lightWeight);
+        if (!light) return;
+        LightSample ls;
+        if (!light->sampleDirect(_threadId,p,sampler,ls) || !(ls.pdf>0)) return;
+        double scatterDensity;
+        const Vec3f f=ellipsoid->candidateScattering(candidate,ray.dir(),ls.d,scatterDensity);
+        if (f==0.f) return;
+        auto shadowState=state;
+        shadowState.advance();
+        // A light candidate is a virtual real collision even if the main
+        // path subsequently rejects it. Its outgoing flight has the particle
+        // origin law, independently of the incoming flight's latent scale.
+        ellipsoid->beginFlight(shadowState,PoissonEllipsoidMedium::FlightOrigin::ParticleCollision);
+        ++shadowState.info.pixelSampleSegment.w();
+        Ray shadow=ray.scatter(p,ls.d,0.f);
+        shadow.setPrimaryRay(false);
+        IntersectionTemporary lightData;
+        IntersectionInfo lightInfo;
+        const Vec3f e=attenuatedEmission(sampler,*light,medium,ls.dist,lightData,lightInfo,
+            bounce+1,false,shadow,&shadowState,nullptr);
+        if (e==0.f) return;
+        const double mis=light->isDirac() ? 1.0 : LocalEllipsoid::Model::misWeight(ls.pdf,scatterDensity);
+        directEmission+=f*e*float(lightWeight*mis/ls.pdf);
+    };
+    return ellipsoid->sampleDistance(sampler,ray,state,sample,illuminate);
+}
+
+double TraceBase::volumeScatterMisWeight(const Medium *medium,const MediumSample &sample,
+        const Vec3f &travel,const Vec3f &outgoing,double phasePdf,float lightPdf) const
+{
+    const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
+    if (ellipsoid && ellipsoid->hasCandidateLighting(sample)) {
+        // Compete using K(direction)/selectedCandidateRate.
+        // This is an intensity ratio, not a normalized phase PDF. Its complementary
+        // light weight was applied at ALL selected candidates, including nulls.
+        return LocalEllipsoid::Model::misWeight(
+            ellipsoid->candidateDirectionPdf(sample,travel,outgoing),lightPdf);
+    }
+    if (sample.phase->isSpecular() && sample.sparseConv1DSamplingScheme==SparseConv1DSamplingScheme::UNI)
+        return 1;
+    return SampleWarp::powerHeuristic(phasePdf,lightPdf);
 }
 
 Vec3f TraceBase::volumeLightSample(PathSampleGenerator &sampler,
@@ -738,9 +823,8 @@ Vec3f TraceBase::volumePhaseSample(const Primitive &light,
 
     Vec3f phaseF = e*phaseSample.weight;
 
-    if (!mediumSample.phase->isSpecular() || mediumSample.sparseConv1DSamplingScheme != SparseConv1DSamplingScheme::UNI) {
-        phaseF *= SampleWarp::powerHeuristic(phaseSample.pdf, light.directPdf(_threadId, data, info, mediumSample.p));
-    }
+    phaseF *= float(volumeScatterMisWeight(medium,mediumSample,parentRay.dir(),phaseSample.w,
+        phaseSample.pdf,light.directPdf(_threadId,data,info,mediumSample.p)));
 
     return phaseF;
 }
@@ -892,11 +976,24 @@ bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumS
     if (phaseSample.pathContext) mediumState.pathContext = phaseSample.pathContext;
     if (_pathDiagnostics) {
         ++_pathDiagnostics->mediumScatters;
-        _pathDiagnostics->add("medium_scatter", {{"position", D::vector(mediumSample.p)},
+        auto index = _pathDiagnostics->add("medium_scatter", {{"position", D::vector(mediumSample.p)},
             {"incoming", D::vector(ray.dir())}, {"outgoing", D::vector(phaseSample.w)},
             {"scatter_weight", D::vector(phaseSample.weight)},
             {"throughput_before", D::vector(throughput)}, {"throughput_after", D::vector(throughput*phaseSample.weight)},
             {"medium_scatter_order", _pathDiagnostics->mediumScatters}, {"bounce", bounce}});
+        Vec3d gradient;
+        bool observed = false;
+        if (auto c=std::dynamic_pointer_cast<const ConditionalPathContext>(phaseSample.pathContext)) {
+            gradient=Vec3d(c->birth.birthGradient.x(),c->birth.birthGradient.y(),c->birth.birthGradient.z());
+            observed=true;
+        } else if (dynamic_cast<const GaussianProcessMedium *>(medium)) {
+            gradient=mediumSample.aniso;
+            observed=true;
+        }
+        if (observed) {
+            _pathDiagnostics->events[index]["gradient"]=D::vector(gradient);
+            _pathDiagnostics->events[index]["normal"]=D::vector(gradient.normalized());
+        }
     }
     ray = ray.scatter(mediumSample.p, phaseSample.w, 0.f);
     ray.setPrimaryRay(false);
@@ -956,6 +1053,8 @@ bool TraceBase::finishSurface(SurfaceState &surface, SurfaceScatterEvent &event,
     medium = info.primitive->selectMedium(medium, geometricBackside);
     if (mediumState.pathContext ? medium != previousMedium : geometricBackside != (wi.dot(info.Ng) < 0.0f))
         mediumState.reset();
+    if (!surface.forward)
+        beginEllipsoidSurfaceFlight(medium,mediumState);
     ray = ray.scatter(ray.hitpoint(), surface.wo, info.epsilon);
     return true;
 }

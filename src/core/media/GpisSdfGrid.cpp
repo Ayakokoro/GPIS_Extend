@@ -264,9 +264,80 @@ public:
             throw std::invalid_argument("non-finite grid ray transform");
     }
     Statistics statistics() const override { return _stats; }
+    std::unique_ptr<cg::MeanRayCursor> clone() const override {
+        return std::make_unique<GridRayCursor>(*this);
+    }
     double nextBoundary(double begin,double end) override {
         prepare(begin);
         return std::min(end,_end);
+    }
+    bool nextMacroBoundary(double begin,double &end,int width) override {
+        if(width<2 || width>64 || (width&(width-1)))
+            throw std::invalid_argument("macro candidate width must be a power of two from 2 to 64");
+        if(!(begin>=0 && end>begin) || !std::isfinite(end)) return false;
+        double clipped=end;
+        for(int a=0;a<3;++a) {
+            const double low=_grid.data.clampMin[a],high=_grid.data.clampMax[a];
+            const double first=std::floor(low);
+            const int count=(int(std::floor(high))-int(first))/width+1;
+            const double q=_q[a]+begin*_v[a];
+            int cell=std::clamp(int(std::floor((std::clamp(q,low,high)-first)/width)),0,count-1);
+            if(_v[a]==0) continue;
+            const auto crossing=[&](double plane) { return (plane-_q[a])/_v[a]; };
+            const bool positive=_v[a]>0;
+            const double entry=crossing(positive ? low : high),exit=crossing(positive ? high : low);
+            if(begin<entry) clipped=std::min(clipped,entry);
+            else if(begin<exit) {
+                // Use crossing times for boundary ties, just as the fine
+                // cursor does. A negative ray at a face enters the block below.
+                if(positive) {
+                    while(cell+1<count && crossing(first+(cell+1)*width)<=begin) ++cell;
+                    while(cell>0 && crossing(first+cell*width)>begin) --cell;
+                    clipped=std::min(clipped,std::min(exit,crossing(first+(cell+1)*width)));
+                } else {
+                    while(cell>0 && crossing(first+cell*width)<=begin) --cell;
+                    while(cell+1<count && crossing(first+(cell+1)*width)>begin) ++cell;
+                    clipped=std::min(clipped,std::min(exit,crossing(first+cell*width)));
+                }
+            }
+        }
+        if(!(clipped>begin)) return false;
+        end=clipped;
+        ++_stats.macroBoundaryQueries;
+        return true;
+    }
+    bool appendStationaryPoints(double begin,double end,std::vector<double> &points) override {
+        if(!(begin>=0 && end>=begin) || !std::isfinite(end))
+            throw std::invalid_argument("invalid grid stationary-point interval");
+        for(double lo=begin;lo<end;) {
+            prepare(lo);
+            const double hi=std::min(end,_end);
+            if(!_usable || !(hi>lo)) return false;
+            if(!_constant) {
+                const double a=3*_value[3], b=2*_value[2], c=_value[1];
+                auto append=[&](double s) {
+                    const double t=_anchor+s/_rate;
+                    if(std::isfinite(t) && t>lo && t<hi) points.push_back(t);
+                };
+                if(a==0) {
+                    if(b!=0) append(-c/b);
+                } else {
+                    // Scale before forming the discriminant. The q formula
+                    // retains the small root when the other root is large.
+                    const double scale=std::max({std::abs(a),std::abs(b),std::abs(c)});
+                    const double aa=a/scale,bb=b/scale,cc=c/scale;
+                    const double discriminant=std::fma(bb,bb,-4*aa*cc);
+                    if(discriminant>=0) {
+                        const double root=std::sqrt(discriminant);
+                        const double q=-0.5*(bb+std::copysign(root,bb));
+                        if(q==0) append(-bb/(2*aa));
+                        else { append(q/aa); append(cc/q); }
+                    }
+                }
+            }
+            lo=hi;
+        }
+        return true;
     }
     bool coarseRayBounds(double begin,double &end,cg::MeanRayBounds &result) override {
         if(!_grid.macrocellSize || !(begin>=0 && end>begin) || !std::isfinite(end) ||
@@ -329,7 +400,10 @@ public:
         result.minimumDerivative=rb::down(derivativeMin-slopeError);
         result.maximumDerivative=rb::up(derivativeMax+slopeError);
         const Eigen::Vector3d point=_origin+middle*_direction;
-        result.midpointValue=_grid.evaluate(Vec3d(point.x(),point.y(),point.z()),nullptr);
+        {
+            cg::Profile::Scope detail(cg::Profile::Stage::BoundSdfPoint);
+            result.midpointValue=_grid.evaluate(Vec3d(point.x(),point.y(),point.z()),nullptr);
+        }
         // The midpoint is evaluated through the world transform. Its rounded
         // index coordinates can differ from the exact ray even inside the halo.
         const auto gradientMagnitude=block.minimumGradient.cwiseAbs().cwiseMax(block.maximumGradient.cwiseAbs());

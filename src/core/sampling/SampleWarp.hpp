@@ -186,12 +186,16 @@ static inline float uniformTrianglePdf(const Vec3f &a, const Vec3f &b, const Vec
     return 2.0f/((b - a).cross(c - a).length());
 }
 
-static inline float powerHeuristic(float pdf0, float pdf1)
+static inline float powerHeuristic(double pdf0, double pdf1)
 {
-    // Conditional phases can have sharply concentrated, but finite, PDFs.
-    // Square in double so valid float densities cannot overflow or underflow.
-    const double p0=pdf0, p1=pdf1;
-    return float((p0*p0)/(p0*p0+p1*p1));
+    // Form the bounded ratio first: sampled conditional densities can be
+    // larger than float max, without making either MIS weight singular.
+    if (pdf0>=pdf1) {
+        const double ratio=pdf1/pdf0;
+        return float(1/(1+ratio*ratio));
+    }
+    const double ratio=pdf0/pdf1;
+    return float(ratio*ratio/(1+ratio*ratio));
 }
 
 static inline Vec3f projectedBox(const Box3f &box, const Vec3f &direction, float faceXi, const Vec2f &xi)

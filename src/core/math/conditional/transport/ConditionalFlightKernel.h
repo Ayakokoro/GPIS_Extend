@@ -38,7 +38,8 @@ struct ConditionalScalarStatistics {
 // Surface flights have birthValue=0; exterior flights start from F>0.
 class ConditionalFlightKernel final : public FlightKernel {
 public:
-    ConditionalFlightKernel(const GPSSField& field, const FlightState& state);
+    ConditionalFlightKernel(const GPSSField& field, const FlightState& state,
+                            bool normalizedBoundOnly = false, double farBoundStartScale = 0.0);
     HazardEvaluation evaluate(double age) const override;
     HitStatistics hitStatistics(double age) const override;
     // Joint endpoint sample conditioned on birth and F(age)>0. Geometry renews
@@ -64,12 +65,20 @@ public:
     double nextMeanBoundary(double begin,double end) const;
     bool coarseMajorant(double begin,double &end,double &maximum) const;
 private:
+    double farIntervalMajorant(const MeanRayBounds &mean) const;
     double boundedIntervalMajorant(const MeanRayBounds &mean,double begin,double end,
                                   double tightenExpectedEvents,double parentMaximum) const;
     MeanRayBounds meanRayBounds(double begin,double end,const SdfRayQueryOptions &options = {}) const;
     double meanValueDifference(double age,double *error=nullptr) const;
     MeanJet meanJet(double age) const;
     Gaussian<3> gradientGivenValueDeviation(double age, double deviation) const;
+    bool normalizedBoundOnly_;
+    double farBoundStartScale_, farBoundBegin_ = std::numeric_limits<double>::infinity();
+    struct FarBounds {
+        bool ready = false;
+        double valueCorrection, slopeCorrection, minimumSd, maximumSd, regressionMax, kappaMax;
+    };
+    mutable FarBounds farBounds_;
     std::unique_ptr<MeanRayCursor> meanRay_;
     MeanJet birthMean_;
     Vector3 deltaGradient_, precisionDirection_;

@@ -11,7 +11,9 @@ struct PhaseSample
     std::shared_ptr<const MediumPathContext> pathContext;
     Vec3f w;
     Vec3f weight;
-    float pdf;
+    // Conditioned grazing lobes can exceed the float density range while
+    // their directions, weights and MIS ratios remain finite.
+    double pdf;
 };
 
 }

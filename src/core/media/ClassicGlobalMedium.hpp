@@ -28,6 +28,8 @@ protected:
 
     double track(PathSampleGenerator &sampler, const Ray &ray,
                  bool sampleCollision, double &eventT) const;
+    // Shared classic distance law, before material/gradient sampling or advance.
+    bool sampleDistanceEvent(PathSampleGenerator &, const Ray &, MediumState &, MediumSample &) const;
 public:
     ClassicGlobalMedium();
     ~ClassicGlobalMedium() override;

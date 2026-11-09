@@ -1,0 +1,20 @@
+file(MAKE_DIRECTORY "${OUTPUT_DIR}")
+file(READ "${SCENE}" scene)
+string(JSON scene SET "${scene}" camera resolution "[12,12]")
+string(JSON scene SET "${scene}" renderer spp 2)
+string(JSON scene SET "${scene}" renderer spp_step 2)
+file(WRITE "${OUTPUT_DIR}/scene.json" "${scene}")
+execute_process(COMMAND "${RENDERER}" -t 2 -s 41 -d "${OUTPUT_DIR}" "${OUTPUT_DIR}/scene.json"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE errors TIMEOUT 240)
+file(WRITE "${OUTPUT_DIR}/render.log" "${output}\n${errors}")
+if(NOT "${result}" STREQUAL "0" OR NOT "${output}" MATCHES "Completed 2/2 spp" OR
+    "${output}\n${errors}" MATCHES "Caught an internal error|Wrong normal direction|unrecoverable error|Unable to load|not implemented|nonfinite|terminate called")
+    message(FATAL_ERROR "FP-gradient render failed (${result}):\n${output}\n${errors}")
+endif()
+execute_process(COMMAND "${CHECKER}" image "${OUTPUT_DIR}/classic-global-fp-gradient.exr"
+    RESULT_VARIABLE result OUTPUT_VARIABLE stats ERROR_VARIABLE errors)
+file(WRITE "${OUTPUT_DIR}/validation.log" "${stats}\n${errors}")
+if(NOT "${result}" STREQUAL "0")
+    message(FATAL_ERROR "FP-gradient image validation failed:\n${stats}\n${errors}")
+endif()
+message(STATUS "${stats}")
