@@ -717,7 +717,7 @@ bool TraceBase::sampleMediumDistance(PathSampleGenerator &sampler,const Ray &ray
 }
 
 double TraceBase::volumeScatterMisWeight(const Medium *medium,const MediumSample &sample,
-    const Vec3f &travel,const Vec3f &outgoing,float phasePdf,float lightPdf) const
+        const Vec3f &travel,const Vec3f &outgoing,double phasePdf,float lightPdf) const
 {
     const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
     if (ellipsoid && ellipsoid->hasCandidateLighting(sample)) {

@@ -45,6 +45,74 @@ and analytic gradient through `ProceduralMean`; neither uses a separate knob
 formula. Existing classic images may change slightly because its gradient
 previously used a fixed 0.001 finite difference.
 
+## Experimental first-passage gradient correction
+
+Enable the single-anchor gradient approximation while keeping
+conditional transport by adding this to a `global_conditional` medium:
+
+```json
+"fp_gradient": {"enabled": true, "bridge_correction": true, "anchor_selection": "fixed5_snr"}
+```
+
+The switch defaults to false. A self-contained sphere scene is available at
+[`data/example-scenes/global-conditional-fp-gradient/scene.json`](../data/example-scenes/global-conditional-fp-gradient/scene.json).
+This uses the same `FirstPassageGradient::Law` as `classic_global_fp_gradient`,
+including its direct single-point Gaussian positivity factor. The default
+`fixed5_snr` selector evaluates exactly five fixed midpoints in the last
+`min(t,1.5/gamma)` of the flight, using the actual SDF and exact SE covariance.
+It selects the smallest `p(s)+q(s)*u0` at the uncorrected negative-flux mode
+and freezes that one anchor for gradient sampling. There is no refinement.
+Set `anchor_selection` to `hermite` to reproduce the original document selector.
+Existing scenes with correction enabled and no selector now use `fixed5_snr`.
+It requires the same stationary SE covariance as
+ordinary `global_conditional` and supports mirror, conductor and Lambert materials.
+
+Collision tracking runs first with the existing conditional hazard and weight.
+At the accepted location, the gradient sampler receives the actual latest birth
+value, full gradient, double-precision birth/hit positions, physical flight
+distance and directional covariance scale. It samples the inward axial derivative
+from the corrected law, then uses the exact SE transverse conditional Gaussian.
+No additional crossing-flux factor is applied to that distribution.
+
+The axial observation is shared by continuation and direct-light sampling.
+Mirror/conductor continuation samples the transverse gradient and evaluates the
+corresponding fixed-axial phase PDF; a light connection reconstructs the gradient
+consistent with its outgoing direction. Both produce an ordinary
+`ConditionalPathContext` with a zero field value and the full outgoing gradient.
+Lambert scattering shares the full sampled gradient across both strategies.
+Geometry endpoint renewal and the existing unsupported-surface-birth policy
+continue to apply.
+
+`sampleDistance` and `transmittance` retain the same conditional transport law.
+For an identical incoming observation and RNG state, the accepted distance or
+shadow weight is unchanged. Subsequent paths generally change because the
+corrected collision gradient becomes their new conditioning observation.
+This is an experimental combination of conditional-hazard transport and an
+approximate first-passage gradient law; it does not implement an exact
+first-passage distance distribution or insert the gradient normalizer into the
+extinction coefficient.
+
+Set `bridge_correction` to false with `enabled` true for the uncorrected Rice
+axial law using the same latent-gradient/MIS construction. Its marginalized
+gradient distribution matches the ordinary conditional collision law, but it
+uses different random draws and a different MIS conditioning strategy.
+Set `enabled` to false to recover the original path, phase and random sequence.
+
+Build/run the focused integration checks (configure with
+`TUNGSTEN_BUILD_FP_GRADIENT_TESTS=ON`):
+
+```powershell
+cmake --build build --config Release --target tungsten global_conditional_fp_gradient_test --parallel 4
+ctest --test-dir build -C Release -R global_conditional_fp_gradient --output-on-failure
+```
+
+The tests check unchanged distance/shadow tracking for fixed incoming states,
+birth/flight inputs against the production gradient law, endpoint renewal,
+disabled-mode identity, phase normalization and outgoing conditional states for
+all three materials. Render checks cover those materials, NEE disabled, and
+wavefront execution. Teardown reports corrected collision and sampling fallback
+counts separately from the existing discarded-surface counters.
+
 ## Baking the knob mean
 
 `bake_sdf_mean` samples the same `ProceduralMean::evaluateJet` used by the

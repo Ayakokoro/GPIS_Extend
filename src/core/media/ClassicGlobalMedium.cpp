@@ -320,7 +320,7 @@ double ClassicGlobalMedium::track(PathSampleGenerator &sampler, const Ray &ray,
     return weight;
 }
 
-bool ClassicGlobalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray &ray,
+bool ClassicGlobalMedium::sampleDistanceEvent(PathSampleGenerator &sampler, const Ray &ray,
                                          MediumState &state, MediumSample &sample) const
 {
     if (state.bounce > _maxBounce) return false;
@@ -342,6 +342,13 @@ bool ClassicGlobalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray
     sample.pdf = 1.0f;
     sample.sparseConv1DSamplingScheme = SparseConv1DSamplingScheme::UNI;
     sample.rayInfo = state.info;
+    return true;
+}
+
+bool ClassicGlobalMedium::sampleDistance(PathSampleGenerator &sampler, const Ray &ray,
+                                         MediumState &state, MediumSample &sample) const
+{
+    if (!sampleDistanceEvent(sampler, ray, state, sample)) return false;
     if (!sample.exited) {
         if(hasDiffuseMicroMaterial())
             sample.aniso=vec(sampleVisibleNormal(Vec3d(sample.p),

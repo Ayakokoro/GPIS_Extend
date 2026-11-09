@@ -1,6 +1,8 @@
 #pragma once
 #include "ClassicGlobalMedium.hpp"
+#include "math/FirstPassageGradient.hpp"
 #include "math/conditional/transport/ConditionalSegment.h"
+#include "math/conditional/transport/FixedSpeedGradientDistribution.hpp"
 #include <atomic>
 #include <cstdint>
 
@@ -15,6 +17,9 @@ struct ConditionalEventContext final : MediumEventContext {
     const Medium *owner = nullptr;
     Eigen::Vector3d position;
     ConditionalGpis::Gaussian<3> gradient;
+    // Experimental axial first-passage observation, shared by both MIS strategies.
+    double derivative = 0;
+    std::optional<ConditionalGpis::FixedSpeedGradientDistribution> correctedGradient;
 };
 
 // Uses the same SDF and material loading as classic_global. Extinction and
@@ -23,6 +28,10 @@ struct ConditionalEventContext final : MediumEventContext {
 class GlobalConditionalMedium final : public ClassicGlobalMedium {
     ConditionalGpis::GPSSField _field;
     ConditionalGpis::ConditionalTrackingSettings _tracking;
+    bool _fpGradient = false, _bridgeCorrection = true;
+    FirstPassageGradient::AnchorSelection _anchorSelection = FirstPassageGradient::AnchorSelection::Fixed5Snr;
+    std::shared_ptr<PhaseFunction> _deltaPhase;
+    mutable std::atomic<std::uint64_t> _correctedCollisions{0}, _gradientFallbacks{0};
     mutable std::atomic<std::uint64_t> _discardedSurfacePaths{0};
     mutable std::atomic<std::uint64_t> _discardedSurfaceConnections{0};
     std::shared_ptr<const ConditionalPathContext> context(
@@ -41,6 +50,11 @@ public:
     Vec3f sigmaT(Vec3f) const override;
     const ConditionalGpis::GPSSField &field() const { return _field; }
     const ConditionalGpis::ConditionalTrackingSettings &trackingSettings() const { return _tracking; }
+    bool gradientCorrectionEnabled() const { return _fpGradient; }
+    bool bridgeCorrectionEnabled() const { return _bridgeCorrection; }
+    FirstPassageGradient::AnchorSelection anchorSelection() const { return _anchorSelection; }
+    std::uint64_t correctedCollisions() const { return _correctedCollisions.load(std::memory_order_relaxed); }
+    std::uint64_t gradientFallbacks() const { return _gradientFallbacks.load(std::memory_order_relaxed); }
     std::uint64_t discardedSurfacePaths() const { return _discardedSurfacePaths.load(std::memory_order_relaxed); }
     std::uint64_t discardedSurfaceConnections() const { return _discardedSurfaceConnections.load(std::memory_order_relaxed); }
 };

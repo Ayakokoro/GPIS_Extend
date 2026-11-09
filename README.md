@@ -65,6 +65,26 @@ probability tolerances, rather than full GP path transport.
 See the [implementation and configuration notes](docs/first-hit-gpis.md) and
 [self-contained sphere scene](data/example-scenes/first-hit-gpis/scene.json).
 
+## Classic transport with corrected gradients
+
+`classic_global_fp_gradient` keeps classic distance sampling and shadow
+transmittance, and changes only the accepted collision's gradient law using a
+single-anchor first-passage approximation. By default, `fixed5_snr` selects
+one of five fixed candidates using the actual SDF's bridge score; use
+`fp_gradient.anchor_selection="hermite"` to reproduce the document's original
+placement.
+It supports stationary anisotropic SE
+kernels and mirror, conductor or Lambert micro-materials. See the
+[model, birth policy and run instructions](docs/classic-global-fp-gradient.md)
+and the [sphere scene](data/example-scenes/classic-global-fp-gradient/scene.json).
+
+The same gradient experiment can use `global_conditional` transport: add
+`"fp_gradient": {"enabled": true, "bridge_correction": true}` to that medium.
+Its conditional collision/shadow law is retained, and the corrected gradient
+becomes the next flight's observation. See the
+[conditional integration notes](docs/global-conditional-implementation.md#experimental-first-passage-gradient-correction)
+and [conditional sphere scene](data/example-scenes/global-conditional-fp-gradient/scene.json).
+
 ## Fixed-history GPIS transport
 
 `sparse_history_gpis` integrates a sparse-history crossing hazard and supports

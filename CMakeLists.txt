@@ -332,6 +332,36 @@ if (TUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/SparseHistoryGpisRenderSmoke.cmake")
 endif()
 
+option(TUNGSTEN_BUILD_FP_GRADIENT_TESTS "Build classic and conditional transport / first-passage gradient checks" OFF)
+if (TUNGSTEN_BUILD_FP_GRADIENT_TESTS)
+    enable_testing()
+    add_executable(classic_global_fp_gradient_test tests/ClassicGlobalFpGradientTest.cpp)
+    target_link_libraries(classic_global_fp_gradient_test PRIVATE ${core_libs})
+    add_executable(global_conditional_fp_gradient_test tests/GlobalConditionalFpGradientTest.cpp)
+    target_link_libraries(global_conditional_fp_gradient_test PRIVATE ${core_libs})
+    add_executable(fp_gradient_rays EXCLUDE_FROM_ALL tools/surface_compare/gradient_rays.cpp)
+    target_link_libraries(fp_gradient_rays PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    foreach(mode transport phase)
+        add_test(NAME global_conditional_fp_gradient_${mode} COMMAND global_conditional_fp_gradient_test ${mode})
+    endforeach()
+    foreach(mode mirror lambert conductor no_nee wavefront)
+        add_test(NAME global_conditional_fp_gradient_${mode}_render COMMAND ${CMAKE_COMMAND}
+            "-DRENDERER=$<TARGET_FILE:tungsten>" "-DCHECKER=$<TARGET_FILE:global_conditional_fp_gradient_test>"
+            "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/global-conditional-fp-gradient/scene.json"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/global-conditional-fp-gradient-${mode}-render-test"
+            "-DMODE=${mode}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/GlobalConditionalFpGradientRenderSmoke.cmake")
+    endforeach()
+    foreach(mode distribution transport phase)
+        add_test(NAME classic_global_fp_gradient_${mode} COMMAND classic_global_fp_gradient_test ${mode})
+    endforeach()
+    add_test(NAME classic_global_fp_gradient_render COMMAND ${CMAKE_COMMAND}
+        "-DRENDERER=$<TARGET_FILE:tungsten>"
+        "-DCHECKER=$<TARGET_FILE:classic_global_fp_gradient_test>"
+        "-DSCENE=${CMAKE_CURRENT_SOURCE_DIR}/data/example-scenes/classic-global-fp-gradient/scene.json"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/classic-global-fp-gradient-render-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ClassicGlobalFpGradientRenderSmoke.cmake")
+endif()
+
 option(TUNGSTEN_BUILD_SINGLE_HISTORY_GPIS_TESTS "Build fixed-bin single-history GP transport checks" OFF)
 if (TUNGSTEN_BUILD_SINGLE_HISTORY_GPIS_TESTS)
     enable_testing()
