@@ -2,6 +2,7 @@
 #include "BounceContributions.hpp"
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
+#include "media/GlobalConditionalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
 #include "media/PoissonEllipsoidMedium.hpp"
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
@@ -140,6 +141,9 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
     }
 
     int count = 0;
+    const int connectionIndex = _pathDiagnostics && !_pathDiagnostics->events.empty() &&
+        _pathDiagnostics->events.back().value("type",std::string()) == "connection"
+        ? int(_pathDiagnostics->events.size())-1 : -1;
     do {
         count ++;
         bool didHit = intersectScene(ray, medium, data, info) && info.primitive != endCap;
@@ -168,6 +172,13 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
         }
 
         if (medium) {
+            Medium::DistanceDiagnostic diagnostic;
+            auto *previousDiagnostic = mediumStateIter.distanceDiagnostic;
+            if (_pathDiagnostics && !ComputePdfs) {
+                diagnostic.collectFlight = true;
+                mediumStateIter.distanceDiagnostic = &diagnostic;
+            }
+            const Vec3f throughputBefore = throughput;
             if (ComputePdfs) {
                 float forward, backward;
                 throughput *= medium->transmittanceAndPdfs(sampler, ray, startsOnSurface, didHit || endsOnSurface, mediumState, forward, backward);
@@ -175,6 +186,14 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
                 pdfBackward *= backward;
             } else {
                 throughput *= medium->transmittance(sampler, ray, startsOnSurface, endsOnSurface, &mediumStateIter);
+            }
+            mediumStateIter.distanceDiagnostic = previousDiagnostic;
+            if (_pathDiagnostics && !ComputePdfs) {
+                using D = PathTraceDiagnostics;
+                _pathDiagnostics->add("shadow_segment",{{"connection_index",connectionIndex},
+                    {"origin",D::vector(ray.pos())},{"outgoing",D::vector(ray.dir())},
+                    {"length",ray.farT()},{"bounce",bounce},{"flight",diagnostic.flight},
+                    {"throughput_before",D::vector(throughputBefore)},{"throughput_after",D::vector(throughput)}});
             }
         }
         if (info.primitive == nullptr || info.primitive == endCap)
@@ -956,11 +975,24 @@ bool TraceBase::handleVolume(PathSampleGenerator &sampler, MediumSample &mediumS
     if (phaseSample.pathContext) mediumState.pathContext = phaseSample.pathContext;
     if (_pathDiagnostics) {
         ++_pathDiagnostics->mediumScatters;
-        _pathDiagnostics->add("medium_scatter", {{"position", D::vector(mediumSample.p)},
+        auto index = _pathDiagnostics->add("medium_scatter", {{"position", D::vector(mediumSample.p)},
             {"incoming", D::vector(ray.dir())}, {"outgoing", D::vector(phaseSample.w)},
             {"scatter_weight", D::vector(phaseSample.weight)},
             {"throughput_before", D::vector(throughput)}, {"throughput_after", D::vector(throughput*phaseSample.weight)},
             {"medium_scatter_order", _pathDiagnostics->mediumScatters}, {"bounce", bounce}});
+        Vec3d gradient;
+        bool observed = false;
+        if (auto c=std::dynamic_pointer_cast<const ConditionalPathContext>(phaseSample.pathContext)) {
+            gradient=Vec3d(c->birth.birthGradient.x(),c->birth.birthGradient.y(),c->birth.birthGradient.z());
+            observed=true;
+        } else if (dynamic_cast<const GaussianProcessMedium *>(medium)) {
+            gradient=mediumSample.aniso;
+            observed=true;
+        }
+        if (observed) {
+            _pathDiagnostics->events[index]["gradient"]=D::vector(gradient);
+            _pathDiagnostics->events[index]["normal"]=D::vector(gradient.normalized());
+        }
     }
     ray = ray.scatter(mediumSample.p, phaseSample.w, 0.f);
     ray.setPrimaryRay(false);

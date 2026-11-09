@@ -1,0 +1,69 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>像素 (76,117)：路径与固定光线分布</title>
+<style>
+*{box-sizing:border-box}body{max-width:1450px;margin:24px auto;padding:0 22px;color:#203142;background:#f4f7fa;font:16px/1.65 system-ui,sans-serif}h1{font-size:28px}h2{font-size:21px}h3{font-size:17px}section,.panel{background:#fff;border:1px solid #d9e1e7;border-radius:9px;padding:20px;margin:20px 0}a{color:#176997}img{max-width:100%;height:auto}table{border-collapse:collapse;min-width:100%;font-size:13px}td,th{padding:8px;border-bottom:1px solid #dfe6ec;text-align:left;vertical-align:top}th{background:#edf2f6}.scroll{overflow:auto;max-height:540px}.note{color:#5d6c7b;font-size:14px}.controls{position:sticky;top:0;background:#f4f7faf2;padding:12px 0;z-index:2}button,select,input{font:inherit;border:1px solid #9dabb8;border-radius:4px;background:white;padding:5px;margin:3px}input[type=number]{width:90px}button{cursor:pointer}.viewgrid{display:grid;grid-template-columns:2fr 1fr;gap:16px}canvas{display:block;width:100%;height:520px;touch-action:none;background:#172332;border-radius:8px}pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,monospace}.selected{background:#fff0f6}.badge{padding:3px 8px;background:#e0f1e7;border-radius:5px}@media(max-width:900px){.viewgrid{grid-template-columns:1fr}body{padding:0 12px}}
+</style>
+<h1>像素 (76,117)：实际路径与固定光线分布</h1>
+<p>ℓ=0.2，σ=0.02，256×256 相机，seed=41。比较原生 GPIS renewal+、global_conditional、global_conditional＋fixed5。</p>
+<p><a href="location.html">选点位置与局部放大</a> · <a href="#numerics">数值基准检查</a> · <a href="#actual">第一层：实际路径</a> · <a href="#controlled">第二层：固定条件</a> · <a href="controlled-statistics.json">分析数据</a></p>
+<section><p><span class="badge">开启 / 关闭记录校验 __VERIFIED__ 条路径通过</span> 三种模式的相机射线逐样本相同。记录包含正式 CPU PathTracer 的直接光照、MIS、俄罗斯轮盘、完整碰撞梯度和阴影支路起始观测。</p>
+<p class="note">采用新的逐像素独立随机流，使诊断可重复；不是旧图瓦片随机流中同名样本的精确重放。不同模型消耗随机数和选择路径的方式不同，相同样本号不能视为同一张随机表面。原生 renewal+ 仍使用其有限密度稀疏卷积与离散求交。</p>
+<div id="observations"><p><b>当前不能把这个像素的差异简单归因于“透射率不准”或“梯度分布不准”。原生 renewal+ 本身存在显著的求交步长误差和短段阴影漏检。</b>这两点需要先从模型差异中剥离。</p>
+<p>本次记录每模式 512 条实际路径，并对 6 个固定条件各重采样 8192 条原生自由程、每个阴影距离各 4096 次。严格固定 t 的梯度检查中，N/C/F/SC 的 conditional 与 fixed5 均与 SE-GP 参考接近（KS &lt; 10⁻⁶）；P 的 KS 从 0.00773 降到 0.00572，改善较小。原生经验梯度仍有偏差，但它也包含有限密度随机场、求交位置与数值梯度的影响。</p>
+<p>这些是此像素中选定路径段的结论，不是所有凹槽光线的结论，也不能据此划分整张图的误差比例。下一步有依据的处理顺序是：先修正原生求交 / 阴影数值问题，确认参考稳定，再评估自由程与梯度近似。</p></div></section>
+__NUMERICS__
+<section id="actual"><h2>第一层：这个像素的实际渲染路径</h2>
+__OVERVIEW__
+<p class="note">亮度区间根据新诊断样本的标准误计算；不等于之前用于选点的 7×7 邻域统计。多次反射比例本身不能单独解释亮度差异。</p>
+<div id="loadStatus">正在解压本地路径数据…</div>
+<div class="controls"><label>模式 <select id="mode"></select></label><label>样本 <input id="sample" type="number" min="0" value="0"></label>
+<button id="previous">上一条</button><button id="next">下一条</button><label><input id="overlay" type="checkbox" checked>叠加三模式</label><label><input id="shadows" type="checkbox">阴影支路</label><label>选定分析段 <select id="case"></select></label></div>
+<div class="viewgrid"><div><canvas id="view"></canvas><button id="camera">相机方向</button><button id="side">侧视</button><button id="focus">放大选中段</button>
+<p class="note">拖动旋转，滚轮缩放。灰色网格是均值几何。蓝色：renewal+；橙色：conditional；玫红：fixed5。圆点编号是续接路径的碰撞次数，虚线是阴影支路；黄色表示选中的段及其终点，不表示第一次碰撞。</p></div>
+<div><h3 id="pathTitle"></h3><div id="summary"></div><pre id="flightDetails"></pre><p><a id="raw" href="paths/renewal_plus/paths.json">该模式的全部原始路径</a></p></div></div>
+<h3>路径事件（点击行查看起始状态）</h3><div class="scroll"><table><thead><tr><th>event</th><th>类型</th><th>位置 / 原点</th><th>碰撞梯度</th><th>距离 / 阴影估计</th><th>新增辐亮度</th></tr></thead><tbody id="events"></tbody></table></div>
+<p class="note">阴影列是单次估计值；原生 0/1 与 conditional 的比率跟踪权重不能直接当作两个确定的透射率比较。下方通过独立重复采样估计它们的期望。</p></section>
+<section id="controlled"><h2>第二层：在相同起始观测和射线上比较</h2>
+<p>从三种模式中按预先指定的几何条件与样本顺序选取路径段，选段不使用后续测得的分布差异。每段固定起点、方向、起始值和完整梯度；为匹配原生实现，重复采样时统一使用 float 可表示的起始观测。</p>
+__CONTROLLED_OVERVIEW__
+<p class="note">续接段 P/N/C/F 和阴影段 SN/SC 均独立重复采样。蓝色存活曲线来自原生距离采样；若有拒绝事件，将其未知贡献显示为上下界，不删除后重新归一化。阴影点直接调用原生与 conditional 的阴影算法。fixed5 没有修改固定起始状态下的 conditional 自由程和阴影。</p>
+<p class="note">经验梯度比较在同一距离窗口内进行，并让两种近似共享每个原生样本的实际碰撞距离。随后另列严格固定 t 的 SE-GP 正值前缀参考，用来检查梯度近似；它不是原生稀疏卷积的精确真值。KS 是最大 CDF 差，不是图像误差百分比。</p></section>
+__SECTIONS__
+<section><p><a href="path-validation.json">记录器验证</a> · <a href="controlled-validation.json">固定条件与积分检查</a> · <a href="path-statistics.json">实际路径统计</a> · <a href="path-provenance.json">配置来源</a> · <a href="flight-selection.json">选段规则</a> · <a href="controlled-statistics.json">固定条件统计</a></p></section>
+<script>
+(async()=>{
+const compressed=Uint8Array.from(atob(__PAYLOAD__),c=>c.charCodeAt(0));
+const B=JSON.parse(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
+const $=id=>document.getElementById(id),colors=['#73c6f1','#ffc76b','#f18cb6'];
+const f=x=>Number(x).toPrecision(5),vec=v=>Array.isArray(v)?v.map(f).join(', '):'—';
+B.modes.forEach(m=>$('mode').add(new Option(B.labels[m],m)));
+$('case').add(new Option('自由选择',''));B.cases.forEach(c=>$('case').add(new Option(c.key+' · '+B.labels[c.source]+' / '+c.sample,c.key)));
+$('loadStatus').textContent='路径数据已载入。三模式切换保留样本号；表格只显示当前模式。';
+const canvas=$('view'),ctx=canvas.getContext('2d');let yaw=Math.atan2(2,7),pitch=Math.atan2(2.4,Math.hypot(2,7)),scale=250,center=[0,.85,0],path,selected=-1;
+const add=(a,b)=>a.map((v,i)=>v+b[i]),sub=(a,b)=>a.map((v,i)=>v-b[i]),mul=(a,s)=>a.map(v=>v*s);
+function project(v){let [x,y,z]=sub(v,center),a=Math.cos(yaw)*x-Math.sin(yaw)*z,b=Math.sin(yaw)*x+Math.cos(yaw)*z;return [canvas.width/2+a*scale,canvas.height/2-(Math.cos(pitch)*y-Math.sin(pitch)*b)*scale,Math.sin(pitch)*y+Math.cos(pitch)*b]}
+function line(a,b,color,width=2,dash=false){a=project(a);b=project(b);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash?[5,4]:[]);ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();ctx.setLineDash([])}
+function draw(){canvas.width=canvas.clientWidth;canvas.height=520;ctx.fillStyle='#172332';ctx.fillRect(0,0,canvas.width,canvas.height);
+const triangles=B.mesh.triangles.map(t=>t.map(project));triangles.sort((a,b)=>a.reduce((s,p)=>s+p[2],0)-b.reduce((s,p)=>s+p[2],0));
+for(const t of triangles){ctx.fillStyle='rgba(152,171,185,.16)';ctx.strokeStyle='rgba(152,171,185,.07)';ctx.lineWidth=.25;ctx.beginPath();ctx.moveTo(t[0][0],t[0][1]);ctx.lineTo(t[1][0],t[1][1]);ctx.lineTo(t[2][0],t[2][1]);ctx.closePath();ctx.fill();ctx.stroke()}
+const modes=$('overlay').checked?B.modes:[$('mode').value];for(const mode of modes){const item=B.data[mode].paths.find(p=>p.sample===+$('sample').value);if(!item)continue;let previous=null,order=0;const color=colors[B.modes.indexOf(mode)];
+for(const e of item.events){if(e.type==='camera')previous=e.position;
+if(['boundary','surface','medium_scatter','distance_failed'].includes(e.type)&&e.position){if(previous)line(previous,e.position,color,mode===$('mode').value?2.5:1.3,e.type==='boundary');previous=e.position;
+if(e.type==='medium_scatter'){order++;const q=project(e.position);ctx.fillStyle=color;ctx.beginPath();ctx.arc(q[0],q[1],3.5,0,7);ctx.fill();ctx.font='bold 13px monospace';ctx.fillText(order,q[0]+5,q[1]-5)}}
+if(e.type==='shadow_segment'&&$('shadows').checked)line(e.origin,add(e.origin,mul(e.outgoing,e.length)),color,1,true)} }
+if(path){const e=path.events.find(e=>e.index===selected);if(e&&e.flight){const a=e.flight.origin,b=e.position||add(a,mul(e.flight.direction,e.flight.max_distance));line(a,b,'#fff74c',4);const q=project(b);ctx.fillStyle='#fff74c';ctx.beginPath();ctx.arc(q[0],q[1],5,0,7);ctx.fill()}}
+}
+function showEvent(index){selected=index;const e=path.events.find(e=>e.index===index);$('flightDetails').textContent=e?JSON.stringify(e,null,2):'';for(const tr of $('events').children)tr.classList.toggle('selected',+tr.dataset.index===index);draw()}
+function update(){const ps=B.data[$('mode').value].paths;$('sample').max=ps.at(-1).sample;let n=Math.max(0,Math.min(+$('sample').value,ps.at(-1).sample));$('sample').value=n;path=ps.find(p=>p.sample===n)||ps[0];
+$('pathTitle').textContent=B.labels[$('mode').value]+' · sample '+path.sample;$('summary').innerHTML='<p>续接碰撞 '+path.medium_scatters+' 次；普通表面反射 '+path.surface_reflections+' 次。<br>辐亮度 RGB：'+vec(path.radiance)+'<br>结束：'+path.termination+'</p>';
+$('raw').href='paths/'+$('mode').value+'/paths.json';
+$('events').innerHTML=path.events.map(e=>'<tr data-index="'+e.index+'"><td>'+e.index+'</td><td>'+e.type+'</td><td>'+vec(e.position||e.origin)+'</td><td>'+vec(e.gradient)+'</td><td>'+(e.transmittance?vec(e.transmittance):e.t!==undefined?f(e.t):e.length!==undefined?f(e.length):'—')+'</td><td>'+vec(e.emission_added)+'</td></tr>').join('');
+for(const tr of $('events').children)tr.onclick=()=>showEvent(+tr.dataset.index);showEvent(selected)}
+$('mode').onchange=()=>{selected=-1;update()};$('sample').onchange=()=>{selected=-1;update()};$('previous').onclick=()=>{$('sample').value=+$('sample').value-1;selected=-1;update()};$('next').onclick=()=>{$('sample').value=+$('sample').value+1;selected=-1;update()};
+['overlay','shadows'].forEach(id=>$(id).onchange=draw);
+$('case').onchange=()=>{const c=B.cases.find(c=>c.key===$('case').value);if(c){$('mode').value=c.source;$('sample').value=c.sample;selected=c.event_index;update()}};
+$('camera').onclick=()=>{yaw=Math.atan2(2,7);pitch=Math.atan2(2.4,Math.hypot(2,7));center=[0,.85,0];scale=250;draw()};$('side').onclick=()=>{yaw=1.57;pitch=.1;center=[0,.85,0];scale=250;draw()};
+$('focus').onclick=()=>{const e=path.events.find(e=>e.index===selected)||path.events.find(e=>e.type==='medium_scatter');center=e?.position||e?.origin||center;scale=650;draw()};
+let drag=null;canvas.onpointerdown=e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(!drag)return;yaw-=(e.clientX-drag[0])*.008;pitch=Math.max(-1.5,Math.min(1.5,pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];draw()};canvas.onpointerup=()=>drag=null;canvas.onwheel=e=>{e.preventDefault();scale=Math.max(30,Math.min(20000,scale*Math.exp(-e.deltaY*.001)));draw()};window.onresize=draw;update();
+})().catch(e=>{document.getElementById('loadStatus').textContent='路径查看器载入失败：'+e.message;console.error(e)});
+</script></html>

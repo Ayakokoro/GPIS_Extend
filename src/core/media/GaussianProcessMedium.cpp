@@ -296,6 +296,8 @@ namespace Tungsten {
         distance.firstIntersection = false;
         distance.t = t;
         sample.exited = !hit;
+        if (state.distanceDiagnostic && state.distanceDiagnostic->collectFlight)
+            state.distanceDiagnostic->flight["sampled_distance"] = t;
         // We sample a gradient if:
         // (1) The ray did intersect a surface
         // (2) The ray did not intersect a surface, but we'll need to continue

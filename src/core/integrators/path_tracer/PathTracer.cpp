@@ -90,6 +90,7 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
             mediumSample.continuedWeight = throughput;
 
             Medium::DistanceDiagnostic distanceDiagnostic;
+            distanceDiagnostic.collectFlight = _pathDiagnostics != nullptr;
             if (_pathDiagnostics || activeBounceContributions) state.distanceDiagnostic = &distanceDiagnostic;
             Vec3f candidateEmission;
             bool succeed = sampleMediumDistance(sampler,ray,medium,state,mediumSample,bounce,
@@ -101,6 +102,7 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
                 if (_pathDiagnostics) {
                     auto index = _pathDiagnostics->add("distance_failed", {{"origin", D::vector(ray.pos())},
                         {"incoming", D::vector(ray.dir())}, {"reason", distanceDiagnostic.failure}, {"bounce", bounce}});
+                    _pathDiagnostics->events[index]["flight"] = distanceDiagnostic.flight;
                     if (distanceDiagnostic.hasCandidate) {
                         _pathDiagnostics->events[index]["position"] = D::vector(distanceDiagnostic.position);
                         _pathDiagnostics->events[index]["gradient"] = D::vector(distanceDiagnostic.gradient);
@@ -109,12 +111,16 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
                 return finish(distanceDiagnostic.failure, emission);
             }
 
-            if (_pathDiagnostics)
-                _pathDiagnostics->add(mediumSample.exited ? "medium_exit" : "medium_collision",
+            if (_pathDiagnostics) {
+                auto index = _pathDiagnostics->add(mediumSample.exited ? "medium_exit" : "medium_collision",
                     {{"position", D::vector(mediumSample.p)}, {"origin", D::vector(ray.pos())},
                      {"incoming", D::vector(ray.dir())}, {"t", mediumSample.t}, {"bounce", bounce},
                      {"distance_weight", D::vector(mediumSample.weight)},
-                     {"emission_added", D::vector(throughput*mediumSample.emission)}});
+                     {"emission_added", D::vector(throughput*mediumSample.emission)},
+                     {"flight",distanceDiagnostic.flight}});
+                if (distanceDiagnostic.hasCandidate)
+                    _pathDiagnostics->events[index]["gradient"] = D::vector(distanceDiagnostic.gradient);
+            }
             const Vec3f emissionBefore = emission;
             emission += throughput*mediumSample.emission;
             recordBounceContribution(bounce, emission - emissionBefore);

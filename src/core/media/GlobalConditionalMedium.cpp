@@ -15,6 +15,18 @@ namespace {
 Eigen::Vector3d eigen(const Vec3f &p) { return {p.x(),p.y(),p.z()}; }
 Eigen::Vector3d eigen(const Vec3d &p) { return {p.x(),p.y(),p.z()}; }
 Vec3f vec(const Eigen::Vector3d &p) { return Vec3f(float(p.x()),float(p.y()),float(p.z())); }
+void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathContext &c,const Ray &ray) {
+    if (!diagnostic || !diagnostic->collectFlight) return;
+    using J = nlohmann::json;
+    auto vector = [](const auto &v) { return J::array({v.x(),v.y(),v.z()}); };
+    const auto w=eigen(ray.dir()).normalized();
+    diagnostic->flight = {{"model","global_conditional"},
+        {"birth_position",vector(c.birth.birthPosition)},{"birth_value",c.birth.birthValue},
+        {"birth_gradient",vector(c.birth.birthGradient)},{"conditioned_birth",true},
+        {"origin",vector(c.position)},{"direction",vector(w)},
+        {"age_at_origin",(c.position-c.birth.birthPosition).dot(w)},
+        {"near_t",ray.nearT()},{"max_distance",double(ray.farT())*eigen(ray.dir()).norm()}};
+}
 class LinearSdf final : public cg::MeanField {
     Eigen::Vector3d _ref,_g;
     double _minimum;
@@ -268,6 +280,7 @@ try
     if(!std::isfinite(ray.farT()) || ray.farT()<0)
         throw cg::NumericError(cg::NumericStatus::InvalidInput,"global_conditional needs a finite boundary-enclosed segment");
     const auto c=context(sampler,ray,state);
+    observeBirth(state.distanceDiagnostic,*c,ray);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     // Geometry nearT suppresses self-intersections only. It must not cut out
@@ -275,6 +288,8 @@ try
     cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking);
     cg::Random rng(sampler); double t;
     const bool escaped=segment.track(rng,true,t)!=0;
+    if (state.distanceDiagnostic && state.distanceDiagnostic->collectFlight)
+        state.distanceDiagnostic->flight["sampled_distance"] = t;
     const Eigen::Vector3d p=c->position+t*w;
     sample.t=float(t/speed); sample.continuedT=sample.t;
     sample.p=escaped ? ray.hitpoint():vec(p);
@@ -341,6 +356,7 @@ try
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Shadow);
     if(!state) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional transmittance requires path state");
     const auto c=context(sampler,ray,*state);
+    observeBirth(state->distanceDiagnostic,*c,ray);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking);
