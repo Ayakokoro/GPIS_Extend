@@ -1,0 +1,233 @@
+{
+  "media": [
+    {
+      "name": "gp",
+      "type": "renewal_plus_fp_gradient",
+      "max_bounces": 1024,
+      "gaussian_process": {
+        "type": "standard",
+        "mean": {
+          "type": "procedural",
+          "func": "knob",
+          "transform": {
+            "position": [
+              0.0,
+              0.8,
+              0.0
+            ],
+            "scale": 1.0,
+            "rotation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "covariance": {
+          "type": "squared_exponential",
+          "lengthScale": 0.2,
+          "sigma": 0.02,
+          "localScale": 3.0
+        }
+      },
+      "phase_function": {
+        "type": "brdf",
+        "bsdf": {
+          "type": "mirror",
+          "albedo": [
+            0.15,
+            0.8,
+            0.5
+          ]
+        }
+      },
+      "sigma_a": 0,
+      "sigma_s": 1,
+      "density": 1,
+      "step_size": 0.01,
+      "min_step": 8,
+      "seed": 17429,
+      "impulse_density": 10,
+      "single_realization": false,
+      "correlation_context": "renewal+",
+      "intersect_method": "gp_discrete",
+      "normal_method": "conditioned_gaussian",
+      "1D_sampling": false,
+      "isotropic_3D_sampling": false,
+      "1D_sampling_scheme": "uni",
+      "1D_gradient_correlationXY": true,
+      "fp_gradient": {
+        "enabled": true,
+        "bridge_correction": true,
+        "anchor_selection": "fixed5_snr"
+      }
+    }
+  ],
+  "bsdfs": [
+    {
+      "name": "backWall",
+      "albedo": 1,
+      "type": "lambert"
+    },
+    {
+      "name": "light",
+      "albedo": 1,
+      "type": "null"
+    },
+    {
+      "name": "floor",
+      "albedo": 1,
+      "type": "null"
+    },
+    {
+      "name": "upper",
+      "albedo": 1,
+      "type": "forward"
+    }
+  ],
+  "primitives": [
+    {
+      "name": "floor",
+      "transform": {
+        "position": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          30,
+          30,
+          30
+        ],
+        "rotation": [
+          0,
+          90,
+          0
+        ]
+      },
+      "type": "quad",
+      "bsdf": "backWall"
+    },
+    {
+      "name": "processBox",
+      "transform": {
+        "position": [
+          0,
+          1.001,
+          0
+        ],
+        "scale": 3,
+        "rotation": [
+          0,
+          0,
+          0
+        ]
+      },
+      "type": "cube",
+      "bsdf": "upper",
+      "int_medium": "gp"
+    },
+    {
+      "name": "light",
+      "transform": {
+        "position": [
+          0,
+          5,
+          2.01
+        ],
+        "scale": 5,
+        "rotation": [
+          160,
+          0,
+          0
+        ]
+      },
+      "power": [
+        300,
+        300,
+        200
+      ],
+      "type": "quad",
+      "bsdf": "light"
+    },
+    {
+      "bump_strength": 1,
+      "transform": {
+        "position": [
+          0,
+          0,
+          1.17369
+        ],
+        "rotation": [
+          0,
+          -67.2614,
+          0
+        ]
+      },
+      "power": [
+        2.5,
+        2.5,
+        1.5
+      ],
+      "type": "infinite_sphere",
+      "sample": true,
+      "bsdf": {
+        "albedo": 1,
+        "type": "null"
+      }
+    }
+  ],
+  "camera": {
+    "tonemap": "filmic",
+    "resolution": [
+      64,
+      64
+    ],
+    "reconstruction_filter": "tent",
+    "transform": {
+      "position": [
+        2,
+        3,
+        7
+      ],
+      "look_at": [
+        0,
+        0.6,
+        0
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ]
+    },
+    "type": "pinhole",
+    "fov": 20
+  },
+  "integrator": {
+    "type": "path_tracer",
+    "min_bounces": 0,
+    "max_bounces": 20,
+    "enable_consistency_checks": false,
+    "enable_two_sided_shading": true,
+    "enable_light_sampling": true,
+    "enable_volume_light_sampling": true,
+    "use_cuda_gpis": false
+  },
+  "renderer": {
+    "output_directory": "",
+    "output_file": "shaderball.png",
+    "hdr_output_file": "shaderball.exr",
+    "resume_render_file": "",
+    "overwrite_output_files": true,
+    "adaptive_sampling": false,
+    "enable_resume_render": false,
+    "stratified_sampler": false,
+    "scene_bvh": true,
+    "spp": 8,
+    "spp_step": 8,
+    "checkpoint_interval": "0",
+    "timeout": "0",
+    "output_buffers": []
+  }
+}

@@ -361,6 +361,7 @@ namespace Tungsten {
         sample.sparseConv1DSamplingScheme = state.sparseConv1DSamplingScheme;
         state.advance();
         finishDistance(ray, state, sample);
+        onDistanceSample(sampler, ray, t, state, sample);
         return DistanceStatus::Finished;
     }
 

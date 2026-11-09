@@ -71,6 +71,11 @@ protected:
 
     const bool _dumpDataVisCovOnly = false;
 
+    // Runs only after the native distance event and its validity checks have
+    // been accepted. Shadow intersection queries do not invoke this hook.
+    virtual void onDistanceSample(PathSampleGenerator &, const Ray &, double,
+        MediumState &, MediumSample &) const {}
+
 public:
     static GPCorrelationContext stringToCorrelationContext(const std::string& name);
     static std::string correlationContextToString(GPCorrelationContext ctxt);

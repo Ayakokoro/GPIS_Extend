@@ -7,6 +7,7 @@
 #include "FunctionSpaceGaussianProcessMedium.hpp"
 #include "WeightSpaceGaussianProcessMedium.hpp"
 #include "SparseConvolutionNoiseMedium.hpp"
+#include "RenewalPlusFpGradientMedium.hpp"
 #include "ClassicGlobalMedium.hpp"
 #include "ClassicGlobalFpGradientMedium.hpp"
 #include "FirstHitGpisMedium.hpp"
@@ -33,6 +34,7 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"function_space_gaussian_process", std::make_shared<FunctionSpaceGaussianProcessMedium>}, 
     {"weight_space_gaussian_process", std::make_shared<WeightSpaceGaussianProcessMedium>},
     {"sparse_conv_noise", std::make_shared<SparseConvolutionNoiseMedium>},
+    {"renewal_plus_fp_gradient", std::make_shared<RenewalPlusFpGradientMedium>},
     {"classic_global", std::make_shared<ClassicGlobalMedium>},
     {"classic_global_fp_gradient", std::make_shared<ClassicGlobalFpGradientMedium>},
     {"first_hit_gpis", std::make_shared<FirstHitGpisMedium>},

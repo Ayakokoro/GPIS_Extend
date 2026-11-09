@@ -290,3 +290,64 @@ All 11 focused CTest checks pass. The 18 document cases pass independent
 parameter/PDF/CDF checks and 100,000 actual samples per case from each of the
 two RNG adapters (maximum empirical CDF error `0.0048973`). Their benchmark is
 `outputs/fixed5-anchor-validation-20261109/document/comparison.html`.
+
+## Native renewal+ transport with fixed5 gradients
+
+`renewal_plus_fp_gradient` isolates the effect of replacing the gradient in
+the existing 3D sparse-convolution renewal+ renderer. Copy a native
+`sparse_conv_noise` scene, change its medium type, and add:
+
+```json
+"fp_gradient": {
+  "enabled": true,
+  "bridge_correction": true,
+  "anchor_selection": "fixed5_snr"
+}
+```
+
+The supported configuration uses `correlation_context="renewal+"`,
+`intersect_method="gp_discrete"`, `normal_method="conditioned_gaussian"`,
+`single_realization=false`, `1D_sampling=false`, and
+`1D_sampling_scheme="uni"`. The GP must be a single stationary SE process
+without embedded covariance or additional observations. The existing BRDF
+phase and its material settings are retained. In particular, the shaderball's
+mirror phase samples the complete gradient as a latent observation, then uses
+the original conditional delta-reflection PDF and weight. It does not invoke
+the native 1D normal-distribution NEE/MIS code.
+
+The hook executes after native distance sampling, inward-crossing validation,
+and event weighting. It cannot change that query's accepted position, escape
+decision, or collision weight. Shadow queries never invoke the hook: they
+still trace a native conditional realization and return binary visibility.
+The hook is also reached by the CPU wavefront distance interface.
+
+For a conditioned segment, the birth value and full gradient are saved before
+native intersection overwrites the state. The gradient is saved with the same
+float conversion used by native conditioning. For an unconditioned exterior
+segment, the birth value and gradient are evaluated from the same realization
+that found the collision; they are not independently drawn. The fixed5 law
+uses the unrounded native hit distance and the actual mean SDF. Its sampled
+axial derivative and conditional transverse Gaussian produce a full gradient,
+which replaces both `sample.aniso` and `state.lastAniso`. Thus reflection and
+the next renewal+ segment consume the same replacement observation.
+
+Native accepted events without a positive flight distance or births outside
+the positive-start domain of the fixed5 law retain their native gradient. Separate counters
+report every such exception (`retained_native_zero_length` counts distances
+that do not satisfy `t > 0`); no collision is discarded or resampled. Setting
+`fp_gradient.enabled=false` preserves native samples and RNG consumption.
+
+```sh
+cmake --build build --config Release --target tungsten renewal_plus_fp_gradient_test --parallel 4
+ctest --test-dir build -C Release -R "^renewal_plus_fp_gradient_" --output-on-failure
+```
+
+Tests cover identical fixed-birth distance events and shadow queries,
+independent reconstruction of the sampled fixed5 gradient, primary birth
+observations, reflected directions and weights, propagation of the full jet,
+disabled-mode identity, and the synchronous/wavefront interfaces.
+
+This is an ablation of the native sparse-convolution renderer. Its finite
+impulse density and ray-marching step remain unchanged, so it is not an exact
+continuous SE-GP reference. After the first changed gradient, later paths
+diverge; identical transport algorithms do not imply identical full paths.

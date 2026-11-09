@@ -24,6 +24,12 @@ namespace Tungsten {
 
     struct GPContextSparseConvNoise : public GPContext {
         SparseConvolutionNoiseRealization noise;
+        // Observation used to condition this segment, before intersection
+        // overwrites lastVal/lastAniso with the endpoint observation.
+        bool conditionedBirth = false;
+        double birthValue = 0;
+        Vec3d birthGradient = Vec3d(0.0);
+        RayInfo birthRayInfo{};
         virtual void reset() override {
             // Don't reset the realization
         }

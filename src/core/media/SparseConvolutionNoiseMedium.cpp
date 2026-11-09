@@ -217,6 +217,13 @@ namespace Tungsten {
 
         prepared.context = std::make_shared<GPContextSparseConvNoise>();
         prepared.context->noise = noise;
+        prepared.context->conditionedBirth = !state.firstScatter;
+        if (!state.firstScatter) {
+            prepared.context->birthValue = state.lastVal;
+            // conditioning() consumes floats, including after a hybrid hit.
+            prepared.context->birthGradient = Vec3d(Vec3f(state.lastAniso));
+        }
+        prepared.context->birthRayInfo = state.info;
         auto &request = prepared.request;
         request.purpose = GpRaySegmentRequest::Purpose::Path;
         request.medium = this;

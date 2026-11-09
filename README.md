@@ -85,6 +85,13 @@ becomes the next flight's observation. See the
 [conditional integration notes](docs/global-conditional-implementation.md#experimental-first-passage-gradient-correction)
 and [conditional sphere scene](data/example-scenes/global-conditional-fp-gradient/scene.json).
 
+`renewal_plus_fp_gradient` provides the complementary diagnostic: native 3D
+sparse-convolution renewal+ collision distances and binary shadow visibility,
+with the fixed5 gradient sampled at accepted collisions. It retains the
+observed-normal BRDF estimator and passes the replacement full gradient to the
+next flight. See the [hybrid test notes](docs/classic-global-fp-gradient.md#native-renewal-transport-with-fixed5-gradients)
+and [shaderball scene](data/example-scenes/renewal-plus-fp-gradient/scene.json).
+
 ## Fixed-history GPIS transport
 
 `sparse_history_gpis` integrates a sparse-history crossing hazard and supports
