@@ -167,13 +167,11 @@ GlobalConditionalMedium::GlobalConditionalMedium() {
 }
 void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     ClassicGlobalMedium::fromJson(value,scene);
-<<<<<<< HEAD
     std::string surfacePolicy="retain_endpoint";
     value.getField("non_gp_surface_policy",surfacePolicy);
     if(surfacePolicy=="retain_endpoint") _nonGpSurfacePolicy=ConditionalNonGpSurfacePolicy::RetainEndpoint;
     else if(surfacePolicy=="restart_exterior") _nonGpSurfacePolicy=ConditionalNonGpSurfacePolicy::RestartExterior;
     else value.parseError("non_gp_surface_policy must be retain_endpoint or restart_exterior");
-=======
     _fpGradient=false; _bridgeCorrection=true;
     _anchorSelection=FirstPassageGradient::AnchorSelection::Fixed5Snr;
     if(auto settings=value["fp_gradient"]) {
@@ -184,7 +182,6 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
         try { _anchorSelection=FirstPassageGradient::parseAnchorSelection(selection); }
         catch(const std::invalid_argument &e) { settings.parseError(e.what()); }
     }
->>>>>>> d4b61d14429005304c384839e4cca24acb319986
     _tracking=cg::ConditionalTrackingSettings{};
     std::string majorantMode="adaptive";
     value.getField("tracking_majorant",majorantMode);

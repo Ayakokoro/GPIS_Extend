@@ -134,11 +134,11 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
     for(bool collision:{false,true}) {
         auto relaxed=settings;relaxed.macrocellFarMaxExpectedEvents=64;
         relaxed.macrocellFarStartScale=1.3; // 0.65 > entire [0.4,0.6] segment
-        const auto near=trace(relaxed,collision);
-        check(near.fine>=4,"far relaxation preserves near-field fine traversal");
+        const auto nearTrace=trace(relaxed,collision);
+        check(nearTrace.fine>=4,"far relaxation preserves near-field fine traversal");
         relaxed.macrocellFarStartScale=0.5; // 0.25 < resumed birth age
-        const auto far=trace(relaxed,collision);
-        check(far.coarse==1 && far.fine==0 && far.boundaries==0,
+        const auto farTrace=trace(relaxed,collision);
+        check(farTrace.coarse==1 && farTrace.fine==0 && farTrace.boundaries==0,
             "far relaxation uses directional ell and retained conditioning age");
     }
 
