@@ -201,6 +201,65 @@ void roundedUGrooveChecks() {
     }
     std::cout<<"rounded U groove: boundary, normals, tiny differences and "<<certificates<<" certificates passed\n";
 }
+
+void twoSphereChecks() {
+    const auto fn=SdfFunctions::Function::TwoSpheres;
+    const auto check=[](bool ok,const char *label) { if(!ok) throw std::runtime_error(label); };
+    const auto reference=[](const V &p) {
+        return std::min((p-V(0,10,0)).norm(),(p-V(0,-10,0)).norm())-9.5;
+    };
+    check(SdfFunctions::supportsQueries(fn),"two spheres expose certified queries");
+    for(double sign : {-1.,1.}) {
+        for(const V &n : {V(1,0,0),V(0,1,0),V(0,-1,0),V(.6,.8,0)}) {
+            const V p=V(0,10*sign,0)+9.5*n;
+            const auto j=SdfFunctions::evaluateJet(fn,p);
+            check(std::abs(j.value)<1e-13,"two sphere surface location");
+            check((j.gradient-n).norm()<1e-13,"two sphere outward normal");
+        }
+        for(double d : {1e-8,1e-12,1e-18}) {
+            const double difference=SdfFunctions::valueDifference(fn,V(0,19.5*sign,0),V(0,sign*d,0));
+            check(std::abs(difference-d)<1e-14*d,"two sphere sub-ulp normal displacement");
+        }
+    }
+    const V seam(2,0,3);
+    const double tiny=1e-18;
+    const double seamDifference=SdfFunctions::valueDifference(fn,seam,V(0,tiny,0));
+    check(std::abs(seamDifference+10/std::sqrt(113.)*tiny)<1e-14*tiny,"two sphere tiny seam displacement");
+    check(SdfFunctions::valueDifference(fn,V(2,1e-6,3),V(0,-2e-6,0))==0,"two sphere symmetric seam crossing");
+    check(std::isinf(SdfFunctions::rayBounds(fn,V(0,-.1,0),V(0,1,0),0,.2).maximumSecondDerivative),
+          "two sphere branch seam has no finite curvature certificate");
+    int certificates=0;
+    for(const V &o : {V(0,19.5,0),V(0,-19.5,0),V(6.5,0,0),V(0,10,0),V(0,0,0),V(1e6,-2e6,3e6)}) {
+        comparePoint(queryPoint(o,fn),query(o,0,V::Zero(),fn),"two sphere point and bound jet");
+        for(const V &w : {V(.3,.8,.5),V(-.7,-.3,0),V(0,0,1),V(0,1,0)}) {
+            for(double length : {1e-9,.01,.3,2.,30.}) {
+                SdfRayQueryOptions options;
+                options.midpoint=o+.5*length*w+V(1e-15,-1e-15,0);
+                const auto ray=SdfFunctions::rayBounds(fn,o,w,0,length,options);
+                const auto box=SdfFunctions::bounds(fn,o.cwiseMin(o+length*w),o.cwiseMax(o+length*w));
+                check(ray.certified && box.certified,"two sphere certificates enabled");
+                for(int i=0;i<=100;++i) {
+                    const V p=o+(length*i/100)*w;
+                    const auto j=SdfFunctions::evaluateJet(fn,p);
+                    const double derivative=j.gradient.dot(w);
+                    check(std::abs(j.value-reference(p))<1e-9,"two sphere agreement with independent union");
+                    check(j.value>=ray.minimumValue && j.value<=ray.maximumValue,"two sphere ray value enclosure");
+                    check(derivative>=ray.minimumDerivative && derivative<=ray.maximumDerivative,"two sphere directional derivative enclosure");
+                    check(j.value>=box.minimumValue && j.value<=box.maximumValue,"two sphere box value enclosure");
+                    check(j.gradient.norm()<=box.maximumGradientNorm+1e-12,"two sphere box gradient enclosure");
+                    if(i>0 && std::isfinite(ray.maximumSecondDerivative)) {
+                        const auto previous=SdfFunctions::evaluateJet(fn,o+(length*(i-1)/100)*w);
+                        check(std::abs((j.gradient-previous.gradient).dot(w))<=
+                              ray.maximumSecondDerivative*length/100+1e-11,"two sphere curvature enclosure");
+                    }
+                }
+                ++certificates;
+            }
+        }
+    }
+    std::cout<<"two spheres: independent union, outward normals, sub-ulp differences, seam and "
+             <<certificates<<" certificates passed\n";
+}
 }
 }
 int main() {
@@ -209,6 +268,7 @@ int main() {
         Tungsten::geometryChecks();
         Tungsten::rayReuseChecks();
         Tungsten::roundedUGrooveChecks();
+        Tungsten::twoSphereChecks();
         return 0;
     } catch(const std::exception &error) {
         std::cerr<<error.what()<<'\n'; return 1;

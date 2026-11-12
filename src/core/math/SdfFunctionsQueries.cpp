@@ -265,21 +265,30 @@ template<class T> T knobGeometry(P<T> p,SdfFunctions::Function variant=SdfFuncti
     base=maximum(-prism(rotated(shifted(b,0,0,-1.0),plus90)),base);
     return minimum(subtract(outer,base,double(0.1f)),d)*size;
 }
-Jet query(const V &local,double radius,const V &w=V::Zero()) {
+template<class T> T twoSpheresGeometry(const P<T> &p) {
+    // Equal radii and centers at y=+/-10: the closer sphere is selected by
+    // the sign of y. Folding once keeps the hard CSG seam at y=0 exact.
+    return sphere(P<T>{p[0],maximum(p[1],-p[1])-T(10),p[2]},9.5);
+}
+template<class T> T geometry(const P<T> &p,SdfFunctions::Function fn) {
+    return fn==SdfFunctions::Function::TwoSpheres ? twoSpheresGeometry(p) : knobGeometry(p);
+}
+Jet query(const V &local,double radius,const V &w=V::Zero(),
+          SdfFunctions::Function fn=SdfFunctions::Function::Knob) {
     P<Jet> p;
     for(int i=0;i<3;++i) {
         p[i]=Jet(local[i]); p[i].gradient[i]=1; p[i].lip=1; p[i].radius=radius;
         p[i].derivative=p[i].minimumDerivative=p[i].maximumDerivative=w[i];
         p[i].speed=w.norm();
     }
-    return knobGeometry(p);
+    return geometry(p,fn);
 }
-PointJet queryPoint(const V &local) {
+PointJet queryPoint(const V &local,SdfFunctions::Function fn=SdfFunctions::Function::Knob) {
     P<PointJet> p;
     for(int i=0;i<3;++i) {
         p[i]=PointJet(local[i]); p[i].gradient[i]=1; p[i].constant=false;
     }
-    return knobGeometry(p);
+    return geometry(p,fn);
 }
 void requireQueries(SdfFunctions::Function fn) {
     if(!SdfFunctions::supportsQueries(fn))
@@ -349,15 +358,20 @@ float SdfFunctions::knob_inner(Vec3f p,int &) {
 float SdfFunctions::knob_outer(Vec3f p,int &) {
     return float(knobGeometry(P<double>{p.x(),p.y(),p.z()},Function::KnobOuter));
 }
+float SdfFunctions::two_spheres(Vec3f p,int &) {
+    return float(twoSpheresGeometry(P<double>{p.x(),p.y(),p.z()}));
+}
 float SdfFunctions::rounded_u_groove(Vec3f p,int &) {
     return float(roundedUJet(V(p.x(),p.y(),p.z())).value);
 }
-bool SdfFunctions::supportsQueries(Function fn) { return fn==Function::Knob || fn==Function::RoundedUGroove; }
+bool SdfFunctions::supportsQueries(Function fn) {
+    return fn==Function::Knob || fn==Function::RoundedUGroove || fn==Function::TwoSpheres;
+}
 SdfJet SdfFunctions::evaluateJet(Function fn,const V &x) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfJet);
     requireQueries(fn);
     if(fn==Function::RoundedUGroove) return roundedUJet(x);
-    const auto q=queryPoint(x);
+    const auto q=queryPoint(x,fn);
     return {q.value,q.gradient};
 }
 double SdfFunctions::valueDifference(Function fn,const V &x,const V &d) {
@@ -366,13 +380,13 @@ double SdfFunctions::valueDifference(Function fn,const V &x,const V &d) {
     if(fn==Function::RoundedUGroove) return roundedUDifference(x,d);
     P<Difference> inputs;
     for(int i=0;i<3;++i) { inputs[i]=Difference(x[i]); inputs[i].delta=d[i]; }
-    return knobGeometry(inputs).delta;
+    return geometry(inputs,fn).delta;
 }
 SdfBounds SdfFunctions::bounds(Function fn,const V &lo,const V &hi) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfBounds);
     requireQueries(fn);
     if(fn==Function::RoundedUGroove) return roundedUBounds(lo,hi);
-    const auto q=query(0.5*lo+0.5*hi,0.5*(hi-lo).norm()*(1+1e-12));
+    const auto q=query(0.5*lo+0.5*hi,0.5*(hi-lo).norm()*(1+1e-12),V::Zero(),fn);
     return {q.value-q.error(),q.value+q.error(),q.lip*(1+1e-12),true};
 }
 SdfRayBounds SdfFunctions::rayBounds(Function fn,const V &o,const V &w,double lo,double hi,
@@ -386,7 +400,7 @@ SdfRayBounds SdfFunctions::rayBounds(Function fn,const V &o,const V &w,double lo
     // midpoint by roundoff. Cover both when constructing the certificate.
     const double shift=(midpoint-rayMidpoint).norm(),speed=w.norm();
     const double radius=(0.5*(hi-lo)*speed+shift)*(1+1e-12);
-    const auto q=query(midpoint,radius,w);
+    const auto q=query(midpoint,radius,w,fn);
     SdfRayBounds r;
     // Keep directional enclosures through hard min/max branches. Using only
     // +/-|grad| after a nearby CSG seam is unnecessarily loose for grazing

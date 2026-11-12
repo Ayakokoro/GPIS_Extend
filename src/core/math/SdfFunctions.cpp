@@ -64,9 +64,7 @@ namespace Tungsten {
 
     // Knob geometry and differential queries share one definition in SdfFunctionsQueries.cpp.
 
-    float SdfFunctions::two_spheres(Vec3f p, int& mat) {
-        return min((p - Vec3f(0., 10., 0.f)).length() - 9.5f, (p - Vec3f(0.f, -10.f, 0.f)).length() - 9.5f);
-    }
+    // Two-sphere geometry and certified queries share SdfFunctionsQueries.cpp.
 
     template<typename T>
     T fract(T v) {
