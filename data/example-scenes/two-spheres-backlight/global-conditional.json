@@ -1,0 +1,131 @@
+{
+  "media": [
+    {
+      "name": "gp",
+      "type": "global_conditional",
+      "gaussian_process": {
+        "type": "standard",
+        "mean": {
+          "type": "procedural",
+          "func": "two_spheres",
+          "transform": {
+            "scale": 0.1
+          },
+          "scale": 0.1
+        },
+        "covariance": {
+          "type": "squared_exponential",
+          "sigma": 0.08,
+          "lengthScale": 0.2
+        }
+      },
+      "material": {
+        "type": "lambert",
+        "albedo": 0.8
+      },
+      "max_bounces": 128,
+      "sdf_lipschitz": 1.001,
+      "gradient_bound": 1.001
+    }
+  ],
+  "primitives": [
+    {
+      "name": "shared_process_bounds",
+      "type": "cube",
+      "int_medium": "gp",
+      "bsdf": {
+        "type": "forward",
+        "albedo": 1
+      },
+      "transform": {
+        "position": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          3,
+          5,
+          3
+        ]
+      }
+    },
+    {
+      "name": "rear_only_disk",
+      "type": "disk",
+      "emission": 2500.0,
+      "cone_angle": 90,
+      "bsdf": {
+        "type": "null",
+        "albedo": 1
+      },
+      "transform": {
+        "position": [
+          0.65,
+          0,
+          0
+        ],
+        "scale": 0.01,
+        "rotation": [
+          180,
+          0,
+          0
+        ]
+      }
+    }
+  ],
+  "camera": {
+    "type": "pinhole",
+    "resolution": [
+      64,
+      64
+    ],
+    "fov": 28,
+    "tonemap": "filmic",
+    "reconstruction_filter": "box",
+    "transform": {
+      "position": [
+        0,
+        6,
+        0
+      ],
+      "look_at": [
+        0,
+        1,
+        0
+      ],
+      "up": [
+        0,
+        0,
+        1
+      ]
+    }
+  },
+  "integrator": {
+    "type": "path_tracer",
+    "min_bounces": 0,
+    "max_bounces": 20,
+    "enable_light_sampling": true,
+    "enable_volume_light_sampling": true,
+    "enable_consistency_checks": false,
+    "enable_two_sided_shading": true,
+    "use_cuda_gpis": false,
+    "independent_path_sampling": true,
+    "wavefront_gpis": false
+  },
+  "renderer": {
+    "output_directory": "",
+    "output_file": "render.png",
+    "hdr_output_file": "render.exr",
+    "overwrite_output_files": true,
+    "adaptive_sampling": false,
+    "enable_resume_render": false,
+    "stratified_sampler": false,
+    "scene_bvh": true,
+    "spp": 8,
+    "spp_step": 8,
+    "checkpoint_interval": "0",
+    "timeout": "0",
+    "output_buffers": []
+  }
+}

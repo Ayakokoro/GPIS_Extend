@@ -21,7 +21,7 @@ creases), not an unbiased solution of sharp-edge scattering.
 The input is a directly evaluated procedural/analytic SDF or an existing SDF
 grid. Extinction, conditional covariance and tracking bounds are evaluated
 online. Supported means are homogeneous, linear (including its clamp),
-spherical, procedural `func: "knob"` or `"rounded_u_groove"`, and linearly interpolated VDB SDFs. Covariance must be a
+spherical, procedural `func: "knob"`, `"rounded_u_groove"` or `"two_spheres"`, and linearly interpolated VDB SDFs. Covariance must be a
 stationary squared exponential; its full positive definite world-space metric is
 obtained from the covariance derivatives. Procedural means without certified
 SDF queries and nonstationary kernels are rejected. Materials reuse
@@ -44,6 +44,14 @@ same shape as the legacy float formula. Both global modes now use this value
 and analytic gradient through `ProceduralMean`; neither uses a separate knob
 formula. Existing classic images may change slightly because its gradient
 previously used a fixed 0.001 finite difference.
+
+`two_spheres` supplies the same value, analytic gradient, stable displacement
+and interval certificates for the hard union of radius-9.5 spheres centered at
+`(0, +/-10, 0)`. Its medial plane at `y=0` has no finite curvature bound; the
+query preserves that nonsmooth branch. Like the knob, it now uses analytic
+gradients through `ProceduralMean` for every medium, so new comparisons should
+rerender all methods together. The [backlight example](../data/example-scenes/two-spheres-backlight/global-conditional.json)
+uses coordinate and value scales of 0.1 to obtain radius 0.95 and gap 0.1.
 
 ## Experimental first-passage gradient correction
 
