@@ -202,6 +202,50 @@ void roundedUGrooveChecks() {
     std::cout<<"rounded U groove: boundary, normals, tiny differences and "<<certificates<<" certificates passed\n";
 }
 
+void twoSlabChecks() {
+    const auto fn=SdfFunctions::Function::TwoSlabs;
+    const auto check=[](bool ok,const char *label) { if(!ok) throw std::runtime_error(label); };
+    const auto reference=[](const V &p) {
+        const auto box=[](const V &q) {
+            const V d=q.cwiseAbs()-V(.6,.01,.6);
+            return d.maxCoeff();
+        };
+        return std::min(box(p-V(.18,.02,0)),box(p-V(-.18,-.02,0)));
+    };
+    for(double y : {-.03,-.01,.01,.03}) {
+        const auto j=SdfFunctions::evaluateJet(fn,V(0,y,0));
+        check(std::abs(j.value)<1e-16,"two slab face location");
+        check(std::abs(j.gradient.y())==1,"two slab outward face normal");
+    }
+    for(double step : {1e-8,1e-12,1e-18})
+        check(std::abs(SdfFunctions::valueDifference(fn,V(0,.03,0),V(0,step,0))-step)<1e-14*step,
+              "two slab stable sub-ulp difference");
+    int certificates=0;
+    for(const V &o : {V(0,.3,0),V(0,0,0),V(.18,.02,0),V(.78,.03,.6),V(.5,0,.4),V(1e6,-2e6,3e6)}) {
+        comparePoint(queryPoint(o,fn),query(o,0,V::Zero(),fn),"two slab point and bound jet");
+        for(const V &w : {V(0,-1,0),V(.3,-.8,.5),V(0,0,1)}) {
+            for(double length : {1e-9,.01,.08,.6,2.}) {
+                const auto ray=SdfFunctions::rayBounds(fn,o,w,0,length);
+                const auto box=SdfFunctions::bounds(fn,o.cwiseMin(o+length*w),o.cwiseMax(o+length*w));
+                check(ray.certified && box.certified,"two slab certified bounds");
+                for(int i=0;i<=100;++i) {
+                    const V p=o+(length*i/100)*w;
+                    const auto j=SdfFunctions::evaluateJet(fn,p);
+                    check(std::abs(j.value-reference(p))<1e-9,"two slab independent union");
+                    check(j.value>=ray.minimumValue && j.value<=ray.maximumValue,"two slab ray value bound");
+                    check(j.gradient.dot(w)>=ray.minimumDerivative && j.gradient.dot(w)<=ray.maximumDerivative,
+                          "two slab ray derivative bound");
+                    check(j.value>=box.minimumValue && j.value<=box.maximumValue,"two slab box value bound");
+                    check(j.gradient.norm()<=box.maximumGradientNorm+1e-12,"two slab gradient bound");
+                }
+                ++certificates;
+            }
+        }
+    }
+    std::cout<<"two slabs: independent box union, faces, sub-ulp differences and "
+             <<certificates<<" certificates passed\n";
+}
+
 void twoSphereChecks() {
     const auto fn=SdfFunctions::Function::TwoSpheres;
     const auto check=[](bool ok,const char *label) { if(!ok) throw std::runtime_error(label); };
@@ -269,6 +313,7 @@ int main() {
         Tungsten::rayReuseChecks();
         Tungsten::roundedUGrooveChecks();
         Tungsten::twoSphereChecks();
+        Tungsten::twoSlabChecks();
         return 0;
     } catch(const std::exception &error) {
         std::cerr<<error.what()<<'\n'; return 1;

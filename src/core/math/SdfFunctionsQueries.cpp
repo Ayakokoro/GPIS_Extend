@@ -270,7 +270,22 @@ template<class T> T twoSpheresGeometry(const P<T> &p) {
     // the sign of y. Folding once keeps the hard CSG seam at y=0 exact.
     return sphere(P<T>{p[0],maximum(p[1],-p[1])-T(10),p[2]},9.5);
 }
+template<class T> T slabGeometry(const P<T> &p) {
+    // Two 1.2 x 0.02 x 1.2 boxes in one mean field. The max of face
+    // distances is 1-Lipschitz and is the exact SDF near each broad face.
+    const T x=maximum(p[0],-p[0])-T(0.6);
+    const T y=maximum(p[1],-p[1])-T(0.01);
+    const T z=maximum(p[2],-p[2])-T(0.6);
+    return maximum(maximum(x,y),z);
+}
+template<class T> T twoSlabsGeometry(const P<T> &p) {
+    // Center separation 0.04, face gap 0.02, horizontal offset 0.36.
+    return minimum(slabGeometry(shifted(p,-0.18,-0.02,0)),
+                   slabGeometry(shifted(p,0.18,0.02,0)));
+}
+
 template<class T> T geometry(const P<T> &p,SdfFunctions::Function fn) {
+    if(fn==SdfFunctions::Function::TwoSlabs) return twoSlabsGeometry(p);
     return fn==SdfFunctions::Function::TwoSpheres ? twoSpheresGeometry(p) : knobGeometry(p);
 }
 Jet query(const V &local,double radius,const V &w=V::Zero(),
@@ -364,8 +379,11 @@ float SdfFunctions::two_spheres(Vec3f p,int &) {
 float SdfFunctions::rounded_u_groove(Vec3f p,int &) {
     return float(roundedUJet(V(p.x(),p.y(),p.z())).value);
 }
+float SdfFunctions::two_slabs(Vec3f p,int &) {
+    return float(twoSlabsGeometry(P<double>{p.x(),p.y(),p.z()}));
+}
 bool SdfFunctions::supportsQueries(Function fn) {
-    return fn==Function::Knob || fn==Function::RoundedUGroove || fn==Function::TwoSpheres;
+    return fn==Function::Knob || fn==Function::RoundedUGroove || fn==Function::TwoSpheres || fn==Function::TwoSlabs;
 }
 SdfJet SdfFunctions::evaluateJet(Function fn,const V &x) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfJet);
