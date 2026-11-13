@@ -30,6 +30,8 @@ namespace Tungsten {
         static SdfRayBounds rayBounds(Function fn, const Eigen::Vector3d &origin,
                                      const Eigen::Vector3d &direction, double begin, double end,
                                      const SdfRayQueryOptions &options = {});
+        static void appendHistoryCandidatePoints(Function fn, const Eigen::Vector3d &origin,
+            const Eigen::Vector3d &direction, double begin, double end, std::vector<double> &points);
 
 		static float knob(Vec3f p, int& mat);
 		static float knob_inner(Vec3f p, int& mat);

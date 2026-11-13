@@ -2,6 +2,7 @@
 #include <Eigen/Core>
 #include <limits>
 #include <optional>
+#include <vector>
 
 namespace Tungsten {
 
@@ -52,5 +53,8 @@ public:
     virtual SdfRayBounds rayBounds(const Eigen::Vector3d &origin, const Eigen::Vector3d &direction,
                                   double begin, double end,
                                   const SdfRayQueryOptions &options = {}) const = 0;
+    // Optional geometry features used only for selecting passed history points.
+    virtual void appendHistoryCandidatePoints(const Eigen::Vector3d &, const Eigen::Vector3d &,
+                                               double, double, std::vector<double> &) const {}
 };
 }

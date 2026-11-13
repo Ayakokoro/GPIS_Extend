@@ -3,10 +3,14 @@
 #include "math/conditional/gpss/SdfMeanField.hpp"
 #include "math/conditional/transport/CollisionGradientSampler.h"
 #include "math/conditional/transport/DirectionalGradient.h"
+#include "math/conditional/transport/SinglePointNeural.h"
 #include "math/ConditionalProfile.hpp"
 #include "math/FirstPassageGradient.hpp"
 #include "io/JsonObject.hpp"
+#include "io/Scene.hpp"
 #include "phasefunctions/ObservedNormalScattering.hpp"
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <iostream>
 
 namespace Tungsten {
@@ -15,12 +19,12 @@ namespace {
 Eigen::Vector3d eigen(const Vec3f &p) { return {p.x(),p.y(),p.z()}; }
 Eigen::Vector3d eigen(const Vec3d &p) { return {p.x(),p.y(),p.z()}; }
 Vec3f vec(const Eigen::Vector3d &p) { return Vec3f(float(p.x()),float(p.y()),float(p.z())); }
-void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathContext &c,const Ray &ray) {
+void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathContext &c,const Ray &ray,bool neural) {
     if (!diagnostic || !diagnostic->collectFlight) return;
     using J = nlohmann::json;
     auto vector = [](const auto &v) { return J::array({v.x(),v.y(),v.z()}); };
     const auto w=eigen(ray.dir()).normalized();
-    diagnostic->flight = {{"model","global_conditional"},
+    diagnostic->flight = {{"model",neural ? "global_conditional_neural" : "global_conditional"},
         {"birth_position",vector(c.birth.birthPosition)},{"birth_value",c.birth.birthValue},
         {"birth_gradient",vector(c.birth.birthGradient)},{"conditioned_birth",true},
         {"origin",vector(c.position)},{"direction",vector(w)},
@@ -161,7 +165,7 @@ public:
     }
 };
 }
-GlobalConditionalMedium::GlobalConditionalMedium() {
+GlobalConditionalMedium::GlobalConditionalMedium(bool singlePointNeural) : _singlePointNeural(singlePointNeural) {
     _phaseFunction=std::make_shared<ConditionalPhase>(*this);
     _deltaPhase=std::make_shared<ConditionalPhase>(*this,true);
 }
@@ -182,6 +186,23 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
         try { _anchorSelection=FirstPassageGradient::parseAnchorSelection(selection); }
         catch(const std::invalid_argument &e) { settings.parseError(e.what()); }
     }
+    _singlePointModelFile.reset();
+    _singlePointModel.reset();
+    _singlePointCap.reset();
+    if(_singlePointNeural) {
+        if(_fpGradient)
+            value.parseError("global_conditional_neural currently corrects extinction only; fp_gradient.enabled must be false");
+        const auto options=value.getRequiredMember("single_point_neural");
+        _singlePointModelFile=scene.fetchResource(options.getRequiredMember("model"));
+        if(options["correction_cap"]) {
+            double cap;
+            options.getField("correction_cap",cap);
+            if(!(cap>=1) || !std::isfinite(cap))
+                options.parseError("single_point_neural.correction_cap must be finite and at least one");
+            _singlePointCap=cap;
+        }
+    } else if(value["single_point_neural"])
+        value.parseError("single_point_neural requires type global_conditional_neural");
     _tracking=cg::ConditionalTrackingSettings{};
     std::string majorantMode="adaptive";
     value.getField("tracking_majorant",majorantMode);
@@ -206,7 +227,14 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
 }
 rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     auto value=ClassicGlobalMedium::toJson(allocator);
-    value["type"].SetString("global_conditional",allocator);
+    value["type"].SetString(_singlePointNeural ? "global_conditional_neural" : "global_conditional",allocator);
+    if(_singlePointNeural) {
+        rapidjson::Value neural(rapidjson::kObjectType);
+        if(_singlePointModelFile)
+            neural.AddMember("model",JsonUtils::toJson(*_singlePointModelFile,allocator),allocator);
+        if(_singlePointCap) neural.AddMember("correction_cap",*_singlePointCap,allocator);
+        value.AddMember("single_point_neural",std::move(neural),allocator);
+    }
     value.AddMember("non_gp_surface_policy",rapidjson::Value(
         _nonGpSurfacePolicy==ConditionalNonGpSurfacePolicy::RetainEndpoint ? "retain_endpoint" : "restart_exterior",allocator),allocator);
     value.AddMember("fp_gradient",rapidjson::Value(JsonObject{allocator,"enabled",_fpGradient,
@@ -229,11 +257,24 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_macrocell_far_max_expected_events",_tracking.macrocellFarMaxExpectedEvents,allocator);
     return value;
 }
+void GlobalConditionalMedium::loadResources() {
+    ClassicGlobalMedium::loadResources();
+    if(_singlePointNeural) {
+        if(!_singlePointModelFile)
+            throw std::runtime_error("global_conditional_neural requires a model resource");
+        _singlePointModel=cg::SinglePointNeuralModel::load(_singlePointModelFile->absolute().asString(),_singlePointCap);
+    }
+}
 void GlobalConditionalMedium::prepareForRender() {
     _correctedCollisions.store(0,std::memory_order_relaxed);
     _gradientFallbacks.store(0,std::memory_order_relaxed);
     _discardedSurfacePaths.store(0,std::memory_order_relaxed);
     _discardedSurfaceConnections.store(0,std::memory_order_relaxed);
+    _networkQueries.store(0,std::memory_order_relaxed);
+    _correctionCapHits.store(0,std::memory_order_relaxed);
+    _neuralOutsideDomain.store(0,std::memory_order_relaxed);
+    _neuralBaselineFallbacks.store(0,std::memory_order_relaxed);
+    _neuralOutsideFeatureRange.store(0,std::memory_order_relaxed);
     if(!dynamic_cast<SquaredExponentialCovariance *>(_covariance.get()))
         throw std::runtime_error("global_conditional requires a stationary squared_exponential covariance");
     ClassicGlobalMedium::prepareForRender();
@@ -256,6 +297,19 @@ void GlobalConditionalMedium::prepareForRender() {
     else throw std::runtime_error("global_conditional: this scene mean does not provide certified SDF queries");
     if(_tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants && !_field.mean->globalMagnitudeBounds())
         throw std::runtime_error("tracking_majorant two_constants requires a clamped VDB SDF or constant mean with global bounds");
+    if(_singlePointNeural) {
+        if(!_singlePointModel)
+            throw std::runtime_error("global_conditional_neural: loadResources must precede prepareForRender");
+        if(_fpGradient)
+            throw std::runtime_error("global_conditional_neural leaves collision gradient distributions unchanged");
+        _singlePointModel->validateField(_field);
+        rapidjson::Document description;
+        const auto mean=_mean->toJson(description.GetAllocator());
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        mean.Accept(writer);
+        _singlePointModel->validateMeanDescription(buffer.GetString());
+    }
 }
 void GlobalConditionalMedium::teardownAfterRender() {
     if(_fpGradient)
@@ -263,7 +317,22 @@ void GlobalConditionalMedium::teardownAfterRender() {
                  <<",\"sampling_fallbacks\":"<<gradientFallbacks()<<"}\n";
     std::cout<<"GPIS conditional discarded surface births: {\"paths\":"<<discardedSurfacePaths()
              <<",\"shadow_connections\":"<<discardedSurfaceConnections()<<"}\n";
+    if(_singlePointNeural)
+        std::cout<<"GPIS single-point neural statistics: {\"network_queries\":"<<_networkQueries.load()
+                 <<",\"correction_cap_hits\":"<<_correctionCapHits.load()
+                 <<",\"outside_domain\":"<<_neuralOutsideDomain.load()
+                 <<",\"baseline_fallbacks\":"<<_neuralBaselineFallbacks.load()
+                 <<",\"outside_feature_range\":"<<_neuralOutsideFeatureRange.load()
+                 <<",\"correction_cap\":"<<_singlePointModel->cap()
+                 <<",\"collision_gradient_correction\":false}\n";
     ClassicGlobalMedium::teardownAfterRender();
+}
+void GlobalConditionalMedium::recordNeuralWork(const cg::ConditionalTrackingWork &work) const {
+    _networkQueries.fetch_add(work.networkQueries,std::memory_order_relaxed);
+    _correctionCapHits.fetch_add(work.correctionCapHits,std::memory_order_relaxed);
+    _neuralOutsideDomain.fetch_add(work.neuralOutsideDomain,std::memory_order_relaxed);
+    _neuralBaselineFallbacks.fetch_add(work.neuralBaselineFallbacks,std::memory_order_relaxed);
+    _neuralOutsideFeatureRange.fetch_add(work.neuralOutsideFeatureRange,std::memory_order_relaxed);
 }
 void GlobalConditionalMedium::prepareNonGpSurface(PathSampleGenerator &sampler,
         const Vec3f &position,const Vec3f &incomingDirection,MediumState &state) const
@@ -306,14 +375,16 @@ try
     if(!std::isfinite(ray.farT()) || ray.farT()<0)
         throw cg::NumericError(cg::NumericStatus::InvalidInput,"global_conditional needs a finite boundary-enclosed segment");
     const auto c=context(sampler,ray,state);
-    observeBirth(state.distanceDiagnostic,*c,ray);
+    observeBirth(state.distanceDiagnostic,*c,ray,_singlePointNeural);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     // Geometry nearT suppresses self-intersections only. It must not cut out
     // part of the medium next to a collision or a transparent boundary.
-    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking);
+    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get());
     cg::Random rng(sampler); double t;
-    const bool escaped=segment.track(rng,true,t)!=0;
+    cg::ConditionalTrackingWork neuralWork;
+    const bool escaped=segment.track(rng,true,t,_singlePointNeural ? &neuralWork : nullptr)!=0;
+    if(_singlePointNeural) recordNeuralWork(neuralWork);
     if (state.distanceDiagnostic && state.distanceDiagnostic->collectFlight)
         state.distanceDiagnostic->flight["sampled_distance"] = t;
     const Eigen::Vector3d p=c->position+t*w;
@@ -382,12 +453,14 @@ try
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Shadow);
     if(!state) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional transmittance requires path state");
     const auto c=context(sampler,ray,*state);
-    observeBirth(state->distanceDiagnostic,*c,ray);
+    observeBirth(state->distanceDiagnostic,*c,ray,_singlePointNeural);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
-    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking);
+    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get());
     cg::Random rng(sampler); double t;
-    const double tr=segment.track(rng,false,t);
+    cg::ConditionalTrackingWork neuralWork;
+    const double tr=segment.track(rng,false,t,_singlePointNeural ? &neuralWork : nullptr);
+    if(_singlePointNeural) recordNeuralWork(neuralWork);
     auto next=std::make_shared<ConditionalPathContext>(*c);
     next->position=c->position+double(ray.farT())*speed*w; next->rayOrigin=ray.hitpoint();
     // Shadow traversal uses the same endpoint renewal as distance sampling,

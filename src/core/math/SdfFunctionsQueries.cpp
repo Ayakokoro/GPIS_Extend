@@ -385,6 +385,47 @@ float SdfFunctions::two_slabs(Vec3f p,int &) {
 bool SdfFunctions::supportsQueries(Function fn) {
     return fn==Function::Knob || fn==Function::RoundedUGroove || fn==Function::TwoSpheres || fn==Function::TwoSlabs;
 }
+void SdfFunctions::appendHistoryCandidatePoints(Function fn,const V &o,const V &w,
+        double lo,double hi,std::vector<double> &points)
+{
+    if(fn!=Function::TwoSlabs || !(hi>lo)) return;
+    // This represented mean is min(max(six affine faces), max(six faces)).
+    // Enumerate possible face switches, then retain only changes of the active
+    // affine envelope. In particular this includes each slab's medial minimum
+    // and the empty gap's maximum, without a marching step or sampling grid.
+    struct Face { double intercept,slope; };
+    std::array<Face,12> faces;
+    const std::array<V,2> centers{{V(.18,.02,0),V(-.18,-.02,0)}};
+    const V half(.6,.01,.6);
+    for(int slab=0;slab<2;++slab) for(int axis=0;axis<3;++axis) for(int side=0;side<2;++side) {
+        const double sign=side ? 1.0 : -1.0;
+        faces[slab*6+axis*2+side]={sign*(o[axis]-centers[slab][axis])-half[axis],sign*w[axis]};
+    }
+    std::vector<double> cuts{lo,hi};
+    cuts.reserve(68);
+    for(std::size_t i=0;i<faces.size();++i) for(std::size_t j=0;j<i;++j) {
+        const double denominator=faces[i].slope-faces[j].slope;
+        if(denominator==0) continue;
+        const double t=(faces[j].intercept-faces[i].intercept)/denominator;
+        if(t>lo && t<hi && std::isfinite(t)) cuts.push_back(t);
+    }
+    std::sort(cuts.begin(),cuts.end());
+    cuts.erase(std::unique(cuts.begin(),cuts.end()),cuts.end());
+    const auto active=[&](double t) {
+        int first=0,second=6;
+        const auto value=[&](int i) { return faces[i].intercept+t*faces[i].slope; };
+        for(int i=1;i<6;++i) if(value(i)>value(first)) first=i;
+        for(int i=7;i<12;++i) if(value(i)>value(second)) second=i;
+        return value(second)<value(first) ? second : first;
+    };
+    int previous=active(cuts[0]+.5*(cuts[1]-cuts[0]));
+    for(std::size_t i=1;i+1<cuts.size();++i) {
+        const int next=active(cuts[i]+.5*(cuts[i+1]-cuts[i]));
+        if(faces[previous].slope!=faces[next].slope || faces[previous].intercept!=faces[next].intercept)
+            points.push_back(cuts[i]);
+        previous=next;
+    }
+}
 SdfJet SdfFunctions::evaluateJet(Function fn,const V &x) {
     ConditionalGpis::Profile::Scope profile(ConditionalGpis::Profile::Stage::SdfJet);
     requireQueries(fn);

@@ -333,6 +333,8 @@ void compareImages(const char *reference,const char *candidate) {
 }
 #include "SparseHistoryGridChecks.hpp"
 #include "SparseHistoryLutChecks.hpp"
+#include "HistoryCandidateScorerChecks.hpp"
+#include "LocalLawCovarianceChecks.hpp"
 int main(int argc,char **argv) {
     std::cout.setf(std::ios::unitbuf);
     try {
@@ -341,6 +343,10 @@ int main(int argc,char **argv) {
         if(mode=="compare-images" && argc==4) {compareImages(argv[2],argv[3]);return 0;}
         if(mode=="lut" && argc==3) {sparseHistoryLutChecks(argv[2]);return 0;}
         if(mode=="lut-benchmark" && argc==3) {sparseHistoryLutBenchmark(argv[2]);return 0;}
+        if(mode=="scorer-benchmark") {historyScorerBenchmark();return 0;}
+        if(mode=="covariance-benchmark") {localCovarianceBenchmark();return 0;}
+        if(mode=="all"||mode=="covariance") localCovarianceChecks();
+        if(mode=="all"||mode=="scorer") historyScorerChecks();
         if(mode=="all"||mode=="gaussian") gaussianChecks();
         if(mode=="all"||mode=="local") localLawChecks();
         if(mode=="all"||mode=="flight") flightChecks();

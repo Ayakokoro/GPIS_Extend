@@ -392,6 +392,98 @@ Eigen::VectorXd feature(double q,bool derivative,bool surface,int count)
     return f;
 }
 
+// Factor a small covariance in correlation coordinates. Reject poorly resolved
+// pivots instead of regularizing the process. The original feature projection
+// remains available for almost coincident points and rank-one surface births.
+bool smallCovarianceFactor(const Eigen::MatrixXd &covariance,Eigen::MatrixXd &factor)
+{
+    const int n=int(covariance.rows());
+    Eigen::Vector4d sd=Eigen::Vector4d::Zero();
+    Eigen::Matrix4d lower=Eigen::Matrix4d::Zero();
+    constexpr double pivotGuard=64*Epsilon/1e-9;
+    for(int i=0;i<n;++i) {
+        if(!(covariance(i,i)>0) || !std::isfinite(covariance(i,i))) return false;
+        sd[i]=std::sqrt(covariance(i,i));
+        for(int j=0;j<i;++j) {
+            double value=(covariance(i,j)/sd[i])/sd[j];
+            for(int k=0;k<j;++k) value=std::fma(-lower(i,k),lower(j,k),value);
+            lower(i,j)=value/lower(j,j);
+        }
+        double pivot=1;
+        for(int j=0;j<i;++j) pivot=std::fma(-lower(i,j),lower(i,j),pivot);
+        if(!(pivot>pivotGuard) || !std::isfinite(pivot)) return false;
+        lower(i,i)=std::sqrt(pivot);
+    }
+    factor.resize(n,n);
+    for(int i=0;i<n;++i) for(int j=0;j<n;++j) factor(i,j)=sd[i]*lower(i,j);
+    return true;
+}
+
+// Same stationary SE law as the feature series. Work in sigma/ell units;
+// the origin's value/gradient equalities, when present, are already included.
+bool analyticLocalCovariance(double q,const std::vector<double> &positions,bool surface,
+                             Eigen::MatrixXd &covariance,Eigen::MatrixXd &conditional,
+                             Eigen::MatrixXd &crossingFactor)
+{
+    const int n=int(positions.size());
+    for(int i=0;i<n;++i) for(int j=0;j<=i;++j) {
+        const int ii=i ? i+1:0,jj=j ? j+1:0;
+        covariance(ii,jj)=covariance(jj,ii)=valueCovariance(positions[i],positions[j],surface);
+    }
+    const double q2=q*q,e=std::exp(-q2);
+    covariance(1,1)=surface ? -std::expm1(-q2)+q2*(1-q2)*e : 1;
+    for(int i=0;i<n;++i) {
+        const double u=positions[i],x=q*u,d=q-u;
+        double cross=d*std::exp(-0.5*d*d);
+        if(surface) {
+            // q*(exp(x)-1-x)-u*(exp(x)-1), with the first remainder
+            // evaluated by the positive series in valueCovariance.
+            if(x<1) cross=std::fma(q,covariance(0,i ? i+1:0),
+                -u*std::exp(-0.5*(q2+u*u))*std::expm1(x));
+            else cross+=(u-q*(1+x))*std::exp(-0.5*(q2+u*u));
+        }
+        covariance(1,i ? i+1:0)=covariance(i ? i+1:0,1)=cross;
+    }
+    if(!surface) {
+        // Condition on F(q)=0, then factor out V=-F'(q). The remaining
+        // value covariance is exp(-(a^2+b^2)/2)*(exp(ab)-1-ab), where
+        // a=q-u,b=q-v. Evaluating this directly preserves tiny residuals
+        // that would be lost in two successive Schur subtractions.
+        conditional.resize(n,n);
+        conditional(0,0)=1;
+        Eigen::MatrixXd residual(n-1,n-1),factor;
+        for(int i=1;i<n;++i) {
+            const double a=q-positions[i];
+            conditional(i,0)=conditional(0,i)=a*std::exp(-0.5*a*a);
+            for(int j=1;j<=i;++j) {
+                const double b=q-positions[j],d=a-b;
+                conditional(i,j)=conditional(j,i)=
+                    std::exp(-0.5*d*d)*(-std::expm1(-a*b));
+                residual(i-1,j-1)=residual(j-1,i-1)=valueCovariance(a,b,true);
+            }
+        }
+        if(!smallCovarianceFactor(residual,factor)) return false;
+        crossingFactor=Eigen::MatrixXd::Zero(n,n);
+        crossingFactor(0,0)=1;
+        for(int i=1;i<n;++i) crossingFactor(i,0)=conditional(i,0);
+        crossingFactor.bottomRightCorner(n-1,n-1)=factor;
+        return true;
+    }
+    const double variance=covariance(0,0);
+    if(!(variance>0)) return false;
+    conditional.resize(n,n);
+    constexpr double subtractionGuard=64*Epsilon/1e-9;
+    for(int i=0;i<n;++i) for(int j=0;j<=i;++j) {
+        const double regression=covariance(i+1,0)/variance;
+        const double removed=regression*covariance(0,j+1);
+        const double value=std::fma(-regression,covariance(0,j+1),covariance(i+1,j+1));
+        if(i==j && !(value>subtractionGuard*(std::abs(covariance(i+1,j+1))+std::abs(removed))))
+            return false;
+        conditional(i,j)=conditional(j,i)=value;
+    }
+    return smallCovarianceFactor(conditional,crossingFactor);
+}
+
 } // namespace
 
 double positiveOrthant(const Eigen::VectorXd &mean,const Eigen::MatrixXd &covariance,
@@ -539,8 +631,21 @@ namespace {
 double candidateRemainderSeries(double x)
 {
     double term=0.5,sum=term;
-    for(int n=3;n<=30;++n) { term*=x/n;sum+=term; }
+    for(int n=3;n<=30;++n) {
+        term*=x/n;
+        const double previous=sum;
+        sum+=term;
+        if(sum==previous) break;
+    }
     return sum;
+}
+
+// Var[F(q) | F(0), F'(0)] / sigma^2. Factor out the leading q^4
+// near the birth instead of subtracting two almost equal numbers.
+double candidateValueVariance(double q)
+{
+    const double x=q*q,e=std::exp(-x);
+    return x<1 ? e*x*x*candidateRemainderSeries(x) : -std::expm1(-x)-x*e;
 }
 
 double candidateLogRemainder(double x)
@@ -567,6 +672,40 @@ HistoryCandidateScorer::HistoryCandidateScorer(double currentNormalizedDistance,
         throw NumericError(NumericStatus::InvalidInput,"invalid history scorer position");
     if(!_surface) return;
     if(_q<=8) {
+        const double q2=_q*_q,e=std::exp(-q2);
+        _birthFactor=std::exp(-0.5*q2);
+        _currentVariance=candidateValueVariance(_q);
+        if(_currentVariance>0) {
+            // X=F(q), V=-dF(q)/dq, conditioned on the full birth.
+            const double covXV=-_q*q2*e;
+            const double varV=-std::expm1(-q2)+q2*(1-q2)*e;
+            _speedRegression=covXV/_currentVariance;
+            _speedVariance=std::fma(-_speedRegression,covXV,varV);
+            _currentSd=std::sqrt(_currentVariance);
+            _speedSd=std::sqrt(std::max(0.0,_speedVariance));
+            // The old orthogonalized features remain the reference near a
+            // rank-one birth. Only use the scalar path with ample headroom
+            // against cancellation; no probability/majorant is modified.
+            constexpr double guard=64*Epsilon/1e-9;
+            _scalarSurface=_speedVariance>guard*(varV+std::abs(_speedRegression*covXV));
+        }
+    } else {
+        _logCurrentVariance=candidateLogRemainder(_q*_q);
+        _currentVariance=std::exp(_logCurrentVariance);
+        if(_q<40) {
+            const double q2=_q*_q,e=std::exp(-q2);
+            _speedRegression=-_q*q2*e/_currentVariance;
+            _speedVariance=1-(1-q2+q2*q2)*e-
+                _speedRegression*_speedRegression*_currentVariance;
+        }
+        if(!(_speedVariance>0))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate variance underflow");
+    }
+}
+
+double HistoryCandidateScorer::featureScore(double u,double inverseMills) const
+{
+    if(!_featureCount) {
         _featureCount=std::max(24,int(std::ceil(_q*_q+14*_q+50)));
         _currentFeature=feature(_q,false,true,_featureCount);
         const double currentSd=_currentFeature.stableNorm();
@@ -580,18 +719,19 @@ HistoryCandidateScorer::HistoryCandidateScorer(double currentNormalizedDistance,
         if(!(speedSd>0))
             throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate slope variance underflow");
         _speedFeature/=speedSd;
-    } else {
-        _logCurrentVariance=candidateLogRemainder(_q*_q);
-        _currentVariance=std::exp(_logCurrentVariance);
-        if(_q<40) {
-            const double q2=_q*_q,e=std::exp(-q2);
-            _speedRegression=-_q*q2*e/_currentVariance;
-            _speedVariance=1-(1-q2+q2*q2)*e-
-                _speedRegression*_speedRegression*_currentVariance;
-        }
-        if(!(_speedVariance>0))
-            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate variance underflow");
     }
+    Eigen::VectorXd history=feature(u,false,true,_featureCount);
+    const double historySd=history.stableNorm();
+    if(!(historySd>0))
+        throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate variance underflow");
+    history/=historySd;
+    const double r=std::clamp(_currentFeature.dot(history),0.0,1.0);
+    Eigen::VectorXd residual=history-_currentFeature.dot(history)*_currentFeature;
+    residual-=_currentFeature.dot(residual)*_currentFeature;
+    const double unexplained=std::clamp(residual.squaredNorm(),0.0,1.0);
+    const double gamma=_speedFeature.dot(residual);
+    return weightedCandidateScore(r*r*unexplained+
+        std::min(unexplained,gamma*gamma),inverseMills);
 }
 
 double HistoryCandidateScorer::score(double u,double inverseMills) const
@@ -610,17 +750,39 @@ double HistoryCandidateScorer::score(double u,double inverseMills) const
             std::min(unexplained,gamma*gamma),inverseMills);
     }
     double r=0,unexplained=0,gamma=0;
-    if(_featureCount) {
-        Eigen::VectorXd history=feature(u,false,true,_featureCount);
-        const double historySd=history.stableNorm();
-        if(!(historySd>0))
-            throw NumericError(NumericStatus::NeedHigherPrecision,"history candidate field variance underflow");
-        history/=historySd;
-        r=std::clamp(_currentFeature.dot(history),0.0,1.0);
-        Eigen::VectorXd residual=history-_currentFeature.dot(history)*_currentFeature;
-        residual-=_currentFeature.dot(residual)*_currentFeature;
-        unexplained=std::clamp(residual.squaredNorm(),0.0,1.0);
-        gamma=_speedFeature.dot(residual);
+    if(_q<=8) {
+        if(!_scalarSurface) return featureScore(u,inverseMills);
+        const double historySd=std::sqrt(candidateValueVariance(u));
+        if(!(historySd>0)) return featureScore(u,inverseMills);
+        const double x=_q*u,d=_q-u;
+        double covXU,covUV,covUVScale;
+        if(x<1) {
+            const double birth=_birthFactor*std::exp(-0.5*u*u);
+            const double remainder=x*x*candidateRemainderSeries(x);
+            const double first=_q*remainder,second=u*std::expm1(x);
+            covXU=birth*remainder;
+            covUV=birth*(first-second);
+            covUVScale=birth*(std::abs(first)+std::abs(second));
+        } else {
+            const double prior=std::exp(-0.5*d*d);
+            const double birth=_birthFactor*std::exp(-0.5*u*u);
+            covXU=prior-(1+x)*birth;
+            const double first=d*prior,second=(u-_q*(1+x))*birth;
+            covUV=first+second;
+            covUVScale=std::abs(first)+std::abs(second);
+        }
+        r=(covXU/_currentSd)/historySd;
+        unexplained=std::fma(-r,r,1.0);
+        const double residual=std::fma(-_speedRegression,covXU,covUV);
+        gamma=(residual/historySd)/_speedSd;
+        const double gammaError=(64*Epsilon*(covUVScale+std::abs(_speedRegression*covXU))/historySd)/_speedSd;
+        const double association=r*r*unexplained+std::min(unexplained,gamma*gamma);
+        // Resolve nearly coincident points and heavily cancelling slope
+        // residuals using the original vector algorithm, constructed lazily.
+        const double error=64*Epsilon+2*std::abs(gamma)*gammaError+gammaError*gammaError;
+        if(!(r>=0 && r<=1 && unexplained>0 && association>0) ||
+           !std::isfinite(association) || error>1e-9*association)
+            return featureScore(u,inverseMills);
     } else {
         const double d=_q-u,x=_q*u;
         const double logHistoryVariance=candidateLogRemainder(u*u);
@@ -817,7 +979,14 @@ LocalLaw::LocalLaw(const cg::GPSSField &field,const Start &start,double distance
     means[1]=-derivative/p.speedScale;
     for(int i=1;i<n;++i) means[i+1]=s.mean(field,start,positions[i]);
     Eigen::MatrixXd conditional;
-    if(q<=8) {
+    std::vector<double> normalizedPositions;
+    normalizedPositions.reserve(positions.size());
+    for(double position:positions) normalizedPositions.push_back(position*s.inverseLength);
+    const bool analytic=q<=8 && !settings.referenceCovariance &&
+        analyticLocalCovariance(q,normalizedPositions,s.surface,covariance,conditional,p.crossingFeatures);
+    if(analytic) {
+        if(settings.statistics) settings.statistics->analyticCovariances.fetch_add(1,std::memory_order_relaxed);
+    } else if(q<=8) {
         // The SE feature series makes conditioning a geometric projection.
         // It avoids subtracting nearly equal covariances near a surface birth.
         const int count=std::max(24,int(std::ceil(q*q+14*q+50)));
@@ -830,6 +999,7 @@ LocalLaw::LocalLaw(const cg::GPSSField &field,const Start &start,double distance
         for(int i=0;i<n;++i) residual.row(i)-=(covariance(i+1,0)/covariance(0,0))*features.row(0);
         conditional=residual*residual.transpose();
         p.crossingFeatures=std::move(residual);
+        if(settings.statistics) settings.statistics->featureCovariances.fetch_add(1,std::memory_order_relaxed);
     } else {
         for(int i=0;i<n;++i) for(int j=0;j<n;++j)
             covariance(i ? i+1:0,j ? j+1:0)=valueCovariance(positions[i]*s.inverseLength,positions[j]*s.inverseLength,s.surface);

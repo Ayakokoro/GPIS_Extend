@@ -116,6 +116,10 @@ public:
     virtual double voxelSizeHint() const { return 0.0; }
     virtual void appendRayBreakpoints(const Point3&, const Vector3&, double, double,
                                       std::vector<double>&) const {}
+    // Optional geometric candidates for history selection. These are not
+    // integration knots and never change the baseline majorant partition.
+    virtual void appendHistoryCandidatePoints(const Point3&, const Vector3&, double, double,
+                                               std::vector<double>&) const {}
     // Analytic means are defined everywhere. Sampled means must certify that
     // this entire segment is covered by stored data, not background values.
     // Used by GP first-passage experiments; does not change renderer vacuum rules.

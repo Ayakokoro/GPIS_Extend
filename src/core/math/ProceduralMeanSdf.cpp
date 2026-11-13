@@ -37,6 +37,17 @@ SdfJet ProceduralMean::evaluateJet(const Eigen::Vector3d &p) const
     return {value,double(_scale)*_sdfWorldToLocal.transpose()*q.gradient};
 }
 
+void ProceduralMean::appendHistoryCandidatePoints(const Eigen::Vector3d &o,const Eigen::Vector3d &w,
+        double lo,double hi,std::vector<double> &points) const
+{
+    if(_scale==0) return;
+    // Keep the world ray parameter through nonuniform transforms as in the
+    // differential query path. Clamping may make a candidate redundant, which
+    // is harmless: history selection evaluates the final transformed mean.
+    localSdfQueries().appendHistoryCandidatePoints(_sdfWorldToLocal*o+_sdfTranslation,
+        _sdfWorldToLocal*w,lo,hi,points);
+}
+
 double ProceduralMean::valueDifference(const Eigen::Vector3d &p,const Eigen::Vector3d &d) const
 {
     const auto &queries=localSdfQueries();

@@ -1,5 +1,6 @@
 #include "ConditionalSegment.h"
 #include "MajorantOpticalDepth.h"
+#include "SinglePointNeural.h"
 #include "math/ConditionalProfile.hpp"
 #include <sstream>
 #include <iomanip>
@@ -44,10 +45,12 @@ void ConditionalTrackingSettings::validate() const
         throw NumericError(NumericStatus::InvalidInput,"tracking_macrocell_far_max_expected_events must be zero or at least the near threshold");
 }
 ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
-        const Point3 &o,const Vector3 &w,double length,const ConditionalTrackingSettings &tracking)
+        const Point3 &o,const Vector3 &w,double length,const ConditionalTrackingSettings &tracking,
+        const SinglePointNeuralModel *neuralModel)
     : _field(f),_origin(o),_w(normalizedOrThrow(w)),_length(length),
       _age((o-s.birthPosition).dot(_w)),_tracking(tracking),
-      _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale)
+      _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale),
+      _neuralModel(neuralModel)
 {
     _tracking.validate();
     if (!(length>=0) || !std::isfinite(length))
@@ -75,7 +78,12 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
     } else _birthBound=_straight.birthMajorant(_age+length);
     if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants && _age+length>_birthBound.split)
         _tailMaximum=_straight.constantTailMajorant(_birthBound.split);
+    if(_neuralModel) {
+        _hazardEnvelope=_neuralModel->cap();
+        _neuralFlight=std::make_unique<SinglePointNeuralFlight>(*_neuralModel,f,alongDirection(s,_w),_straight);
+    }
 }
+ConditionalSegment::~ConditionalSegment() = default;
 Gaussian<3> ConditionalSegment::gradient(double t) const
 {
     return _straight.hitStatistics(_age+t).collisionGradient;
@@ -86,12 +94,33 @@ ConditionalScalarStatistics ConditionalSegment::statistics(double t) const
 }
 double ConditionalSegment::hazard(double t) const
 {
-    const double result=_straight.evaluate(_age+t).hazard.value;
+    return correctedHazard(t,nullptr);
+}
+double ConditionalSegment::correctedHazard(double t,ConditionalTrackingWork *work) const
+{
+    double result=_straight.evaluate(_age+t).hazard.value;
+    if(_neuralFlight && result>0) {
+        const auto correction=_neuralFlight->correction(_age+t,_straight);
+        if(!(correction.ratio>=0 && correction.ratio<=_hazardEnvelope) || !std::isfinite(correction.ratio))
+            throw NumericError(NumericStatus::InvalidMajorant,"neural correction exceeds its declared cap");
+        result*=correction.ratio;
+        if(work) {
+            work->networkQueries+=correction.networkEvaluated;
+            work->correctionCapHits+=correction.capped;
+            work->neuralOutsideDomain+=correction.outsideDomain;
+            work->neuralBaselineFallbacks+=!correction.networkEvaluated;
+            work->neuralOutsideFeatureRange+=correction.outsideFeatureRange;
+        }
+    }
     if(!(result>=0) || !std::isfinite(result))
         throw NumericError(NumericStatus::NeedHigherPrecision,"nonfinite conditional hazard");
     return result;
 }
 double ConditionalSegment::majorant(double lo,double hi,double parentMaximum) const
+{
+    return _hazardEnvelope*baselineMajorant(lo,hi,parentMaximum/_hazardEnvelope);
+}
+double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMaximum) const
 {
     const double a=_age+lo,b=_age+hi;
     if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants) {
@@ -124,13 +153,17 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
 {
     Profile::Scope profile(Profile::Stage::Track);
     Profile::FlightWork work;
+    ConditionalTrackingWork neuralWork;
     double traversed=0;
     struct CaptureWork {
         ConditionalTrackingWork *output;
         const Profile::FlightWork &work;
         const double &distance;
-        ~CaptureWork() { if(output) *output={work.candidates,work.intervals,distance}; }
-    } capture{diagnostics,work,traversed};
+        const ConditionalTrackingWork &neural;
+        ~CaptureWork() { if(output) *output={work.candidates,work.intervals,distance,
+            neural.networkQueries,neural.correctionCapHits,neural.neuralOutsideDomain,neural.neuralBaselineFallbacks,
+            neural.neuralOutsideFeatureRange}; }
+    } capture{diagnostics,work,traversed,neuralWork};
     const bool twoConstants=_tracking.majorantMode==ConditionalMajorantMode::TwoConstants;
     hit=_length;
     const double ell=1/std::sqrt(_w.dot(_field.kernel.precision()*_w));
@@ -197,7 +230,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                         const double eventLimit=_tracking.macrocellFarMaxExpectedEvents>0 &&
                             _age+lo>=_tracking.macrocellFarStartScale*ell
                             ? _tracking.macrocellFarMaxExpectedEvents : _tracking.macrocellMaxExpectedEvents;
-                        if(std::isfinite(maximum) && maximum*(clipped-lo)<=
+                        if(std::isfinite(maximum) && _hazardEnvelope*maximum*(clipped-lo)<=
                                 std::min(eventLimit,_tracking.maxExpectedEvents)) {
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
                             if(clipped<hi) limit=Profile::IntervalLimit::MacroBoundary;
@@ -227,7 +260,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             // A rejected coarse window still supplies a valid parent bound.
             // Do not retry that window for each of its fine interpolation cells.
             const double parent=hi<=coarseRetryAt ? coarseMaximum : std::numeric_limits<double>::infinity();
-            pending.push_back({lo,hi,coarse ? coarseMaximum : majorant(lo,hi,parent),false});
+            pending.push_back({lo,hi,coarse ? coarseMaximum : baselineMajorant(lo,hi,parent),false});
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
             pending.back().limit=limit;
             Profile::partition(Profile::PartitionPhase::Proposed,limit,(_age+lo)/ell,(hi-lo)/ell);
@@ -236,8 +269,8 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         auto b=pending.back(); pending.pop_back();
         lo=b.begin;
         hi=b.end;
-        if(b.tighten) b.maximum=majorant(lo,hi,b.maximum);
-        while(!twoConstants && b.maximum*(hi-lo)>_tracking.maxExpectedEvents) {
+        if(b.tighten) b.maximum=baselineMajorant(lo,hi,b.maximum);
+        while(!twoConstants && _hazardEnvelope*b.maximum*(hi-lo)>_tracking.maxExpectedEvents) {
             Profile::count(Profile::Counter::Splits);
             const double mid=0.5*(lo+hi);
             if(!(mid>lo&&mid<hi)) throw NumericError(NumericStatus::InvalidMajorant,"cannot refine conditional interval");
@@ -248,27 +281,33 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
             pending.back().limit=b.limit=Profile::IntervalLimit::EventThreshold;
 #endif
-            hi=mid; b.maximum=majorant(lo,hi,b.maximum);
+            hi=mid; b.maximum=baselineMajorant(lo,hi,b.maximum);
         }
         ++work.intervals;
         Profile::count(Profile::Counter::ProcessedIntervals);
         if(b.maximum==0) Profile::count(Profile::Counter::ZeroRateIntervals);
+        // Every pending, birth, tail and macrocell certificate above bounds the
+        // analytic baseline. Scale exactly once here. The cap remains valid
+        // even when the deterministic history anchor changes inside an interval.
+        const double proposalMaximum=_hazardEnvelope*b.maximum;
+        if(!(proposalMaximum>=0) || !std::isfinite(proposalMaximum))
+            throw NumericError(NumericStatus::InvalidMajorant,"nonfinite neural conditional majorant");
         Profile::IntervalWork intervalWork;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
-        Profile::ProcessedInterval partitionWork(b.limit,(_age+lo)/ell,lo,hi,b.maximum,ell,traversed,intervalWork.candidates);
+        Profile::ProcessedInterval partitionWork(b.limit,(_age+lo)/ell,lo,hi,proposalMaximum,ell,traversed,intervalWork.candidates);
 #endif
         double t=lo;
-        if(b.maximum>0) for(;;) {
+        if(proposalMaximum>0) for(;;) {
             double next;
-            if(!opticalDepth.advance(rng,b.maximum,t,hi,next)) break;
+            if(!opticalDepth.advance(rng,proposalMaximum,t,hi,next)) break;
             t=next;
             traversed=t;
             ++work.candidates;++intervalWork.candidates;
             Profile::count(Profile::Counter::CandidateEvents);
-            const double h=hazard(t);
+            const double h=correctedHazard(t,diagnostics ? &neuralWork : nullptr);
             if(h==0) Profile::count(Profile::Counter::ZeroHazardCandidates);
-            if(h>b.maximum*(1+1e-10)) throw NumericError(NumericStatus::InvalidMajorant,"conditional hazard exceeds its bound");
-            const double acceptance=std::min(1.0,h/b.maximum);
+            if(h>proposalMaximum*(1+1e-10)) throw NumericError(NumericStatus::InvalidMajorant,"conditional hazard exceeds its bound");
+            const double acceptance=std::min(1.0,h/proposalMaximum);
             if(collision) {
                 if(rng.openUniform01()<acceptance) {
                     Profile::count(Profile::Counter::AcceptedCollisions);

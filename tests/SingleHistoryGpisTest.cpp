@@ -868,10 +868,10 @@ void trackingChecks() {
 std::vector<one::Settings> majorantVariants() {
     one::Settings legacy;legacy.shadowRouletteThreshold=0;
     auto normalized=legacy;normalized.normalizedBoundOnly=true;
-    auto far=legacy;far.farBoundStartScale=4;
+    auto farSettings=legacy;farSettings.farBoundStartScale=4;
     auto cheap=legacy;cheap.tightenExpectedEvents=8;
     auto combined=normalized;combined.farBoundStartScale=4;combined.tightenExpectedEvents=8;
-    return {legacy,normalized,far,cheap,combined};
+    return {legacy,normalized,farSettings,cheap,combined};
 }
 
 void majorantModelChecks() {

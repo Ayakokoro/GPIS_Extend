@@ -41,12 +41,21 @@ class GlobalConditionalMedium final : public ClassicGlobalMedium {
     mutable std::atomic<std::uint64_t> _correctedCollisions{0}, _gradientFallbacks{0};
     mutable std::atomic<std::uint64_t> _discardedSurfacePaths{0};
     mutable std::atomic<std::uint64_t> _discardedSurfaceConnections{0};
+    bool _singlePointNeural = false;
+    PathPtr _singlePointModelFile;
+    std::optional<double> _singlePointCap;
+    std::shared_ptr<const ConditionalGpis::SinglePointNeuralModel> _singlePointModel;
+    mutable std::atomic<std::uint64_t> _networkQueries{0}, _correctionCapHits{0};
+    mutable std::atomic<std::uint64_t> _neuralOutsideDomain{0}, _neuralBaselineFallbacks{0};
+    mutable std::atomic<std::uint64_t> _neuralOutsideFeatureRange{0};
+    void recordNeuralWork(const ConditionalGpis::ConditionalTrackingWork &) const;
     std::shared_ptr<const ConditionalPathContext> context(
         PathSampleGenerator &,const Ray &,const MediumState &) const;
 public:
-    GlobalConditionalMedium();
+    explicit GlobalConditionalMedium(bool singlePointNeural = false);
     void fromJson(JsonPtr value, const Scene &scene) override;
     rapidjson::Value toJson(Allocator &) const override;
+    void loadResources() override;
     void prepareForRender() override;
     void teardownAfterRender() override;
     // Called once at a non-forward geometry event, before direct-light and
@@ -63,6 +72,7 @@ public:
     const ConditionalGpis::ConditionalTrackingSettings &trackingSettings() const { return _tracking; }
     ConditionalNonGpSurfacePolicy nonGpSurfacePolicy() const { return _nonGpSurfacePolicy; }
     bool gradientCorrectionEnabled() const { return _fpGradient; }
+    bool neuralCorrectionEnabled() const { return _singlePointNeural; }
     bool bridgeCorrectionEnabled() const { return _bridgeCorrection; }
     FirstPassageGradient::AnchorSelection anchorSelection() const { return _anchorSelection; }
     std::uint64_t correctedCollisions() const { return _correctedCollisions.load(std::memory_order_relaxed); }

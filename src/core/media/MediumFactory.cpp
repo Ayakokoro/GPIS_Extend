@@ -40,6 +40,7 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"first_hit_gpis", std::make_shared<FirstHitGpisMedium>},
     {"classic_local", std::make_shared<ClassicLocalMedium>},
     {"global_conditional", std::make_shared<GlobalConditionalMedium>},
+    {"global_conditional_neural", []() -> std::shared_ptr<Medium> { return std::make_shared<GlobalConditionalMedium>(true); }},
     {"sparse_history_gpis", std::make_shared<SparseHistoryGpisMedium>},
     {"single_history_gpis", std::make_shared<SingleHistoryGpisMedium>},
     {"poisson_ellipsoid_local", std::make_shared<PoissonEllipsoidMedium>},

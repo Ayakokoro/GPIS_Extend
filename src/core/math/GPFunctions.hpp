@@ -619,6 +619,10 @@ namespace Tungsten {
                               const SdfRayQueryOptions &options = {}) const override {
             return SdfFunctions::rayBounds(_fn,o,w,lo,hi,options);
         }
+        void appendHistoryCandidatePoints(const Eigen::Vector3d &o,const Eigen::Vector3d &w,
+                double lo,double hi,std::vector<double> &points) const override {
+            SdfFunctions::appendHistoryCandidatePoints(_fn,o,w,lo,hi,points);
+        }
 
         virtual rapidjson::Value toJson(Allocator& allocator) const override {
             return JsonObject{ ProceduralScalar::toJson(allocator), allocator,
@@ -1121,6 +1125,8 @@ namespace Tungsten {
         SdfBounds bounds(const Eigen::Vector3d &minimum,const Eigen::Vector3d &maximum) const override;
         SdfRayBounds rayBounds(const Eigen::Vector3d &o,const Eigen::Vector3d &w,double lo,double hi,
                               const SdfRayQueryOptions &options = {}) const override;
+        void appendHistoryCandidatePoints(const Eigen::Vector3d &o,const Eigen::Vector3d &w,
+            double lo,double hi,std::vector<double> &points) const override;
 
         virtual void fromJson(JsonPtr value, const Scene& scene) override;
         virtual rapidjson::Value toJson(Allocator& allocator) const override;

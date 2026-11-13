@@ -15,6 +15,8 @@ class BivariateNormalCdfTable;
 struct ProbabilityStatistics {
     std::atomic<std::uint64_t> tableAttempts{0};
     std::atomic<std::uint64_t> tableAccepted{0};
+    std::atomic<std::uint64_t> analyticCovariances{0};
+    std::atomic<std::uint64_t> featureCovariances{0};
 };
 
 struct Start {
@@ -33,6 +35,8 @@ struct ProbabilitySettings {
     // Optional shared table. An absent table retains the numerical reference.
     std::shared_ptr<const BivariateNormalCdfTable> bivariateTable;
     std::shared_ptr<ProbabilityStatistics> statistics;
+    // C++ numerical-reference switch for validation; not a scene setting.
+    bool referenceCovariance = false;
 };
 
 // Generic covariance, including negative correlations. Numerical estimates,
@@ -78,10 +82,15 @@ HistoryCandidateStatistics historyCandidateStatistics(
 class HistoryCandidateScorer {
     double _q;
     bool _surface;
-    int _featureCount = 0;
-    Eigen::VectorXd _currentFeature, _speedFeature;
+    bool _scalarSurface = false;
+    // Lazily built only when a covariance subtraction loses precision.
+    // A scorer belongs to one candidate group, not to shared field state.
+    mutable int _featureCount = 0;
+    mutable Eigen::VectorXd _currentFeature, _speedFeature;
     double _logCurrentVariance = 0, _currentVariance = 1;
     double _speedVariance = 1, _speedRegression = 0;
+    double _currentSd = 1, _speedSd = 1, _birthFactor = 1;
+    double featureScore(double historyNormalizedDistance, double inverseMills) const;
 public:
     HistoryCandidateScorer(double currentNormalizedDistance, bool surface);
     double score(double historyNormalizedDistance, double inverseMills) const;

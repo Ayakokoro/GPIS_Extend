@@ -24,6 +24,10 @@ public:
                            const SdfRayQueryOptions &options = {}) const override {
         return _queries->rayBounds(o,w,lo,hi,options);
     }
+    void appendHistoryCandidatePoints(const Point3 &o,const Vector3 &w,double lo,double hi,
+                                      std::vector<double> &points) const override {
+        _queries->appendHistoryCandidatePoints(o,w,lo,hi,points);
+    }
 };
 }
 }

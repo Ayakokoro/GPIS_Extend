@@ -1,7 +1,10 @@
 #pragma once
 #include "ConditionalFlightKernel.h"
+#include <memory>
 
 namespace Tungsten::ConditionalGpis {
+class SinglePointNeuralModel;
+class SinglePointNeuralFlight;
 enum class ConditionalMajorantMode { Adaptive, TwoConstants };
 
 struct ConditionalTrackingSettings {
@@ -27,6 +30,8 @@ struct ConditionalTrackingSettings {
 struct ConditionalTrackingWork {
     std::uint64_t candidates=0, intervals=0;
     double distance=0;
+    std::uint64_t networkQueries=0, correctionCapHits=0, neuralOutsideDomain=0, neuralBaselineFallbacks=0;
+    std::uint64_t neuralOutsideFeatureRange=0;
 };
 
 // A finite, forward part of a straight conditional flight. Geometry endpoints
@@ -40,10 +45,17 @@ class ConditionalSegment {
     ConditionalFlightKernel _straight;
     ConditionalBirthMajorant _birthBound;
     double _tailMaximum=0;
+    const SinglePointNeuralModel *_neuralModel=nullptr;
+    std::unique_ptr<SinglePointNeuralFlight> _neuralFlight;
+    double _hazardEnvelope=1;
+    double baselineMajorant(double begin, double end, double parentMaximum) const;
+    double correctedHazard(double t, ConditionalTrackingWork *work) const;
 public:
     ConditionalSegment(const GPSSField &field, const FlightState &birth,
                        const Point3 &origin, const Vector3 &direction, double length,
-                       const ConditionalTrackingSettings &tracking = {});
+                       const ConditionalTrackingSettings &tracking = {},
+                       const SinglePointNeuralModel *neuralModel = nullptr);
+    ~ConditionalSegment();
     ConditionalScalarStatistics statistics(double t) const;
     Gaussian<3> gradient(double t) const;
     double hazard(double t) const;
