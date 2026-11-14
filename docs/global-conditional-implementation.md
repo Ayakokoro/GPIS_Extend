@@ -535,6 +535,148 @@ Event-count refinement and the certified majorant checks remain active.
 Setting `tracking_step` to zero alone does not disable the cap. The switch
 defaults to `true` and has no effect in `tracking_majorant: "two_constants"`.
 
+### Reusing statistics at the same flight point
+
+Each `ConditionalFlightKernel` retains two exact-age entries containing scalar
+conditional statistics, SE variance/regression factors and the mean jet when
+available. Hazard evaluation, accepted-collision gradients and positive-endpoint
+sampling reuse these deterministic values. The cache belongs to one flight;
+new observations and directions construct a fresh kernel. Ages are compared
+exactly, without quantization or interpolation, and no random sample is cached.
+
+Analytic means already return a full jet for scalar statistics, so the gradient
+query reuses it. Grid means retain the original scalar ray-cursor sample and
+load their full gradient only when needed. The second entry also permits
+current/history feature queries to interleave without evicting the current
+point. The original SE series, covariance formulas and sampler draw order are
+retained. Profiling exposes `point_statistics_hits`, `point_statistics_misses`,
+`point_gradient_reuses` and `point_gradient_loads`.
+
+Validation on 2026-11-13: all 21 conditional/classic CTest checks passed,
+including independent Gaussian moments, exact-age eviction, grid cursor seeks
+and endpoint RNG parity. All 22 render comparisons were pixel-identical;
+shared work counters and tracking histograms were unchanged. On shaderball at
+128x128, 16 spp and eight CPU threads, four interleaved runs per version gave
+median times of 8.200 to 8.095 seconds for ell=0.2, and 8.245 to 8.135 seconds
+for ell=0.05, using the preceding experiment's selected tracking settings.
+Point-query counts fell by 2.71% and 3.63%; measured render-time reductions
+were 1.28% and 1.33%. Most candidate ages are visited only once, limiting the
+benefit. Logs, frozen binaries, hashes and reproduction commands are in
+`outputs/global_conditional_shaderball_profile_20261113/point_statistics_reuse/`.
+
+### Experimental simple SE-tail certificate
+
+`tracking_simple_bound_start_scale` defaults to zero (disabled). Values at
+least 2 enable the simple midpoint/Lipschitz certificate on ordinary adaptive
+intervals whose entire age range lies beyond Q directional correlation lengths
+from the retained birth. It requires the supplied world-space mean Lipschitz
+bound and is rejected with `tracking_majorant: "two_constants"`. For example:
+
+```json
+"tracking_simple_bound_start_scale": 2.0
+```
+
+The target hazard, collision-gradient law and endpoint sampling remain exact.
+Per-flight lazy caches enclose the conditional value/slope mean corrections,
+value standard deviation and regression beyond Q. One midpoint mean query
+supplies `m +/- L*half_width`. With corrected bounds `Fmin`, `Fmax`, the
+crossing-mean lower bound is `-L-Ek-betaMax*max(Fmax,0)`. The rate certificate
+is `Mills(zmin)/sdMin * negativeFlux(muMin,sigma/ell)`, with
+`zmin=min(Fmin/sdMin,Fmin/sigma)`. Calculations use outward-rounded intervals
+and existing Mills/flux roundoff guards; large Q conservatively reuses Q=8.
+
+Birth/Taylor certificates and proposal lengths are retained. A finite simple
+certificate is accepted if its expected candidate count is below both the
+existing tightening and subdivision thresholds. Otherwise the original spatial
+certificate tightens it, retaining the simple result as a parent. Setting
+`tracking_tighten_expected_events` to zero forces this spatial fallback.
+The separate point-bound path is skipped on a simple-bound fallback, avoiding
+a duplicate midpoint query. The earlier normalized far-tail option is unchanged.
+
+Profiling adds `simple_bound_setups`, `simple_bound_queries`,
+`simple_bound_accepted`, `simple_bound_fallbacks` and `bound_simple`.
+Validation includes 26,112 coverage samples, transformed procedural CSG,
+anisotropic SE kernels, negative means, zero/positive births, exact target-hazard
+parity, and delta/ratio survival against independent hazard integration.
+The 2026-11-14 shaderball sweep and confirmation artifacts are under
+`outputs/global_conditional_shaderball_profile_20261113/simple_majorant_20261114/`.
+
+For 128x128 / 16 spp on eight threads, Q=2 was fastest among the confirmed
+settings at both ell=0.2 and ell=0.05. A separate old/simple/simple/old/
+old/simple/simple/old timing sequence compared the frozen pre-change executable
+with the enabled mode, four renders per version. Median times were
+8.130 to 7.610 seconds (6.40% less) and 8.110 to 7.905 seconds (2.53% less).
+The same-new-binary on/off comparisons gave larger savings; the frozen-runtime
+comparison is the reported net result. New code layout and timing variation
+can affect even the disabled executable. These measurements cover this small
+shaderball workload, not a general or equal-quality speedup claim.
+The simple fallback rates were 0.525% and 28.611%. SE variance-bound calls
+fell by 44.94% and 34.90%, while spatial ray-bound queries did not decrease.
+All 21 related CTests and 70 same-configuration exact image comparisons passed;
+different proposal configurations consume different random sequences.
+
+### Optional geometric proposals and point/Lipschitz certificates
+
+```json
+"tracking_fixed_step_limit": false,
+"tracking_age_scale": 0.5,
+"tracking_geometry_step": true,
+"tracking_point_bounds": true,
+"tracking_classic_start_scale": 1.0
+```
+
+Both new switches default to false. Before `tracking_classic_start_scale * ell`,
+the original age-dependent proposals and spatial certificates remain active.
+The initial birth envelope and birth-adjacent Taylor certificates are unchanged.
+The cutoff defaults to one directional correlation length and must be finite
+and nonnegative. These switches require adaptive tracking.
+
+After the cutoff, geometric proposals use `max(sigma/L, 0.5*max(mean,0)/L)`
+with the final world-space mean's Lipschitz bound supplied by the base medium.
+A constant mean (`L=0`) proposes the remaining segment. Geometry endpoints,
+grid faces, optional fixed-step caps and expected-event refinement still apply.
+Age no longer limits these geometric proposals. Disable the fixed-step cap as
+in the example to allow longer empty-space intervals.
+
+Point certificates evaluate the actual mean at the interval midpoint and use
+`mean +/- L*half_length` and directional derivative bounds `[-L,L]`, including
+ray speed and conservative coordinate/evaluation rounding allowances. The
+existing SE conditional mean corrections, variance bounds, regression, Mills
+ratio and crossing-flux reducer are retained. No stochastic gradient is
+normalized, and the target hazard and observation renewal are unchanged.
+
+The point certificate is accepted only when its effective expected candidate
+count, including any neural hazard envelope, is at most both the tightening
+and refinement thresholds. Otherwise the original spatial interval query
+runs and intersects its certificate with the point/parent bound. A zero
+tightening threshold always requests this fine fallback. The options can be
+enabled separately for ablations. Direct `ConditionalSegment` users must
+supply the final mean's certified Lipschitz bound when enabling either switch.
+Profiling adds `geometry_proposals`, `point_bound_queries`,
+`point_bound_accepted`, `point_bound_fallbacks` and the `geometry_proposal`
+partition reason.
+
+Shaderball measurements (2026-11-13) are recorded in
+`outputs/global_conditional_shaderball_profile_20261113/point_lipschitz/comparison.html`.
+At 128x128, 16 spp, eight threads pinned to 0x5555 and seed 20261024,
+four interleaved ordinary Release repeats gave:
+
+| ell | Conditional baseline | Selected new configuration | New time | Classic reference |
+| --- | ---: | --- | ---: | ---: |
+| 0.2 | 9.250 s | both switches, start scale 0 | 8.175 s | 5.220 s |
+| 0.05 | 8.425 s | point bounds only, start scale 1 | 8.250 s | 5.080 s |
+
+Both conditional baselines used age scale 0.5 and disabled fixed-step caps.
+The combined mode reduced time by 11.62% for ell=0.2. For ell=0.05,
+combined configurations were slower in the 64-square screening, and the
+point-only confirmation improved by 2.08%. The switches remain off by default.
+The classic reference has a different memoryless law and path distribution;
+its end-to-end time is not a measurement of pure implementation overhead.
+All 21 conditional/classic CTests and 82 exact-image comparisons passed,
+including disabled-mode parity against the preserved pre-change executable.
+Cross-setting images use different random streams; the report retains
+single-seed image-mean diagnostics without claiming equal variance.
+
 `tracking_normalized_bound_only: true` is an experimental bound-cost option.
 It uses only the standardized moment upper bound, skipping the original
 moment-form bound and its dedicated slope-standard-deviation conversion.

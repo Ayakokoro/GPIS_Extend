@@ -20,6 +20,21 @@ inline void sdfChecks()
         grid->data.values.push_back(float(0.1*x*y*z+0.03*x*x-0.2*y+0.3*z));
     grid->initializeMagnitudeBounds();
     const auto global=grid->globalMagnitudeBounds();
+    {
+        cg::GPSSField f{grid,cg::CovarianceKernel(.7,M::Identity()),
+            {V::Constant(-100),V::Constant(100)}};
+        cg::FlightState birth;birth.birthPosition=V(-2,-1,-2);
+        birth.direction=V(.4,.2,.3).normalized();
+        birth.birthValue=.3;birth.birthGradient=birth.direction;
+        const cg::ConditionalFlightKernel kernel(f,birth);
+        for(double lo:{.1,1.5,3.0}) {
+            const double hi=lo+3;
+            const double bound=kernel.pointIntervalMajorant(lo,hi,global->maximumGradientNorm);
+            for(int i=0;i<=100;++i)
+                check(kernel.evaluate(lo+(hi-lo)*i/100).hazard.value<=bound*(1+1e-10),
+                    "point/Lipschitz bound covers transformed grid faces and clamps");
+        }
+    }
     cg::Random globalRng(926);
     for(int i=0;i<3000;++i) {
         const V p(20*globalRng.uniform01()-10,20*globalRng.uniform01()-10,20*globalRng.uniform01()-10);

@@ -125,10 +125,15 @@ inline void farTailBoundChecks()
     std::cout<<"far SE tail: "<<checked<<" coverage points, cutoff crossing, anisotropic scales and gradient parity passed\n";
 }
 
+#include "ConditionalPointLipschitzChecks.hpp"
+#include "ConditionalSimpleBoundChecks.hpp"
+
 inline void boundChecks()
 {
     midpointReuseChecks();
     farTailBoundChecks();
+    pointLipschitzBoundChecks();
+    simpleBoundChecks();
     namespace b = cg::MajorantBounds;
     // Exact binary fixtures: endpoints, an interior vertex, a boundary vertex,
     // a linear/constant polynomial, and a very small quadratic coefficient.

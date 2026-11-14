@@ -16,12 +16,18 @@ FlightState alongDirection(FlightState birth,const Vector3 &direction)
 }
 void ConditionalTrackingSettings::validate() const
 {
+    if (!(classicStartScale>=0) || !std::isfinite(classicStartScale))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_classic_start_scale must be finite and nonnegative");
     if (!(shadowRouletteThreshold>=0 && shadowRouletteThreshold<=1) || !std::isfinite(shadowRouletteThreshold))
         throw NumericError(NumericStatus::InvalidInput,"tracking_shadow_roulette_threshold must be finite and between zero and one");
     if (!std::isfinite(farBoundStartScale) || (farBoundStartScale!=0 && farBoundStartScale<2))
         throw NumericError(NumericStatus::InvalidInput,"tracking_far_bound_start_scale must be zero or at least two");
+    if (!std::isfinite(simpleBoundStartScale) || (simpleBoundStartScale!=0 && simpleBoundStartScale<2))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_simple_bound_start_scale must be zero or at least two");
     if(majorantMode!=ConditionalMajorantMode::Adaptive && majorantMode!=ConditionalMajorantMode::TwoConstants)
         throw NumericError(NumericStatus::InvalidInput,"invalid conditional majorant mode");
+    if(majorantMode==ConditionalMajorantMode::TwoConstants && (geometryStep || pointBounds || simpleBoundStartScale>0))
+        throw NumericError(NumericStatus::InvalidInput,"point/Lipschitz options require adaptive tracking");
     if(!(constantBirthLength>=0) || !std::isfinite(constantBirthLength))
         throw NumericError(NumericStatus::InvalidInput,"tracking_constant_birth_length must be finite and nonnegative");
     if(!(step>=0) || !std::isfinite(step))
@@ -46,13 +52,18 @@ void ConditionalTrackingSettings::validate() const
 }
 ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         const Point3 &o,const Vector3 &w,double length,const ConditionalTrackingSettings &tracking,
-        const SinglePointNeuralModel *neuralModel)
+        const SinglePointNeuralModel *neuralModel,double meanLipschitz)
     : _field(f),_origin(o),_w(normalizedOrThrow(w)),_length(length),
-      _age((o-s.birthPosition).dot(_w)),_tracking(tracking),
-      _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale),
+      _age((o-s.birthPosition).dot(_w)),_meanLipschitz(meanLipschitz),_tracking(tracking),
+      _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale,tracking.simpleBoundStartScale),
       _neuralModel(neuralModel)
 {
     _tracking.validate();
+    if ((_tracking.geometryStep || _tracking.pointBounds || _tracking.simpleBoundStartScale>0) &&
+        (!(_meanLipschitz>=0) || !std::isfinite(_meanLipschitz)))
+        throw NumericError(NumericStatus::InvalidInput,"point/Lipschitz tracking needs a finite world-space mean Lipschitz bound");
+    if(_tracking.geometryStep || _tracking.pointBounds)
+        _classicBegin=_tracking.classicStartScale/std::sqrt(_w.dot(_field.kernel.precision()*_w));
     if (!(length>=0) || !std::isfinite(length))
         throw NumericError(NumericStatus::InvalidInput,"conditional segment must be finite");
     const Vector3 d=o-s.birthPosition;
@@ -129,8 +140,31 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
         return std::max(_birthBound.maximum,_tailMaximum);
     }
     if(b<=_birthBound.split*(1+1e-14)) return std::min(parentMaximum,_birthBound.maximum);
-    if(b>_birthBound.smoothEnd)
+    if(b>_birthBound.smoothEnd) {
+        if(a>=_straight.simpleBoundBegin()) {
+            const double bound=_straight.simpleIntervalMajorant(a,b,_meanLipschitz,parentMaximum);
+            if(std::isfinite(bound) && _tracking.tightenExpectedEvents>0 &&
+                _hazardEnvelope*bound*(hi-lo)<=std::min(_tracking.tightenExpectedEvents,_tracking.maxExpectedEvents)) {
+                Profile::count(Profile::Counter::SimpleBoundAccepted);
+                return bound;
+            }
+            Profile::count(Profile::Counter::SimpleBoundFallbacks);
+            // The point cone was already queried. Tighten with the original
+            // spatial certificate rather than asking the point path again.
+            return _straight.intervalMajorant(a,b,_tracking.tightenExpectedEvents,std::min(parentMaximum,bound));
+        }
+        if(_tracking.pointBounds && a>=_classicBegin) {
+            const double bound=_straight.pointIntervalMajorant(a,b,_meanLipschitz,parentMaximum);
+            if(std::isfinite(bound) && _tracking.tightenExpectedEvents>0 &&
+                _hazardEnvelope*bound*(hi-lo)<=std::min(_tracking.tightenExpectedEvents,_tracking.maxExpectedEvents)) {
+                Profile::count(Profile::Counter::PointBoundAccepted);
+                return bound;
+            }
+            Profile::count(Profile::Counter::PointBoundFallbacks);
+            parentMaximum=std::min(parentMaximum,bound);
+        }
         return _straight.intervalMajorant(a,b,_tracking.tightenExpectedEvents,parentMaximum);
+    }
     const double bound=std::min(parentMaximum,_straight.birthAdjacentMajorant(a,b,_birthBound));
     // A local interval certificate can be much tighter than the curvature
     // of the entire birth cell, e.g. near a CSG feature.
@@ -200,10 +234,24 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         }
         if(pending.empty()) {
             Profile::count(Profile::Counter::ProposedIntervals);
-            hi=std::min(_length,lo+std::min(maximumStep,_tracking.ageScale*(_age+lo)));
+            double proposal=_tracking.ageScale*(_age+lo);
+            const bool geometry=_tracking.geometryStep && _age+lo>=_birthBound.split &&
+                _age+lo>=_classicBegin;
+            if(geometry) {
+                Profile::count(Profile::Counter::GeometryProposals);
+                if(_meanLipschitz>0) {
+                    const double base=_field.kernel.sigma()/_meanLipschitz;
+                    const double value=_straight.meanValue(_age+lo);
+                    if(!std::isfinite(value))
+                        throw NumericError(NumericStatus::InvalidMajorant,"nonfinite geometric proposal mean");
+                    proposal=std::max(base,0.5*std::max(0.0,value)/_meanLipschitz);
+                } else proposal=_length-lo;
+            }
+            hi=std::min(_length,lo+std::min(maximumStep,proposal));
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
             auto limit=hi==_length ? Profile::IntervalLimit::SegmentEnd :
-                maximumStep<=_tracking.ageScale*(_age+lo) ? Profile::IntervalLimit::Step : Profile::IntervalLimit::Age;
+                maximumStep<=proposal ? Profile::IntervalLimit::Step :
+                geometry ? Profile::IntervalLimit::Geometry : Profile::IntervalLimit::Age;
 #endif
             if(_age+lo<_birthBound.split) {
                 hi=std::min(_length,_birthBound.split-_age);

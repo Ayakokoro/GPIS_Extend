@@ -210,8 +210,12 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     else if(majorantMode!="adaptive") value.parseError("tracking_majorant must be adaptive or two_constants");
     value.getField("tracking_constant_birth_length",_tracking.constantBirthLength);
     value.getField("tracking_fixed_step_limit",_tracking.fixedStepLimit);
+    value.getField("tracking_geometry_step",_tracking.geometryStep);
+    value.getField("tracking_point_bounds",_tracking.pointBounds);
+    value.getField("tracking_classic_start_scale",_tracking.classicStartScale);
     value.getField("tracking_normalized_bound_only",_tracking.normalizedBoundOnly);
     value.getField("tracking_far_bound_start_scale",_tracking.farBoundStartScale);
+    value.getField("tracking_simple_bound_start_scale",_tracking.simpleBoundStartScale);
     value.getField("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold);
     _tracking.step=_trackingStep;
     value.getField("tracking_step_scale",_tracking.stepScale);
@@ -244,8 +248,12 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
         _tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants ? "two_constants" : "adaptive",allocator),allocator);
     value.AddMember("tracking_constant_birth_length",_tracking.constantBirthLength,allocator);
     value.AddMember("tracking_fixed_step_limit",_tracking.fixedStepLimit,allocator);
+    value.AddMember("tracking_geometry_step",_tracking.geometryStep,allocator);
+    value.AddMember("tracking_point_bounds",_tracking.pointBounds,allocator);
+    value.AddMember("tracking_classic_start_scale",_tracking.classicStartScale,allocator);
     value.AddMember("tracking_normalized_bound_only",_tracking.normalizedBoundOnly,allocator);
     value.AddMember("tracking_far_bound_start_scale",_tracking.farBoundStartScale,allocator);
+    value.AddMember("tracking_simple_bound_start_scale",_tracking.simpleBoundStartScale,allocator);
     value.AddMember("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold,allocator);
     value.AddMember("tracking_step_scale",_tracking.stepScale,allocator);
     value.AddMember("tracking_age_scale",_tracking.ageScale,allocator);
@@ -380,7 +388,7 @@ try
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     // Geometry nearT suppresses self-intersections only. It must not cut out
     // part of the medium next to a collision or a transparent boundary.
-    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get());
+    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz);
     cg::Random rng(sampler); double t;
     cg::ConditionalTrackingWork neuralWork;
     const bool escaped=segment.track(rng,true,t,_singlePointNeural ? &neuralWork : nullptr)!=0;
@@ -456,7 +464,7 @@ try
     observeBirth(state->distanceDiagnostic,*c,ray,_singlePointNeural);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
-    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get());
+    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz);
     cg::Random rng(sampler); double t;
     cg::ConditionalTrackingWork neuralWork;
     const double tr=segment.track(rng,false,t,_singlePointNeural ? &neuralWork : nullptr);

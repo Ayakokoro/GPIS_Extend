@@ -40,8 +40,11 @@ cg::Gaussian<4> reference(const cg::GPSSField &f, const cg::FlightState &s, cons
     mean<<target.value,target.gradient;
     return {mean+cross*base.ldlt().solve(obs),base-cross*base.ldlt().solve(cross.transpose())};
 }
+#include "ConditionalPointStatisticsChecks.hpp"
+
 void stage1()
 {
+    samePointStatisticsChecks();
     auto f=field();
     cg::FlightState s;
     s.birthPosition=V(0.1,-0.1,0.2);

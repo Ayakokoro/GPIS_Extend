@@ -11,8 +11,12 @@ struct ConditionalTrackingSettings {
     ConditionalMajorantMode majorantMode = ConditionalMajorantMode::Adaptive;
     double constantBirthLength = 0.0;  // two_constants: world distance to switch; 0 uses analytic birth split
     bool fixedStepLimit = true;       // false disables step/stepScale caps; age growth still applies
+    bool geometryStep = false;       // classic SDF-distance proposals after classicStartScale*ell
+    bool pointBounds = false;        // point/Lipschitz ordinary bounds, with certified fine fallback
+    double classicStartScale = 1.0;   // retain age-limited tracking before this age / ell
     bool normalizedBoundOnly = false; // experimental: skip the second, moment-form upper bound
     double farBoundStartScale = 0.0;   // 0 disables; >=2 caches a certified SE tail envelope
+    double simpleBoundStartScale = 0.0; // 0 disables; >=2 uses the simple midpoint/Lipschitz SE-tail bound
     double shadowRouletteThreshold = 0.1; // classic_global shadow roulette; 0 disables
     double step = 0.0;                 // world distance; 0 selects stepScale*ell
     double stepScale = 0.5;            // multiple of the directional GP length
@@ -41,6 +45,7 @@ class ConditionalSegment {
     Point3 _origin;
     Vector3 _w;
     double _length, _age;
+    double _meanLipschitz, _classicBegin=std::numeric_limits<double>::infinity();
     ConditionalTrackingSettings _tracking;
     ConditionalFlightKernel _straight;
     ConditionalBirthMajorant _birthBound;
@@ -54,7 +59,8 @@ public:
     ConditionalSegment(const GPSSField &field, const FlightState &birth,
                        const Point3 &origin, const Vector3 &direction, double length,
                        const ConditionalTrackingSettings &tracking = {},
-                       const SinglePointNeuralModel *neuralModel = nullptr);
+                       const SinglePointNeuralModel *neuralModel = nullptr,
+                       double meanLipschitz = std::numeric_limits<double>::infinity());
     ~ConditionalSegment();
     ConditionalScalarStatistics statistics(double t) const;
     Gaussian<3> gradient(double t) const;

@@ -201,12 +201,14 @@ FlightState startConditionalExterior(const GPSSField& field, const Point3& entry
 
 ConditionalFlightKernel::ConditionalFlightKernel(const GPSSField& field,
                                                  const FlightState& state, bool normalizedBoundOnly,
-                                                 double farBoundStartScale)
+                                                 double farBoundStartScale, double simpleBoundStartScale)
     : FlightKernel(field, state), normalizedBoundOnly_(normalizedBoundOnly),
-      farBoundStartScale_(farBoundStartScale) {
+      farBoundStartScale_(farBoundStartScale), simpleBoundStartScale_(simpleBoundStartScale) {
     Profile::Scope profile(Profile::Stage::KernelSetup);
     if (!std::isfinite(farBoundStartScale_) || (farBoundStartScale_!=0 && farBoundStartScale_<2))
         throw NumericError(NumericStatus::InvalidInput,"far SE bound requires zero or a cutoff of at least two");
+    if (!std::isfinite(simpleBoundStartScale_) || (simpleBoundStartScale_!=0 && simpleBoundStartScale_<2))
+        throw NumericError(NumericStatus::InvalidInput,"simple SE bound requires zero or a cutoff of at least two");
     if (!field.kernel.supportsAnalyticConditionalTransport()) {
         throw std::invalid_argument(
             std::string("global_conditional is not implemented for kernel '") +
@@ -228,17 +230,40 @@ ConditionalFlightKernel::ConditionalFlightKernel(const GPSSField& field,
     if (farBoundStartScale_>0)
         farBoundBegin_=(bounds::Interval(farBoundStartScale_)/
             bounds::sqrt(bounds::Interval(inverseLength2_))).upper;
+    if (simpleBoundStartScale_>0)
+        simpleBoundBegin_=(bounds::Interval(simpleBoundStartScale_)/
+            bounds::sqrt(bounds::Interval(inverseLength2_))).upper;
 }
 
 ConditionalScalarStatistics ConditionalFlightKernel::scalarStatistics(double age) const {
     Profile::Scope profile(Profile::Stage::ScalarStatistics);
+    return pointStatistics(age).scalar;
+}
+
+ConditionalFlightKernel::PointStatistics &ConditionalFlightKernel::pointStatistics(double age) const {
+    if(pointCache_[recentPoint_].age==age) {
+        Profile::count(Profile::Counter::PointStatisticsHits);
+        return pointCache_[recentPoint_];
+    }
+    const unsigned other=1-recentPoint_;
+    auto &point=pointCache_[other];
+    if(point.age==age) {
+        recentPoint_=other;
+        Profile::count(Profile::Counter::PointStatisticsHits);
+        return point;
+    }
     if (!(age > 0.0 && age <= maximumAgeInDomain()))
         throw std::out_of_range("conditional flight age outside domain");
+    Profile::count(Profile::Counter::PointStatisticsMisses);
+    // Do not publish a partially computed entry if a provider throws.
+    point.age=std::numeric_limits<double>::quiet_NaN();
+    point.hasJet=false;
     const double u=inverseLength2_*age*age, r=std::exp(-0.5*u);
     const MeanRaySample target=[&]() {
         if(meanRay_) return meanRay_->sample(age);
-        const auto jet=meanJet(age);
-        return MeanRaySample{jet.value,state_.direction.dot(jet.gradient)};
+        point.jet=meanJet(age);
+        point.hasJet=true;
+        return MeanRaySample{point.jet.value,state_.direction.dot(point.jet.gradient)};
     }();
     const double meanF=u<1e-3
         ? state_.birthValue+age*deltaSlope_+
@@ -248,8 +273,12 @@ ConditionalScalarStatistics ConditionalFlightKernel::scalarStatistics(double age
     const double meanK=target.derivative+
         r*((1.0-u)*deltaSlope_-inverseLength2_*age*deltaValue_);
     const SeFactors factors=seFactors(inverseLength2_,age);
-    return {meanF,sigma2_*factors.valueVariance,meanK,
+    point.scalar={meanF,sigma2_*factors.valueVariance,meanK,
             meanK-factors.regression*meanF,sigma2_*inverseLength2_*factors.slopeVariance};
+    point.u=u;point.r=r;
+    point.regression=factors.regression;point.slopeVariance=factors.slopeVariance;
+    point.age=age;recentPoint_=other;
+    return point;
 }
 
 HazardEvaluation ConditionalFlightKernel::evaluate(double age) const {
@@ -274,15 +303,20 @@ HitStatistics ConditionalFlightKernel::hitStatistics(double age) const {
 
 Gaussian<3> ConditionalFlightKernel::gradientGivenValueDeviation(double age, double deviation) const {
     Profile::Scope profile(Profile::Stage::CollisionGradient);
-    const auto factors=seFactors(inverseLength2_,age);
-    const double u=inverseLength2_*age*age, r=std::exp(-0.5*u);
-    const auto target=meanJet(age);
+    auto &point=pointStatistics(age);
+    const double u=point.u,r=point.r;
+    if(!point.hasJet) {
+        point.jet=meanJet(age);
+        point.hasJet=true;
+        Profile::count(Profile::Counter::PointGradientLoads);
+    } else Profile::count(Profile::Counter::PointGradientReuses);
+    const auto &target=point.jet;
     Gaussian<3> g;
     g.mean=target.gradient+r*deltaGradient_-precisionDirection_*
-        (age*r*(deltaValue_+age*deltaSlope_)-factors.regression*deviation/inverseLength2_);
+        (age*r*(deltaValue_+age*deltaSlope_)-point.regression*deviation/inverseLength2_);
     const Matrix3 longitudinal=precisionDirection_*precisionDirection_.transpose()/inverseLength2_;
     g.covariance=sigma2_*(-std::expm1(-u)*(field_.kernel.precision()-longitudinal)+
-                         factors.slopeVariance*longitudinal);
+                         point.slopeVariance*longitudinal);
     g.covariance = 0.5 * (g.covariance + g.covariance.transpose());
     return g;
 }
@@ -339,6 +373,97 @@ double ConditionalFlightKernel::intervalMajorant(double lo, double hi,
         return meanRayBounds(lo,hi,queryOptions);
     }();
     return boundedIntervalMajorant(mean,lo,hi,tightenExpectedEvents,parentMaximum);
+}
+
+double ConditionalFlightKernel::pointIntervalMajorant(double lo,double hi,double lipschitz,
+        double parentMaximum) const {
+    Profile::Scope profile(Profile::Stage::IntervalBound);
+    Profile::count(Profile::Counter::PointBoundQueries);
+    if (!(lo>0 && hi>lo && hi<=maximumAgeInDomain()) ||
+        !(lipschitz>=0) || !std::isfinite(lipschitz) || !(parentMaximum>=0))
+        throw NumericError(NumericStatus::InvalidInput,"invalid point/Lipschitz bound interval");
+    const auto mean=pointMeanBounds(lo,hi,lipschitz);
+    if(!std::isfinite(mean.minimumValue) || !std::isfinite(mean.maximumValue) || !std::isfinite(mean.midpointError))
+        return std::numeric_limits<double>::infinity();
+    return boundedIntervalMajorant(mean,lo,hi,
+        std::numeric_limits<double>::infinity(),parentMaximum);
+}
+
+MeanRayBounds ConditionalFlightKernel::pointMeanBounds(double lo,double hi,double lipschitz) const {
+    const double middle=0.5*lo+0.5*hi;
+    double value;
+    {
+        Profile::Scope point(Profile::Stage::BoundSdfPoint);
+        value=meanValue(middle);
+    }
+    if(!std::isfinite(value))
+        throw NumericError(NumericStatus::InvalidMajorant,"nonfinite point/Lipschitz mean");
+    namespace b=MajorantBounds;
+    const double slope=b::up(lipschitz*state_.direction.norm());
+    const double half=b::up(0.5*(hi-lo));
+    // Include coordinate construction, midpoint arithmetic, provider evaluation
+    // and final enclosure roundoff. L is for the final transformed scalar field.
+    const double error=b::up(512*std::numeric_limits<double>::epsilon()*
+        (1+std::abs(value)+lipschitz*state_.birthPosition.norm()+slope*hi));
+    const double radius=b::up(slope*half+error);
+    MeanRayBounds mean;
+    mean.minimumValue=b::down(value-radius);
+    mean.maximumValue=b::up(value+radius);
+    mean.minimumDerivative=-slope;
+    mean.maximumDerivative=slope;
+    mean.midpointValue=value;
+    mean.midpointError=error;
+    mean.certified=true;
+    return mean;
+}
+
+double ConditionalFlightKernel::simpleIntervalMajorant(double lo,double hi,double lipschitz,
+        double parentMaximum) const {
+    Profile::Scope profile(Profile::Stage::IntervalBound);
+    Profile::Scope detail(Profile::Stage::BoundSimple);
+    Profile::count(Profile::Counter::SimpleBoundQueries);
+    if (!(simpleBoundStartScale_>0 && lo>=simpleBoundBegin_ && hi>lo && hi<=maximumAgeInDomain()) ||
+        !(lipschitz>=0) || !std::isfinite(lipschitz) || !(parentMaximum>=0))
+        throw NumericError(NumericStatus::InvalidInput,"invalid simple SE bound interval");
+    using I=bounds::Interval;
+    if(!simpleBounds_.ready) {
+        Profile::count(Profile::Counter::SimpleBoundSetups);
+        // The envelope is decreasing beyond Q>=2. Q=8 also safely covers
+        // every later cutoff, without forming huge polynomial arguments.
+        const I q(std::min(simpleBoundStartScale_,8.0)),q2=q*q;
+        const I rootA=bounds::sqrt(I(inverseLength2_));
+        const I r=bounds::exp(I(-0.5)*q2),e=bounds::exp(-q2);
+        const I v=I(1)-(I(1)+q2)*e;
+        const I df(std::abs(deltaValue_)),dk(std::abs(deltaSlope_));
+        simpleBounds_.valueCorrection=upward(((df+q*dk/rootA)*r).upper);
+        simpleBounds_.slopeCorrection=upward(((rootA*q*df+(q2-I(1))*dk)*r).upper);
+        simpleBounds_.minimumSd=bounds::down(bounds::sqrt(I(sigma2_)*v).lower/boundGuard);
+        simpleBounds_.maximumSd=upward(bounds::sqrt(I(sigma2_)).upper);
+        simpleBounds_.regressionMax=upward((rootA*q*q2*e/v).upper);
+        simpleBounds_.slopeSd=upward(bounds::sqrt(I(sigma2_)*I(inverseLength2_)).upper);
+        simpleBounds_.ready=true;
+    }
+    const auto mean=pointMeanBounds(lo,hi,lipschitz);
+    const auto &f=simpleBounds_;
+    if(!std::isfinite(mean.minimumValue) || !std::isfinite(mean.maximumValue) ||
+        !std::isfinite(mean.midpointError) || !(f.minimumSd>0))
+        return parentMaximum;
+    const double fmin=(I(mean.minimumValue)-I(f.valueCorrection)).lower;
+    const double fmax=(I(mean.maximumValue)+I(f.valueCorrection)).upper;
+    const double muMin=(I(mean.minimumDerivative)-I(f.slopeCorrection)-
+        I(f.regressionMax)*I(std::max(0.0,fmax))).lower;
+    const double zmin=(I(fmin)/I(f.minimumSd,f.maximumSd)).lower;
+    if(!std::isfinite(muMin) || !std::isfinite(zmin)) return parentMaximum;
+    const double logMills=[&]() {
+        Profile::Scope mills(Profile::Stage::BoundMills);
+        if(zmin<=-8) return std::log1p(-zmin);
+        Profile::Scope cdf(Profile::Stage::BoundNormalCdf);
+        return normalLogPdf(zmin)-normalLogCdf(zmin);
+    }();
+    const double maximum=std::exp(logMills-std::log(f.minimumSd)+logFluxUpper(muMin,f.slopeSd));
+    if(!std::isfinite(maximum) || maximum>std::numeric_limits<double>::max()/boundGuard)
+        return parentMaximum;
+    return std::min(parentMaximum,upward(maximum));
 }
 
 bool ConditionalFlightKernel::coarseMajorant(double lo,double &hi,double &maximum) const {

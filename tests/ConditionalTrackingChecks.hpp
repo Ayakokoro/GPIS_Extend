@@ -12,19 +12,24 @@ inline void trackingChecks()
     opticalDepthChecks();
     rayConstantChecks();
     shadowRouletteChecks();
+    pointLipschitzTrackingChecks();
+    simpleBoundTrackingChecks();
     const auto defaults=makeMedium()->trackingSettings();
-    check(defaults.shadowRouletteThreshold==0.1 && defaults.farBoundStartScale==0 && !defaults.normalizedBoundOnly && defaults.fixedStepLimit && defaults.step==0 && defaults.stepScale==0.5 && defaults.ageScale==0.25 &&
+    check(defaults.simpleBoundStartScale==0 && !defaults.geometryStep && !defaults.pointBounds && defaults.classicStartScale==1 &&
+        defaults.shadowRouletteThreshold==0.1 && defaults.farBoundStartScale==0 && !defaults.normalizedBoundOnly && defaults.fixedStepLimit && defaults.step==0 && defaults.stepScale==0.5 && defaults.ageScale==0.25 &&
         defaults.maxExpectedEvents==64 && defaults.tightenExpectedEvents==4 &&
         defaults.macrocellSize==0 && defaults.macrocellMaxExpectedEvents==1 &&
         defaults.macrocellFarStartScale==4 && defaults.macrocellFarMaxExpectedEvents==0 &&
         defaults.majorantMode==cg::ConditionalMajorantMode::Adaptive && defaults.constantBirthLength==0,
         "omitted tracking options preserve defaults");
-    auto medium=makeMedium(R"("tracking_shadow_roulette_threshold":0.2,"tracking_far_bound_start_scale":4,"tracking_normalized_bound_only":true,"tracking_fixed_step_limit":false,"tracking_step":0.2,"tracking_step_scale":2,
+    auto medium=makeMedium(R"("tracking_geometry_step":true,"tracking_point_bounds":true,"tracking_classic_start_scale":0.3,
+        "tracking_shadow_roulette_threshold":0.2,"tracking_far_bound_start_scale":4,"tracking_simple_bound_start_scale":5,"tracking_normalized_bound_only":true,"tracking_fixed_step_limit":false,"tracking_step":0.2,"tracking_step_scale":2,
         "tracking_age_scale":0.6,"tracking_max_expected_events":0.5,"tracking_tighten_expected_events":0.1,
         "tracking_macrocell_size":4,"tracking_macrocell_max_expected_events":0.25,
         "tracking_macrocell_far_start_scale":3,"tracking_macrocell_far_max_expected_events":16)");
     const auto settings=medium->trackingSettings();
-    check(settings.shadowRouletteThreshold==0.2 && settings.farBoundStartScale==4 && settings.normalizedBoundOnly && !settings.fixedStepLimit && settings.step==0.2 && settings.stepScale==2 && settings.ageScale==0.6 &&
+    check(settings.simpleBoundStartScale==5 && settings.geometryStep && settings.pointBounds && settings.classicStartScale==.3 &&
+        settings.shadowRouletteThreshold==0.2 && settings.farBoundStartScale==4 && settings.normalizedBoundOnly && !settings.fixedStepLimit && settings.step==0.2 && settings.stepScale==2 && settings.ageScale==0.6 &&
         settings.maxExpectedEvents==0.5 && settings.tightenExpectedEvents==0.1 &&
         settings.macrocellSize==4 && settings.macrocellMaxExpectedEvents==0.25 &&
         settings.macrocellFarStartScale==3 && settings.macrocellFarMaxExpectedEvents==16,
@@ -38,7 +43,9 @@ inline void trackingChecks()
     Scene scene;
     const auto copy=std::dynamic_pointer_cast<GlobalConditionalMedium>(scene.fetchMedium(document));
     const auto restored=copy->trackingSettings();
-    check(restored.shadowRouletteThreshold==settings.shadowRouletteThreshold && restored.farBoundStartScale==settings.farBoundStartScale && restored.normalizedBoundOnly==settings.normalizedBoundOnly && restored.fixedStepLimit==settings.fixedStepLimit &&
+    check(restored.simpleBoundStartScale==settings.simpleBoundStartScale && restored.geometryStep==settings.geometryStep && restored.pointBounds==settings.pointBounds &&
+        restored.classicStartScale==settings.classicStartScale &&
+        restored.shadowRouletteThreshold==settings.shadowRouletteThreshold && restored.farBoundStartScale==settings.farBoundStartScale && restored.normalizedBoundOnly==settings.normalizedBoundOnly && restored.fixedStepLimit==settings.fixedStepLimit &&
         restored.step==settings.step && restored.stepScale==settings.stepScale &&
         restored.ageScale==settings.ageScale && restored.maxExpectedEvents==settings.maxExpectedEvents &&
         restored.tightenExpectedEvents==settings.tightenExpectedEvents &&
@@ -90,7 +97,11 @@ inline void trackingChecks()
         "zero tightening threshold is a supported fine-bound reference mode");
     check(makeMedium(R"("tracking_shadow_roulette_threshold":0)")->trackingSettings().shadowRouletteThreshold==0,
         "zero threshold disables shadow roulette");
-    for(const char *invalid : {R"("tracking_shadow_roulette_threshold":-0.1)",R"("tracking_shadow_roulette_threshold":1.1)",
+    for(const char *invalid : {R"("tracking_classic_start_scale":-1)",
+            R"("tracking_simple_bound_start_scale":1.99)",
+            R"("tracking_majorant":"two_constants","tracking_simple_bound_start_scale":4)",
+            R"("tracking_majorant":"two_constants","tracking_point_bounds":true)",
+            R"("tracking_shadow_roulette_threshold":-0.1)",R"("tracking_shadow_roulette_threshold":1.1)",
             R"("tracking_constant_birth_length":-1)",R"("tracking_step":-1)",R"("tracking_step_scale":0)",
             R"("tracking_age_scale":-1)",R"("tracking_max_expected_events":0)",
             R"("tracking_tighten_expected_events":-1)",R"("tracking_macrocell_size":3)",
@@ -103,7 +114,7 @@ inline void trackingChecks()
         try { makeMedium(invalid); } catch(const std::exception &) { rejected=true; }
         check(rejected,"invalid tracking configuration must fail during loading");
     }
-    for(auto member : {&Settings::shadowRouletteThreshold,&Settings::farBoundStartScale,&Settings::constantBirthLength,&Settings::step,&Settings::stepScale,&Settings::ageScale,
+    for(auto member : {&Settings::simpleBoundStartScale,&Settings::classicStartScale,&Settings::shadowRouletteThreshold,&Settings::farBoundStartScale,&Settings::constantBirthLength,&Settings::step,&Settings::stepScale,&Settings::ageScale,
             &Settings::maxExpectedEvents,&Settings::tightenExpectedEvents,&Settings::macrocellMaxExpectedEvents,
             &Settings::macrocellFarStartScale,&Settings::macrocellFarMaxExpectedEvents})
         for(double invalid : {-1.0,std::numeric_limits<double>::infinity(),
@@ -235,7 +246,7 @@ inline void trackingChecks()
     context->birth.birthValue=0.4;context->birth.birthGradient=V(0.2,0.1,1);
     const Ray ray(context->rayOrigin,Vec3f(0.0f,0.0f,-1.0f),0,1.25f);
     const cg::ConditionalSegment expected(medium->field(),context->birth,context->position,
-        V(0,0,-1),ray.farT(),settings);
+        V(0,0,-1),ray.farT(),settings,nullptr,1);
     IndependentPathSampler directSampler(907,false),mediumSampler(907,false);
     for(int i=0;i<40;++i) for(bool collision : {false,true}) {
         directSampler.startPath(0,i);mediumSampler.startPath(0,i);

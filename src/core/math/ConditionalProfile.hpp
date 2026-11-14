@@ -26,7 +26,7 @@ enum class Stage { Medium, KernelSetup, Track, BirthBound, IntervalBound, Taylor
     Hazard, ScalarStatistics, EndpointSample, CollisionGradient, PhasePdf, PhaseEval,
     PhaseSample, DirectionalSample,
     BoundSdfCoarse, BoundSdfFine, BoundSdfPoint, BoundSdfDifference, BoundAlgebra,
-    BoundMomentPrepare, BoundMomentApply, BoundMills, BoundFlux, BoundNormalCdf, BoundFarTail, Count };
+    BoundMomentPrepare, BoundMomentApply, BoundMills, BoundFlux, BoundNormalCdf, BoundFarTail, BoundSimple, Count };
 enum class Counter { ProposedIntervals, ProcessedIntervals, Splits, CandidateEvents,
     AcceptedCollisions, RejectedCandidates, RatioEvents, ZeroHazardCandidates,
     ZeroEventIntervals, ZeroRateIntervals, ZeroBirths, PositiveBirths, SmoothBirthHalvings,
@@ -35,7 +35,10 @@ enum class Counter { ProposedIntervals, ProcessedIntervals, Splits, CandidateEve
     PolynomialLimitCells, GridCellBuilds, GridPointFallbacks, GridBoundFallbacks,
     GridMacroQueries, MacroAccepted, MacroRejected,
     Escapes, ZeroWeight, FarBoundSetups, FarBoundAccepted, FarBoundFallbacks,
-    ShadowRouletteTests, ShadowRouletteTerminated, ShadowRouletteSurvived, Count };
+    ShadowRouletteTests, ShadowRouletteTerminated, ShadowRouletteSurvived,
+    GeometryProposals, PointBoundQueries, PointBoundAccepted, PointBoundFallbacks,
+    PointStatisticsHits, PointStatisticsMisses, PointGradientReuses, PointGradientLoads,
+    SimpleBoundSetups, SimpleBoundQueries, SimpleBoundAccepted, SimpleBoundFallbacks, Count };
 enum class Histogram { CandidatesPerFlight, IntervalsPerFlight, CandidatesPerInterval, Count };
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
 constexpr size_t DomainCount=size_t(Domain::Count),StageCount=size_t(Stage::Count);
@@ -43,7 +46,7 @@ constexpr size_t CounterCount=size_t(Counter::Count),HistogramCount=size_t(Histo
 // Attribution follows the actual proposal construction, not a counterfactual
 // traversal. A subdivided leaf (including the right child) is EventThreshold.
 enum class IntervalLimit { Step, Age, FineBoundary, MacroBoundary, Birth, SegmentEnd,
-    EventThreshold, TwoConstants, Count };
+    EventThreshold, TwoConstants, Geometry, Count };
 enum class PartitionPhase { Initial, Proposed, Processed, Count };
 constexpr size_t IntervalLimitCount=size_t(IntervalLimit::Count),AgeBandCount=4;
 constexpr size_t PartitionPhaseCount=size_t(PartitionPhase::Count);
@@ -116,7 +119,7 @@ struct Registry {
             "hazard","scalar_statistics","endpoint_sample","collision_gradient","phase_pdf","phase_eval",
             "phase_sample","directional_sample",
             "bound_sdf_coarse","bound_sdf_fine","bound_sdf_point","bound_sdf_difference","bound_algebra",
-            "bound_moment_prepare","bound_moment_apply","bound_mills","bound_flux","bound_normal_cdf","bound_far_tail"};
+            "bound_moment_prepare","bound_moment_apply","bound_mills","bound_flux","bound_normal_cdf","bound_far_tail","bound_simple"};
         const char *counters[]={"proposed_intervals","processed_intervals","splits","candidate_events",
             "accepted_collisions","rejected_candidates","ratio_events","zero_hazard_candidates",
             "zero_event_intervals","zero_rate_intervals","zero_births","positive_births","smooth_birth_halvings",
@@ -125,10 +128,13 @@ struct Registry {
             "polynomial_limit_cells","grid_cell_builds","grid_point_fallbacks","grid_bound_fallbacks",
             "grid_macro_queries","macro_accepted","macro_rejected",
             "escapes","zero_weight","far_bound_setups","far_bound_accepted","far_bound_fallbacks",
-            "shadow_roulette_tests","shadow_roulette_terminated","shadow_roulette_survived"};
+            "shadow_roulette_tests","shadow_roulette_terminated","shadow_roulette_survived",
+            "geometry_proposals","point_bound_queries","point_bound_accepted","point_bound_fallbacks",
+            "point_statistics_hits","point_statistics_misses","point_gradient_reuses","point_gradient_loads",
+            "simple_bound_setups","simple_bound_queries","simple_bound_accepted","simple_bound_fallbacks"};
         const char *histograms[]={"candidates_per_flight","intervals_per_flight","candidates_per_interval"};
         const char *limits[]={"step_cap","age_cap","fine_boundary","macro_boundary","birth",
-            "segment_end","event_threshold","two_constants"};
+            "segment_end","event_threshold","two_constants","geometry_proposal"};
         const char *phases[]={"initial","proposed","processed"};
         const char *ages[]={"q_lt1","q_1_4","q_4_16","q_ge16"};
         std::cout<<std::setprecision(9)<<"GPIS conditional profile: {\"unit\":\"sum_worker_ms\",\"domains\":{";

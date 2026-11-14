@@ -3,6 +3,7 @@
 
 #include "math/conditional/transport/FlightKernel.h"
 #include "math/conditional/core/Random.h"
+#include <array>
 #include <limits>
 
 namespace Tungsten::ConditionalGpis {
@@ -39,7 +40,8 @@ struct ConditionalScalarStatistics {
 class ConditionalFlightKernel final : public FlightKernel {
 public:
     ConditionalFlightKernel(const GPSSField& field, const FlightState& state,
-                            bool normalizedBoundOnly = false, double farBoundStartScale = 0.0);
+                            bool normalizedBoundOnly = false, double farBoundStartScale = 0.0,
+                            double simpleBoundStartScale = 0.0);
     HazardEvaluation evaluate(double age) const override;
     HitStatistics hitStatistics(double age) const override;
     // Joint endpoint sample conditioned on birth and F(age)>0. Geometry renews
@@ -64,7 +66,26 @@ public:
     }
     double nextMeanBoundary(double begin,double end) const;
     bool coarseMajorant(double begin,double &end,double &maximum) const;
+    double meanValue(double age) const { return meanJet(age).value; }
+    // Uses the same scalar field and conditional reducer as intervalMajorant,
+    // replacing spatial interval propagation with a world-space Lipschitz cone.
+    double pointIntervalMajorant(double begin,double end,double meanLipschitz,
+                                 double parentMaximum=std::numeric_limits<double>::infinity()) const;
+    double simpleBoundBegin() const { return simpleBoundBegin_; }
+    // Cached SE tail residuals, one midpoint/Lipschitz cone, and the prior
+    // directional gradient deviation. The target hazard remains conditional.
+    double simpleIntervalMajorant(double begin,double end,double meanLipschitz,
+                                  double parentMaximum=std::numeric_limits<double>::infinity()) const;
 private:
+    struct PointStatistics {
+        double age=std::numeric_limits<double>::quiet_NaN();
+        double u=0, r=0, regression=0, slopeVariance=0;
+        ConditionalScalarStatistics scalar{};
+        MeanJet jet;
+        bool hasJet=false;
+    };
+    PointStatistics &pointStatistics(double age) const;
+    MeanRayBounds pointMeanBounds(double begin,double end,double meanLipschitz) const;
     double farIntervalMajorant(const MeanRayBounds &mean) const;
     double boundedIntervalMajorant(const MeanRayBounds &mean,double begin,double end,
                                   double tightenExpectedEvents,double parentMaximum) const;
@@ -79,6 +100,17 @@ private:
         double valueCorrection, slopeCorrection, minimumSd, maximumSd, regressionMax, kappaMax;
     };
     mutable FarBounds farBounds_;
+    double simpleBoundStartScale_, simpleBoundBegin_=std::numeric_limits<double>::infinity();
+    struct SimpleBounds {
+        bool ready=false;
+        double valueCorrection, slopeCorrection, minimumSd, maximumSd, regressionMax, slopeSd;
+    };
+    mutable SimpleBounds simpleBounds_;
+    // Exact-age, per-flight reuse. Two slots also retain the current/history
+    // pair used by neural features. Grid scalar sampling keeps its own
+    // arithmetic; its full gradient is loaded only when requested.
+    mutable std::array<PointStatistics,2> pointCache_;
+    mutable unsigned recentPoint_=0;
     std::unique_ptr<MeanRayCursor> meanRay_;
     MeanJet birthMean_;
     Vector3 deltaGradient_, precisionDirection_;

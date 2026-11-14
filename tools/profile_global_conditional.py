@@ -18,6 +18,8 @@ from verify_wavefront_gpis import compare, read_pfm
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scene", type=Path)
+    parser.add_argument("--medium-type", choices=("global_conditional", "classic_global"), default="global_conditional",
+                        help="Classic is supported for plain timing comparisons only")
     parser.add_argument("--executable", type=Path, default=Path("build/Release/tungsten.exe"))
     parser.add_argument("--profile-executable", type=Path,
                         help="Separate instrumented build; plain timings use --executable")
@@ -44,6 +46,8 @@ def main():
     parser.add_argument("--no-profiles", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    if args.medium_type == "classic_global" and not args.no_profiles:
+        parser.error("classic_global timing requires --no-profiles")
     if min(args.size, args.spp, args.threads, args.repeats, args.profile_repeats) <= 0:
         parser.error("size, spp, threads and repeat counts must be positive")
     if args.affinity_mask is not None and (os.name != "nt" or args.affinity_mask <= 0):
@@ -53,9 +57,9 @@ def main():
     source = args.scene.resolve()
     original = json.loads(source.read_text(encoding="utf-8"))
     indices = [i for i, medium in enumerate(original["media"])
-               if medium["type"] == "global_conditional"]
+               if medium["type"] == args.medium_type]
     if len(indices) != 1:
-        parser.error("scene must contain exactly one global_conditional medium")
+        parser.error(f"scene must contain exactly one {args.medium_type} medium")
     medium_index = indices[0]
     executable = args.executable.resolve()
     profile_executable = (args.profile_executable or args.executable).resolve()
@@ -74,6 +78,8 @@ def main():
                       "macrocell_max_expected_events", "no_profiles")}
     if args.affinity_mask is not None:
         configuration["affinity_mask"] = args.affinity_mask
+    if args.medium_type != "global_conditional":
+        configuration["medium_type"] = args.medium_type
     report = {"source": str(source), "scene_snapshot": original,
               "executable": str(executable), "configuration": configuration,
               "profile_executable": str(profile_executable),
