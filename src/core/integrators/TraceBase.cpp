@@ -702,6 +702,8 @@ Vec3f TraceBase::bsdfSample(const Primitive &light,
 bool TraceBase::sampleMediumDistance(PathSampleGenerator &sampler,const Ray &ray,const Medium *medium,
     Medium::MediumState &state,MediumSample &sample,int bounce,bool enableDirect,Vec3f &directEmission)
 {
+    // A reused sample must not carry the previous medium's normal law.
+    sample.eventContext.reset();
     directEmission=Vec3f(0.f);
     const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
     if (!ellipsoid || !enableDirect || bounce>=_settings.maxBounces-1 || _scene->lights().empty())

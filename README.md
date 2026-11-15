@@ -54,6 +54,24 @@ to build only the other medium implementations.
 
 # Scene Files
 
+## Adaptive function-space GPIS
+
+`adaptive_function_space_gaussian_process` provides an initial CPU reference
+of online Cholesky sampling and probability-bound adaptive ray marching for
+stationary isotropic SE kernels. It retains online history within each flight
+and uses full-gradient Renewal+ observations across GP collisions. All sampler
+arithmetic is double, including the rank-revealing treatment of near-singular
+covariance matrices. Start with
+the [sphere scene](data/example-scenes/adaptive-gpis/sphere.json) and see
+[implementation, numerical limits and comparisons](docs/adaptive-gpis.md).
+The [original shaderball scene](data/example-scenes/adaptive-gpis/shaderball-original.json)
+preserves the archived Renewal+ floor, area light, environment and mirror material;
+`tools/compare_adaptive_shaderball_original.py` runs the matched comparison.
+For mirror/conductor small-light rendering, enable `1D_sampling: true` and
+`1D_sampling_scheme: "mis"`; the [small-light mirror fixture](data/example-scenes/adaptive-gpis/shaderball-small-light-mis.json)
+uses conditional-gradient light sampling and the existing power-heuristic MIS.
+This is not yet a reproduction of the paper's complete performance evaluation.
+
 ## Empty-origin first-hit GPIS experiment
 
 `first_hit_gpis` samples a first intersection conditioned on a positive initial

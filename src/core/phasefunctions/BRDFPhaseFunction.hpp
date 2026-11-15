@@ -12,6 +12,7 @@ private:
     std::shared_ptr<Bsdf> _bsdf;
 
 public:
+    const Bsdf *bsdf() const { return _bsdf.get(); }
     void setEventIsectInfo(const Vec3f &wi, const MediumSample &mediumSample, SurfaceScatterEvent& se, IntersectionInfo& info) const;
 
     virtual rapidjson::Value toJson(Allocator& allocator) const override;

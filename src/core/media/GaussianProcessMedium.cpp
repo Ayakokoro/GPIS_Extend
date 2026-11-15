@@ -237,6 +237,7 @@ namespace Tungsten {
         PathSampleGenerator &sampler, const Ray &ray, MediumState &state,
         MediumSample &sample, DistanceState &distance) const
     {
+        sample.eventContext.reset();
         sample.emission = Vec3f(0.0f);
         auto r = ray;
 

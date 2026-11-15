@@ -5,6 +5,7 @@
 #include "ExponentialMedium.hpp"
 #include "VoxelMedium.hpp"
 #include "FunctionSpaceGaussianProcessMedium.hpp"
+#include "AdaptiveFunctionSpaceGaussianProcessMedium.hpp"
 #include "WeightSpaceGaussianProcessMedium.hpp"
 #include "SparseConvolutionNoiseMedium.hpp"
 #include "RenewalPlusFpGradientMedium.hpp"
@@ -32,6 +33,7 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"voxel", std::make_shared<VoxelMedium>},
     {"gaussian_process", std::make_shared<FunctionSpaceGaussianProcessMedium>},                 // Backwards compatability with old files
     {"function_space_gaussian_process", std::make_shared<FunctionSpaceGaussianProcessMedium>}, 
+    {"adaptive_function_space_gaussian_process", std::make_shared<AdaptiveFunctionSpaceGaussianProcessMedium>},
     {"weight_space_gaussian_process", std::make_shared<WeightSpaceGaussianProcessMedium>},
     {"sparse_conv_noise", std::make_shared<SparseConvolutionNoiseMedium>},
     {"renewal_plus_fp_gradient", std::make_shared<RenewalPlusFpGradientMedium>},
