@@ -36,5 +36,7 @@ private:
     mutable std::atomic<std::uint64_t> _rays{0}, _hits{0}, _queries{0}, _redundant{0},
         _steps{0}, _minimumSteps{0}, _refinements{0}, _invalidBirths{0}, _invalidGradients{0}, _rankDecompositions{0};
     mutable std::atomic<std::uint64_t> _misEvents{0}, _neePdfQueries{0}, _neeGradientQueries{0}, _degenerateGradients{0};
+    mutable std::atomic<std::uint64_t> _choleskyRebuilds{0}, _varianceClamps{0}, _jointCovarianceClamps{0};
+    mutable std::atomic<double> _largestVarianceCorrection{0};
 };
 }

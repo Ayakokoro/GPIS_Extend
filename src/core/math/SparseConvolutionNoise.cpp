@@ -68,10 +68,34 @@ inline uint SparseConvolutionNoiseRealization::computeSeed(const Vec4u pixelSamp
 SparseConv1DSamplingScheme SparseConvolutionNoiseRealization::samplingScheme(const Vec3f& p) const {
     float amplitude = _gp->_cov->sparseConvNoiseAmplitude(p);
     // If the amplitude is too small to see any noise, disable any NEE/MIS strategy
-    if (amplitude < 1e-6f)
+    if (amplitude < 1e-6f || (_correlationXY && coeff_1D.has_gradient_observation &&
+        p == coeff_1D.ray_origin && dynamic_cast<const SquaredExponentialCovariance*>(_gp->_cov.get())))
         return SparseConv1DSamplingScheme::UNI;
     else
         return _1DsamplingScheme;
+}
+
+bool SparseConvolutionNoiseRealization::seTransverseGradientMoments(const Vec3f& p,
+        const Vec3f& rayDir, bool conditioning, Vec2d& mean, double& variance) const {
+    if (!_1DSampling || !_correlationXY || _ctxt != GPCorrelationContext::RenewalPlus ||
+        _multiResolutionGrid || !dynamic_cast<const SquaredExponentialCovariance*>(_gp->_cov.get()))
+        return false;
+    mean = Vec2d(0.);
+    variance = 0.5;
+    if (conditioning && coeff_1D.has_gradient_observation) {
+        // T contains sqrt(2)/ell (and anisotropy). Thus q^2 = |T delta|^2/2.
+        // Transverse derivative covariance is rho = exp(-q^2/2), without
+        // the (1-q^2) factor of the longitudinal derivative covariance.
+        const Vec3f delta = _gp->_cov->transformPosDirWorldtoLocal(p - coeff_1D.ray_origin, 1.f);
+        const double q2 = 0.5 * Vec3d(delta).lengthSq();
+        const double rho = std::exp(-0.5*q2);
+        variance = -0.5 * std::expm1(-q2);
+        const TangentFrame frame(_gp->_cov->transformPosDirWorldtoLocal(rayDir, 1.f).normalized());
+        const Vec3f observed = frame.toLocal(_gp->_cov->transformGradWorldtoLocal(
+            coeff_1D.target_gradient_noise, 1.f));
+        mean = Vec2d(rho * observed.x(), rho * observed.y());
+    }
+    return true;
 }
 
 Vec4f SparseConvolutionNoiseRealization::kernelScaleLevelRatio(const Vec3f& p) const {
@@ -156,6 +180,20 @@ Vec3f SparseConvolutionNoiseRealization::evaluateGradientNoise1D(const Vec3f& p,
 
     Vec3f ray_dir_iso = _gp->_cov->transformPosDirWorldtoLocal(rayDir, 1.0).normalized();
     TangentFrame coord = TangentFrame(Vec3f(ray_dir_iso));
+
+    Vec2d transverseMean;
+    double transverseVariance;
+    if (seTransverseGradientMoments(p, rayDir, conditioning, transverseMean, transverseVariance)) {
+        const auto base = evaluateNoise1DNormalized(p, tTotal, rayDir, seed, sampler,
+            _impulseDensity, _gp->_cov->splattingKernelRadius(true, 1.f), 1.f, conditioning);
+        sampler.set_state(MathUtil::xxhash32(info.pixelSampleSegment) + MathUtil::xxhash32(info.sceneSeed) + 1u);
+        const auto z = sample_standard_normal(2, sampler);
+        const double s = std::sqrt(transverseVariance);
+        // The direct conditional law already includes the transverse update;
+        // base.y/z contain the older pathwise splats and must not be added twice.
+        const Vec3f g(float(transverseMean.x()+s*z[0]), float(transverseMean.y()+s*z[1]), base.w());
+        return _gp->_cov->transformGradLocaltoWorld(coord.toGlobal(g), 1.f);
+    }
 
     // For non-stationary anisotropy
     float scaleX = _gp->_cov->getNonstationaryCovSplatCov1D(p, p, coord.tangent);
@@ -539,6 +577,7 @@ void SparseConvolutionNoiseRealization::conditioning1D(const Vec3f& p, const Vec
     coeff_1D.value_scale = 0.;
     coeff_1D.gradient_scale = Vec3f(0.f);
     coeff_1D.ray_origin = p;
+    coeff_1D.has_gradient_observation = false;
 
     float amplitude;
     Eigen::Vector2d mean_and_id;
@@ -596,6 +635,9 @@ void SparseConvolutionNoiseRealization::conditioning1D(const Vec3f& p, const Vec
             coeff_1D.gradient_scale.x() = 0;
             coeff_1D.gradient_scale.y() = 0;
         }
+
+        coeff_1D.target_gradient_noise = (targetGrad - mean_grad) / amplitude;
+        coeff_1D.has_gradient_observation = true;
 
         // Sanity check for gradient
         Vec3f grad_diff = targetGrad - mean_grad - amplitude * evaluateGradientNoise1D(p, info.t, 0, rayDir, info, sampler, true);
@@ -695,7 +737,19 @@ float SparseConvolutionNoiseRealization::neePDF(const Vec3f& rayDir, const Vec3f
     float sample_x, sample_y;
     float pdf_area; // The PDF of sampling gx, gy in the isotropic ray space, under area measure
     UniformSampler sampler;
-    if (!_multiResolutionGrid) {
+    Vec2d transverseMean;
+    double transverseVariance;
+    if (seTransverseGradientMoments(p, rayDir, true, transverseMean, transverseVariance)) {
+        // At the observed origin this is a delta distribution. samplingScheme
+        // selects observed-normal transport there, with no continuous NEE PDF.
+        if (!(transverseVariance > 0.))
+            return 0.f;
+        const double dx = grad_3d_iso_ray.x() - transverseMean.x();
+        const double dy = grad_3d_iso_ray.y() - transverseMean.y();
+        pdf_area = float(std::exp(-0.5*(dx*dx+dy*dy)/transverseVariance) /
+            (2.0*M_PI*transverseVariance));
+    }
+    else if (!_multiResolutionGrid) {
         // Match evaluateGradientNoise1D: at tSegment == 0 it draws xy_1
         // with variance 1/2, not the correlated endpoint xy_2. Using the
         // endpoint density here would divide by its zero conditional variance.

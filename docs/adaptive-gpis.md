@@ -97,15 +97,26 @@ path has been removed. The normal path incrementally extends a Cholesky factor,
 reuses the prediction in the update, and uses fused multiply-adds. Exact repeated
 observations return the previously observed value.
 
-When the Cholesky conditional variance falls below `sqrt(machine_epsilon)`
-(about 1.49e-8 in normalized units), the sampler switches to a double-precision
-rank-revealing eigendecomposition of its retained covariance matrix. It caches
-the whitening transform until another observation is appended. If subtracting
-the explained variance from one still gives a significant negative result, it
-factors the augmented covariance and uses a double SVD to compute variance as
-a squared null-space projection. Invalid covariance matrices still raise errors.
+The Cholesky path falls back only for a negative Schur complement or nonfinite
+conditional moments. A small positive variance no longer triggers EVD merely
+because it is below `sqrt(machine_epsilon)`. Zero and sufficiently small
+positive variances follow the existing redundant-observation cutoff.
+
+Fallback uses a double-precision eigendecomposition of the retained covariance
+matrix and caches its whitening transform. A changed history first retries LLT;
+it is not permanently restricted to EVD by an earlier failure. Negative scalar
+conditional variances and negative eigenvalues of the joint conditional
+covariance are clamped to zero, following the original MVN sampler's PSD
+projection convention. The augmented-covariance/SVD branch has been removed.
+The incremental and batched implementations are still different algorithms;
+this matches their failure-based fallback policy, not their sampling histories.
+Nonfinite predictions and invalid retained covariance matrices still raise errors.
 Previously drawn values are never resampled and retained observations are not
 evicted. No diagonal jitter or observation noise is added.
+
+`adaptive.numerical_fallback` defaults to `true`. Setting it to `false` disables
+the full-history eigen fallback and reports materially invalid covariance;
+small gradient covariance decompositions are still required for normal/MIS sampling.
 
 `rank_tolerance` is an explicit cutoff in unit-variance normalized coordinates,
 used for conditional variance and for eigenvalues in the rank-revealing solve.
@@ -114,7 +125,18 @@ Truncating tiny eigenvalues is a numerical rank approximation, not exact GP
 sampling at arbitrary precision. The stabilization path can refactor the matrix
 after each retained observation, so it still differs from the paper's purely
 incremental performance path. Statistics report `arithmetic: double`,
-`double_rank_decompositions` and redundant-query counts.
+`double_rank_decompositions` and redundant-query counts. They also report
+`fallback_policy: cholesky_failure_eigen_only`, `cholesky_rebuilds`,
+`eigen_variance_clamps`, `eigen_joint_covariance_clamps`, and
+`largest_normalized_variance_correction`. A finite render with zero exceptions
+does not by itself establish that these numerical approximations are negligible.
+
+The [failure-only EVD comparison](../outputs/adaptive_gpis_eigen_fallback_20261116/comparison.html)
+uses the original large-light shaderball and a frozen pre-change executable.
+Its `validate.py` records scene/executable hashes, numerical diagnostics and
+paired images. The independent new renderer is under that experiment's
+`renderer/` directory; the previously running parameter sweep keeps its frozen
+`build/Release/tungsten.exe`. Timings taken alongside that sweep are diagnostic.
 
 Root refinement evaluates the same online realization using bisection, then
 interpolates the final bracket. Its gradient is sampled from the joint

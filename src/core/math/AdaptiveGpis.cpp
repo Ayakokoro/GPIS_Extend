@@ -1,6 +1,6 @@
 #include "AdaptiveGpis.hpp"
+#include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
-#include <Eigen/SVD>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -15,8 +15,9 @@ void require(bool valid, const char *message) {
 }
 }
 
-OnlineSampler::OnlineSampler(double length, double tolerance, int maxRank)
-    : _length(length), _rankTolerance(tolerance), _maxRank(maxRank)
+OnlineSampler::OnlineSampler(double length, double tolerance, int maxRank, bool numericalFallback)
+    : _length(length), _rankTolerance(tolerance), _maxRank(maxRank),
+      _numericalFallback(numericalFallback)
 {
     require(std::isfinite(length) && length > 0 && std::isfinite(tolerance) &&
         tolerance > 0 && tolerance < 1e-3 && maxRank >= 4,
@@ -45,6 +46,7 @@ OnlineSampler::Prediction OnlineSampler::predict(const Observation &o) const
             (!o.derivative || a.direction==o.direction))
             return {_values[i],0,Eigen::VectorXd()};
     }
+    retryCholesky();
     if (_rankRevealing) return predictRankRevealing(o);
     Prediction p{0, 1, Eigen::VectorXd(n)};
     for (int i = 0; i < n; ++i) {
@@ -54,10 +56,11 @@ OnlineSampler::Prediction OnlineSampler::predict(const Observation &o) const
         p.mean = std::fma(p.beta[i],_innovations[i],p.mean);
         p.variance = std::fma(-p.beta[i],p.beta[i],p.variance);
     }
-    // Resolve cancellation / near-singular pivots with a rank-revealing solve
-    // in double. Previously drawn values are preserved, never resampled.
-    if (p.variance < std::sqrt(std::numeric_limits<double>::epsilon()) ||
-        !std::isfinite(p.variance) || !std::isfinite(p.mean)) {
+    // Like the original MVN sampler, use EVD only after the Cholesky path
+    // fails. A small positive Schur complement is not a failed update; zero
+    // variance is handled as a redundant observation by sample/condition.
+    if (_numericalFallback && (p.variance < 0 ||
+        !std::isfinite(p.variance) || !std::isfinite(p.mean))) {
         _rankRevealing=true;
         return predictRankRevealing(o);
     }
@@ -68,8 +71,30 @@ OnlineSampler::Prediction OnlineSampler::predict(const Observation &o) const
     return p;
 }
 
+void OnlineSampler::retryCholesky() const
+{
+    const int n=int(_basis.size());
+    if (!_rankRevealing || _whitener.rows()==n) return;
+    // A changed history gets a fresh LLT attempt, rather than inheriting a
+    // permanent EVD mode from an earlier failed prediction. Unchanged history
+    // reuses its eigensolve. Keep all previously sampled values fixed.
+    Eigen::MatrixXd k(n,n);
+    for (int i=0;i<n;++i) for (int j=0;j<=i;++j)
+        k(i,j)=k(j,i)=covariance(_basis[i],_basis[j]);
+    Eigen::LLT<Eigen::MatrixXd> chol(k);
+    ++_choleskyRebuilds;
+    if (chol.info()!=Eigen::Success) return;
+    const Eigen::VectorXd innovations=chol.matrixL().solve(
+        Eigen::Map<const Eigen::VectorXd>(_values.data(),n));
+    if (!innovations.allFinite()) return;
+    _lower=chol.matrixL();
+    _innovations=innovations;
+    _rankRevealing=false;
+}
+
 OnlineSampler::Prediction OnlineSampler::predictRankRevealing(const Observation &o) const
 {
+    require(_numericalFallback,"adaptive GP: numerical fallback is disabled");
     const int n=int(_basis.size());
     if (_whitener.rows()!=n) {
         Eigen::MatrixXd k(n,n);
@@ -95,52 +120,20 @@ OnlineSampler::Prediction OnlineSampler::predictRankRevealing(const Observation 
     }
     require(std::isfinite(p.mean) && std::isfinite(p.variance),
         "adaptive GP: nonfinite double conditional moments");
-    if (p.variance < -std::max(1e-12,0.1*_rankTolerance))
-        return predictJointFactor(o);
+    // Original MVN fallback convention: project negative variance to zero.
+    // Record the correction; this is a numerical approximation, not a new draw.
+    if (p.variance < 0) {
+        ++_varianceClamps;
+        _largestVarianceCorrection=std::max(_largestVarianceCorrection,-p.variance);
+    }
     p.variance=std::max(0.0,p.variance);
-    return p;
-}
-
-OnlineSampler::Prediction OnlineSampler::predictJointFactor(const Observation &o) const
-{
-    const auto p=predictJointFactor(std::vector<Observation>{o});
-    return {p.mean[0],p.covariance(0,0),Eigen::VectorXd()};
-}
-
-OnlineSampler::JointPrediction OnlineSampler::predictJointFactor(const std::vector<Observation> &observations) const
-{
-    // Rare cancellation in 1 - beta^T beta: factor the augmented covariance
-    // in double and obtain variance as a squared null-space projection.
-    // No diagonal noise is added and no negative variance is silently hidden.
-    const int n=int(_basis.size()), m=int(observations.size());
-    const auto observation=[&](int i)->const Observation & { return i<n ? _basis[i] : observations[i-n]; };
-    Eigen::MatrixXd k(n+m,n+m);
-    for (int i=0;i<n+m;++i) for (int j=0;j<=i;++j)
-        k(i,j)=k(j,i)=covariance(observation(i),observation(j));
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(k);
-    require(eig.info()==Eigen::Success && eig.eigenvalues().minCoeff()>=
-        -std::max(1e-12,0.1*_rankTolerance)*(n+m),
-        "adaptive GP: joint double covariance is not positive semidefinite");
-    const int rank=int((eig.eigenvalues().array()>_rankTolerance).count());
-    const Eigen::MatrixXd factor=eig.eigenvectors().rightCols(rank)*
-        eig.eigenvalues().tail(rank).array().sqrt().matrix().asDiagonal();
-    if (n==0) return {Eigen::VectorXd::Zero(m),factor*factor.transpose()};
-    Eigen::JacobiSVD<Eigen::MatrixXd> svd(factor.topRows(n),Eigen::ComputeThinU|Eigen::ComputeFullV);
-    require(svd.info()==Eigen::Success,"adaptive GP: joint double rank solve failed");
-    const int known=int((svd.singularValues().array()>std::sqrt(_rankTolerance)).count());
-    const Eigen::MatrixXd projected=factor.bottomRows(m)*svd.matrixV();
-    const Eigen::VectorXd weights=(svd.matrixU().leftCols(known).transpose()*
-        Eigen::Map<const Eigen::VectorXd>(_values.data(),n)).array()/svd.singularValues().head(known).array();
-    JointPrediction p{projected.leftCols(known)*weights,
-        projected.rightCols(rank-known)*projected.rightCols(rank-known).transpose()};
-    require(p.mean.allFinite() && p.covariance.allFinite(),"adaptive GP: nonfinite joint double moments");
-    ++_rankDecompositions;
     return p;
 }
 
 OnlineSampler::JointPrediction OnlineSampler::predictJoint(const std::vector<Observation> &observations) const
 {
     require(!observations.empty(),"adaptive GP: empty joint prediction");
+    retryCholesky();
     std::vector<Prediction> predictions;
     const bool rankBefore=_rankRevealing;
     for (const auto &o:observations) predictions.push_back(predict(o));
@@ -151,22 +144,39 @@ OnlineSampler::JointPrediction OnlineSampler::predictJoint(const std::vector<Obs
     }
     const auto betaSize=_rankRevealing ? _whitener.cols() : Eigen::Index(_basis.size());
     for (const auto &p:predictions)
-        if (p.beta.size()!=betaSize) return predictJointFactor(observations);
+        if (p.beta.size()!=betaSize) {
+            // An exact observation already in the history has no random
+            // residual and therefore zero conditional covariance with any query.
+            require(p.beta.size()==0 && p.variance==0,
+                "adaptive GP: incomplete Cholesky joint prediction");
+        }
     const int m=int(observations.size());
     JointPrediction joint{Eigen::VectorXd(m),Eigen::MatrixXd(m,m)};
     for (int i=0;i<m;++i) {
         joint.mean[i]=predictions[i].mean;
         for (int j=0;j<=i;++j) {
+            if (betaSize>0 &&
+                (predictions[i].beta.size()==0 || predictions[j].beta.size()==0)) {
+                joint.covariance(i,j)=joint.covariance(j,i)=0;
+                continue;
+            }
             double value=covariance(observations[i],observations[j]);
             for (Eigen::Index k=0;k<betaSize;++k)
                 value=std::fma(-predictions[i].beta[k],predictions[j].beta[k],value);
             joint.covariance(i,j)=joint.covariance(j,i)=value;
         }
     }
+    require(joint.mean.allFinite() && joint.covariance.allFinite(),
+        "adaptive GP: nonfinite joint conditional moments");
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(joint.covariance);
     require(eig.info()==Eigen::Success,"adaptive GP: joint prediction eigensolve failed");
-    if (eig.eigenvalues().minCoeff() < -std::max(1e-12,0.1*_rankTolerance)*m)
-        return predictJointFactor(observations);
+    if (eig.eigenvalues().minCoeff() < -std::max(1e-12,0.1*_rankTolerance)*m) {
+        require(_numericalFallback,"adaptive GP: Cholesky joint covariance lost positive semidefiniteness (numerical fallback disabled)");
+    }
+    if (eig.eigenvalues().minCoeff()<0) {
+        ++_jointCovarianceClamps;
+        _largestVarianceCorrection=std::max(_largestVarianceCorrection,-eig.eigenvalues().minCoeff());
+    }
     joint.covariance=eig.eigenvectors()*eig.eigenvalues().cwiseMax(0).asDiagonal()*eig.eigenvectors().transpose();
     return joint;
 }

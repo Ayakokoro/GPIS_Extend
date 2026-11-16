@@ -14,14 +14,15 @@ struct Observation {
     bool derivative = false;
 };
 
-// Pure-double online conditioning: incremental Cholesky with a rank-revealing
-// solve near singular pivots. Tiny conditional variances/eigenvalues are treated
+// Pure-double online conditioning: incremental Cholesky with an eigen-based
+// fallback for failed updates (optional). Tiny conditional variances/eigenvalues are treated
 // as numerically redundant (no jitter). Retained observations are not evicted.
 class OnlineSampler {
 public:
     struct Prediction { double mean, variance; Eigen::VectorXd beta; };
     struct JointPrediction { Eigen::VectorXd mean; Eigen::MatrixXd covariance; };
-    OnlineSampler(double lengthScale, double rankTolerance = 1e-10, int maxRank = 512);
+    OnlineSampler(double lengthScale, double rankTolerance = 1e-10, int maxRank = 512,
+                  bool numericalFallback = true);
     double covariance(const Observation &a, const Observation &b) const;
     Prediction predict(const Observation &observation) const;
     JointPrediction predictJoint(const std::vector<Observation> &observations) const;
@@ -31,16 +32,20 @@ public:
     std::size_t redundant() const { return _redundant; }
     std::size_t queries() const { return _queries; }
     std::size_t rankDecompositions() const { return _rankDecompositions; }
+    std::size_t choleskyRebuilds() const { return _choleskyRebuilds; }
+    std::size_t varianceClamps() const { return _varianceClamps; }
+    std::size_t jointCovarianceClamps() const { return _jointCovarianceClamps; }
+    double largestVarianceCorrection() const { return _largestVarianceCorrection; }
 private:
     void append(const Observation &, const Prediction &, double value);
+    void retryCholesky() const;
     Prediction predictRankRevealing(const Observation &) const;
-    Prediction predictJointFactor(const Observation &) const;
-    JointPrediction predictJointFactor(const std::vector<Observation> &) const;
     double _length, _rankTolerance;
     int _maxRank;
+    bool _numericalFallback;
     std::vector<Observation> _basis;
-    Eigen::MatrixXd _lower;
-    Eigen::VectorXd _innovations;
+    mutable Eigen::MatrixXd _lower;
+    mutable Eigen::VectorXd _innovations;
     std::vector<double> _values;
     // Pure-double rank-revealing solve for nearly dependent observations.
     // The full observation history is retained; no jitter or window eviction.
@@ -48,6 +53,8 @@ private:
     mutable Eigen::MatrixXd _whitener;
     mutable Eigen::VectorXd _whitenedValues;
     mutable std::size_t _rankDecompositions = 0;
+    mutable std::size_t _choleskyRebuilds = 0, _varianceClamps = 0, _jointCovarianceClamps = 0;
+    mutable double _largestVarianceCorrection = 0;
     std::size_t _redundant = 0, _queries = 0;
 };
 
@@ -81,6 +88,9 @@ struct Settings {
     int maxSamples = 512;
     int maxSteps = 100000;
     bool adaptive = true;
+    // False keeps incremental Cholesky and reports invalid covariance instead
+    // of rebuilding the complete history with an eigensolver. No SVD is used.
+    bool numericalFallback = true;
     void validate() const;
 };
 
