@@ -335,6 +335,7 @@ void compareImages(const char *reference,const char *candidate) {
 #include "SparseHistoryLutChecks.hpp"
 #include "HistoryCandidateScorerChecks.hpp"
 #include "LocalLawCovarianceChecks.hpp"
+#include "GaussLegendre5Checks.hpp"
 int main(int argc,char **argv) {
     std::cout.setf(std::ios::unitbuf);
     try {
@@ -345,6 +346,7 @@ int main(int argc,char **argv) {
         if(mode=="lut-benchmark" && argc==3) {sparseHistoryLutBenchmark(argv[2]);return 0;}
         if(mode=="scorer-benchmark") {historyScorerBenchmark();return 0;}
         if(mode=="covariance-benchmark") {localCovarianceBenchmark();return 0;}
+        if(mode=="all"||mode=="gauss_legendre5") gaussLegendre5Checks();
         if(mode=="all"||mode=="covariance") localCovarianceChecks();
         if(mode=="all"||mode=="scorer") historyScorerChecks();
         if(mode=="all"||mode=="gaussian") gaussianChecks();

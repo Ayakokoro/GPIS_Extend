@@ -246,6 +246,53 @@ void twoSlabChecks() {
              <<certificates<<" certificates passed\n";
 }
 
+void threeSlabChecks() {
+    const auto fn=SdfFunctions::Function::ThreeSlabs;
+    const auto check=[](bool ok,const char *label) { if(!ok) throw std::runtime_error(label); };
+    const auto reference=[](const V &p) {
+        double value=std::numeric_limits<double>::infinity();
+        for(const V &center:{V(.18,.02,0),V(-.18,-.02,0),V(.18,-.06,0)})
+            value=std::min(value,((p-center).cwiseAbs()-V(.6,.01,.6)).maxCoeff());
+        return value;
+    };
+    check(SdfFunctions::supportsQueries(fn),"three slabs expose certified queries");
+    for(double center:{.02,-.02,-.06}) for(double side:{-1.,1.}) {
+        const auto j=SdfFunctions::evaluateJet(fn,V(0,center+side*.01,0));
+        check(std::abs(j.value)<1e-16,"three slab broad face location");
+        check(j.gradient==V(0,side,0),"three slab outward face normal");
+    }
+    for(double step:{1e-8,1e-12,1e-18})
+        check(std::abs(SdfFunctions::valueDifference(fn,V(0,-.07,0),V(0,-step,0))-step)<1e-14*step,
+              "third slab stable sub-ulp displacement");
+    std::vector<double> candidates;
+    SdfFunctions::appendHistoryCandidatePoints(fn,V(0,.3,0),V(0,-1,0),0,.6,candidates);
+    for(double point:{.28,.30,.32,.34,.36})
+        check(std::any_of(candidates.begin(),candidates.end(),[&](double t){return std::abs(t-point)<1e-12;}),
+              "three slab candidates include all medial minima and gap maxima");
+    int certificates=0;
+    for(const V &o:{V(0,.3,0),V(0,-.04,0),V(.18,-.06,0),V(.78,-.05,.6),V(-.6,-.02,.4)}) {
+        comparePoint(queryPoint(o,fn),query(o,0,V::Zero(),fn),"three slab point and bound jet");
+        for(const V &w:{V(0,-1,0),V(.3,-.8,.5),V(0,0,1)}) for(double length:{1e-9,.01,.08,.6,2.}) {
+            const auto ray=SdfFunctions::rayBounds(fn,o,w,0,length);
+            const auto box=SdfFunctions::bounds(fn,o.cwiseMin(o+length*w),o.cwiseMax(o+length*w));
+            check(ray.certified && box.certified,"three slab certified bounds");
+            for(int i=0;i<=100;++i) {
+                const V p=o+(length*i/100)*w;
+                const auto j=SdfFunctions::evaluateJet(fn,p);
+                check(std::abs(j.value-reference(p))<1e-12,"three slab independent union");
+                check(j.value>=ray.minimumValue && j.value<=ray.maximumValue,"three slab ray value bound");
+                check(j.gradient.dot(w)>=ray.minimumDerivative && j.gradient.dot(w)<=ray.maximumDerivative,
+                      "three slab ray derivative bound");
+                check(j.value>=box.minimumValue && j.value<=box.maximumValue,"three slab box value bound");
+                check(j.gradient.norm()<=box.maximumGradientNorm+1e-12,"three slab gradient bound");
+            }
+            ++certificates;
+        }
+    }
+    std::cout<<"three slabs: A/B/A union, faces, candidates, sub-ulp differences and "
+             <<certificates<<" certificates passed\n";
+}
+
 void twoSphereChecks() {
     const auto fn=SdfFunctions::Function::TwoSpheres;
     const auto check=[](bool ok,const char *label) { if(!ok) throw std::runtime_error(label); };
@@ -314,6 +361,7 @@ int main() {
         Tungsten::roundedUGrooveChecks();
         Tungsten::twoSphereChecks();
         Tungsten::twoSlabChecks();
+        Tungsten::threeSlabChecks();
         return 0;
     } catch(const std::exception &error) {
         std::cerr<<error.what()<<'\n'; return 1;

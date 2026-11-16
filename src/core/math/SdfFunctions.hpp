@@ -17,7 +17,8 @@ namespace Tungsten {
 			TwoSpheres,
             Plane,
             RoundedUGroove,
-            TwoSlabs
+            TwoSlabs,
+            ThreeSlabs
 		};
 
 		static std::string functionToString(Function val);
@@ -39,6 +40,7 @@ namespace Tungsten {
 		static float two_spheres(Vec3f p, int& mat);
         static float rounded_u_groove(Vec3f p, int& mat);
         static float two_slabs(Vec3f p, int& mat);
+        static float three_slabs(Vec3f p, int& mat);
 		
 		template<typename sdf>
 		static Vec3f grad(sdf func, Vec3f p) {
@@ -68,6 +70,7 @@ namespace Tungsten {
             case Function::Plane: return p.y();
             case Function::RoundedUGroove: return rounded_u_groove(p, mat);
             case Function::TwoSlabs: return two_slabs(p, mat);
+            case Function::ThreeSlabs: return three_slabs(p, mat);
 			}
 		}
 
@@ -79,7 +82,8 @@ namespace Tungsten {
 			case Function::TwoSpheres: return grad(two_spheres, p);
             case Function::Plane: return Vec3f(0.f, 1.f, 0.f);
             case Function::RoundedUGroove:
-            case Function::TwoSlabs: {
+            case Function::TwoSlabs:
+            case Function::ThreeSlabs: {
                 const auto g = evaluateJet(fn, Eigen::Vector3d(p.x(), p.y(), p.z())).gradient;
                 return Vec3f(float(g.x()), float(g.y()), float(g.z()));
             }

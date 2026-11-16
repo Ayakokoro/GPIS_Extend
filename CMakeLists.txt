@@ -322,7 +322,7 @@ if (TUNGSTEN_BUILD_SPARSE_HISTORY_GPIS_TESTS)
     enable_testing()
     add_executable(sparse_history_gpis_test tests/SparseHistoryGpisTest.cpp)
     target_link_libraries(sparse_history_gpis_test PRIVATE ${core_libs})
-    foreach(mode gaussian local flight gradient medium grid scorer covariance)
+    foreach(mode gaussian local flight gradient medium grid scorer covariance gauss_legendre5)
         add_test(NAME sparse_history_gpis_${mode} COMMAND sparse_history_gpis_test ${mode})
     endforeach()
     add_test(NAME sparse_history_gpis_lut COMMAND sparse_history_gpis_test lut

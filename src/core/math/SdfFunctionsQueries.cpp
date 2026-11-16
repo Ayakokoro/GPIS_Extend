@@ -271,7 +271,7 @@ template<class T> T twoSpheresGeometry(const P<T> &p) {
     return sphere(P<T>{p[0],maximum(p[1],-p[1])-T(10),p[2]},9.5);
 }
 template<class T> T slabGeometry(const P<T> &p) {
-    // Two 1.2 x 0.02 x 1.2 boxes in one mean field. The max of face
+    // A 1.2 x 0.02 x 1.2 box. The max of face
     // distances is 1-Lipschitz and is the exact SDF near each broad face.
     const T x=maximum(p[0],-p[0])-T(0.6);
     const T y=maximum(p[1],-p[1])-T(0.01);
@@ -284,8 +284,15 @@ template<class T> T twoSlabsGeometry(const P<T> &p) {
                    slabGeometry(shifted(p,0.18,0.02,0)));
 }
 
+template<class T> T threeSlabsGeometry(const P<T> &p) {
+    // Preserve the original two slabs and add a third with the same y spacing.
+    // A/B/A alignment stays inside the original shared medium boundary.
+    return minimum(twoSlabsGeometry(p),slabGeometry(shifted(p,-0.18,0.06,0)));
+}
+
 template<class T> T geometry(const P<T> &p,SdfFunctions::Function fn) {
     if(fn==SdfFunctions::Function::TwoSlabs) return twoSlabsGeometry(p);
+    if(fn==SdfFunctions::Function::ThreeSlabs) return threeSlabsGeometry(p);
     return fn==SdfFunctions::Function::TwoSpheres ? twoSpheresGeometry(p) : knobGeometry(p);
 }
 Jet query(const V &local,double radius,const V &w=V::Zero(),
@@ -382,27 +389,32 @@ float SdfFunctions::rounded_u_groove(Vec3f p,int &) {
 float SdfFunctions::two_slabs(Vec3f p,int &) {
     return float(twoSlabsGeometry(P<double>{p.x(),p.y(),p.z()}));
 }
+float SdfFunctions::three_slabs(Vec3f p,int &) {
+    return float(threeSlabsGeometry(P<double>{p.x(),p.y(),p.z()}));
+}
 bool SdfFunctions::supportsQueries(Function fn) {
-    return fn==Function::Knob || fn==Function::RoundedUGroove || fn==Function::TwoSpheres || fn==Function::TwoSlabs;
+    return fn==Function::Knob || fn==Function::RoundedUGroove || fn==Function::TwoSpheres ||
+           fn==Function::TwoSlabs || fn==Function::ThreeSlabs;
 }
 void SdfFunctions::appendHistoryCandidatePoints(Function fn,const V &o,const V &w,
         double lo,double hi,std::vector<double> &points)
 {
-    if(fn!=Function::TwoSlabs || !(hi>lo)) return;
-    // This represented mean is min(max(six affine faces), max(six faces)).
+    if((fn!=Function::TwoSlabs && fn!=Function::ThreeSlabs) || !(hi>lo)) return;
+    // Each slab is a max of six affine faces; their union is a min.
     // Enumerate possible face switches, then retain only changes of the active
     // affine envelope. In particular this includes each slab's medial minimum
     // and the empty gap's maximum, without a marching step or sampling grid.
     struct Face { double intercept,slope; };
-    std::array<Face,12> faces;
-    const std::array<V,2> centers{{V(.18,.02,0),V(-.18,-.02,0)}};
+    const int slabCount=fn==Function::ThreeSlabs ? 3:2;
+    std::vector<Face> faces(6*slabCount);
+    const std::array<V,3> centers{{V(.18,.02,0),V(-.18,-.02,0),V(.18,-.06,0)}};
     const V half(.6,.01,.6);
-    for(int slab=0;slab<2;++slab) for(int axis=0;axis<3;++axis) for(int side=0;side<2;++side) {
+    for(int slab=0;slab<slabCount;++slab) for(int axis=0;axis<3;++axis) for(int side=0;side<2;++side) {
         const double sign=side ? 1.0 : -1.0;
         faces[slab*6+axis*2+side]={sign*(o[axis]-centers[slab][axis])-half[axis],sign*w[axis]};
     }
     std::vector<double> cuts{lo,hi};
-    cuts.reserve(68);
+    cuts.reserve(2+faces.size()*(faces.size()-1)/2);
     for(std::size_t i=0;i<faces.size();++i) for(std::size_t j=0;j<i;++j) {
         const double denominator=faces[i].slope-faces[j].slope;
         if(denominator==0) continue;
@@ -412,11 +424,14 @@ void SdfFunctions::appendHistoryCandidatePoints(Function fn,const V &o,const V &
     std::sort(cuts.begin(),cuts.end());
     cuts.erase(std::unique(cuts.begin(),cuts.end()),cuts.end());
     const auto active=[&](double t) {
-        int first=0,second=6;
         const auto value=[&](int i) { return faces[i].intercept+t*faces[i].slope; };
-        for(int i=1;i<6;++i) if(value(i)>value(first)) first=i;
-        for(int i=7;i<12;++i) if(value(i)>value(second)) second=i;
-        return value(second)<value(first) ? second : first;
+        int selected=0;
+        for(int slab=0;slab<slabCount;++slab) {
+            int face=6*slab;
+            for(int i=face+1;i<6*(slab+1);++i) if(value(i)>value(face)) face=i;
+            if(slab==0 || value(face)<value(selected)) selected=face;
+        }
+        return selected;
     };
     int previous=active(cuts[0]+.5*(cuts[1]-cuts[0]));
     for(std::size_t i=1;i+1<cuts.size();++i) {

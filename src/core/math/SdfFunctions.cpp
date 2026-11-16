@@ -18,6 +18,7 @@ namespace Tungsten {
         case Function::Plane:  return "plane";
         case Function::RoundedUGroove: return "rounded_u_groove";
         case Function::TwoSlabs: return "two_slabs";
+        case Function::ThreeSlabs: return "three_slabs";
         }
     }
 
@@ -37,6 +38,8 @@ namespace Tungsten {
             return Function::RoundedUGroove;
         else if (name == "two_slabs")
             return Function::TwoSlabs;
+        else if (name == "three_slabs")
+            return Function::ThreeSlabs;
         FAIL("Invalid sdf function: '%s'", name);
     }
 
