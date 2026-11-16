@@ -18,6 +18,9 @@ namespace Tungsten {
         float value_scale = 0.;
         Vec3f gradient_scale = Vec3f(0.);
         Vec3f ray_origin  = Vec3f(0.);
+        // Observed noise gradient, before the world-to-isotropic transform.
+        Vec3f target_gradient_noise = Vec3f(0.);
+        bool has_gradient_observation = false;
     };
 
     struct SparseConvolutionNoiseRealization {
@@ -55,6 +58,11 @@ namespace Tungsten {
         inline uint computeSeed(const Vec4u pixelSampleSegment, const uint sceneSeed) const;
 
         SparseConv1DSamplingScheme samplingScheme(const Vec3f& p) const;
+
+        // Exact transverse law for stationary SE, in isotropic ray coordinates
+        // (prior variance 1/2). Shared by gradient sampling and the NEE PDF.
+        bool seTransverseGradientMoments(const Vec3f& p, const Vec3f& rayDir,
+            bool conditioning, Vec2d& mean, double& variance) const;
 
         float evaluateValue(const Vec3f& p, const float t, const Vec3f& rayDir, const RayInfo info, UniformSampler& sampler, int& GPId);
         Vec3f evaluateGradient(const Vec3f& p, const float t, const Vec3f& rayDir, const RayInfo info, UniformSampler& sampler);

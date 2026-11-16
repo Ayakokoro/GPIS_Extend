@@ -69,8 +69,8 @@ void gaussian()
         ag::OnlineSampler sampler(1);
         Eigen::VectorXd v(o.size());
         for(int i=0;i<int(o.size());++i) {
-            // Half the trials exercise the double rank-revealing path. A
-            // prediction alone adds no observation and must not change the law.
+            // A nearly determined prediction adds no observation and must
+            // not change the following joint law.
             if (i==3 && trial%2==0) sampler.predict(point(1e-5));
             v[i]=sampler.sample(o[i],normal(random));
         }
@@ -92,6 +92,79 @@ void gaussian()
     catch(const std::exception &) { threw=true; }
     require(threw,"rank limit is not a miss / pruning");
     std::cout<<"Gaussian checks passed; dense rank="<<dense.rank()<<", redundant="<<dense.redundant()<<'\n';
+}
+
+void choleskyOnly()
+{
+    const std::vector<ag::Observation> history={point(0),{{0,0,0},{1,0,0},true},point(.7)};
+    const Eigen::Vector3d values(.3,-.2,.8);
+    const std::vector<ag::Observation> queries={point(.7),point(.42),{{.9,.2,.1},{0,1,0},true}};
+    ag::OnlineSampler sampler(1,1e-10,512,false);
+    for(int i=0;i<3;++i) sampler.condition(history[i],values[i]);
+    // A near-birth prediction must not permanently switch the sampler to EVD.
+    const auto birth=sampler.predict(point(1e-5));
+    require(std::isfinite(birth.mean) && birth.variance>=0,"Cholesky near-birth prediction finite");
+    Eigen::Matrix3d known,cross,prior;
+    for(int i=0;i<3;++i) for(int j=0;j<3;++j) {
+        known(i,j)=sampler.covariance(history[i],history[j]);
+        cross(i,j)=sampler.covariance(queries[i],history[j]);
+        prior(i,j)=sampler.covariance(queries[i],queries[j]);
+    }
+    const auto joint=sampler.predictJoint(queries);
+    const Eigen::Vector3d expectedMean=cross*known.ldlt().solve(values);
+    const Eigen::Matrix3d expectedCov=prior-cross*known.ldlt().solve(cross.transpose());
+    require((joint.mean-expectedMean).norm()<2e-12,"Cholesky joint mean vs dense LDLT");
+    require((joint.covariance-expectedCov).norm()<2e-12,"Cholesky joint covariance vs dense LDLT");
+    require(joint.covariance.row(0).norm()<2e-12,"known observation has zero conditional covariance");
+    close(sampler.sample(point(.7),123),values[2],0,"Cholesky duplicate reuses value");
+    require(sampler.rankDecompositions()==0,"disabled fallback never decomposes complete history");
+    bool threw=false;
+    try { sampler.condition(point(.7),values[2]+1); } catch(const std::exception &) { threw=true; }
+    require(threw,"Cholesky mode rejects inconsistent known values");
+    std::cout<<"Cholesky-only analytic posterior, known observations and zero rank decompositions passed\n";
+}
+
+void eigenFallback()
+{
+    ag::OnlineSampler small(1);
+    small.condition(point(0),.3);
+    const auto p=small.predict(point(5e-5));
+    require(p.variance>1e-10 && p.variance<1.49e-8,"small positive pivot fixture");
+    close(p.variance,-std::expm1(-2.5e-9),2e-16,"small positive pivot vs analytic variance");
+    small.sample(point(5e-5),.4);
+    require(small.rank()==2 && small.rankDecompositions()==0,
+        "positive Cholesky pivot below the former threshold does not use EVD");
+    const auto duplicate=small.predictJoint({point(0),point(.4)});
+    close(duplicate.mean[0],.3,0,"joint prediction preserves a known value");
+    require(duplicate.covariance.row(0).norm()==0 && small.rankDecompositions()==0,
+        "known joint query needs neither EVD nor a full-history joint factor");
+
+    ag::OnlineSampler dense(1);
+    std::mt19937_64 random(9517); std::normal_distribution<double> normal;
+    const double first=dense.sample(point(0),normal(random));
+    for(int i=1;i<=250;++i)
+        require(std::isfinite(dense.sample(point(i*.003),normal(random))),"eigen-only dense samples finite");
+    require(dense.rankDecompositions()>0,"dense fixture exercises an actual Cholesky failure");
+    require(dense.choleskyRebuilds()>0,"new history retries Cholesky after fallback");
+    const auto decompositions=dense.rankDecompositions(), rebuilds=dense.choleskyRebuilds();
+    const auto a=dense.predict(point(.37)), b=dense.predict(point(.37));
+    close(a.mean,b.mean,0,"cached eigen conditional mean");
+    close(a.variance,b.variance,0,"cached eigen conditional variance");
+    // The first query may refresh the last appended history; the second cannot.
+    const auto cachedDecompositions=dense.rankDecompositions(), cachedRebuilds=dense.choleskyRebuilds();
+    dense.predict(point(.38));
+    require(dense.rankDecompositions()==cachedDecompositions && dense.choleskyRebuilds()==cachedRebuilds,
+        "unchanged history reuses its factorization");
+    require(cachedDecompositions>=decompositions && cachedRebuilds>=rebuilds,"factorization counters monotone");
+    const auto joint=dense.predictJoint({point(0),point(.37),{{.37,0,0},{1,0,0},true}});
+    close(joint.mean[0],first,0,"fallback preserves previously drawn values");
+    require(joint.covariance.row(0).norm()<1e-14,"known value remains deterministic after fallback");
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(joint.covariance);
+    require(joint.mean.allFinite() && eig.info()==Eigen::Success && eig.eigenvalues().minCoeff()>=-1e-12,
+        "eigen-only joint posterior is finite and PSD");
+    std::cout<<"Failure-only fallback passed; EVD="<<dense.rankDecompositions()
+        <<", LLT rebuilds="<<dense.choleskyRebuilds()<<", scalar clamps="<<dense.varianceClamps()
+        <<", largest correction="<<dense.largestVarianceCorrection()<<'\n';
 }
 
 void bounds()
@@ -281,6 +354,22 @@ void mediumChecks()
 {
     std::cout<<"medium: create"<<std::endl;
     auto m=medium();
+    {
+        require(m->settings().numericalFallback,"numerical fallback remains enabled by default");
+        rapidjson::Document document;
+        auto description=m->toJson(document.GetAllocator());
+        description["adaptive"]["numerical_fallback"].SetBool(false);
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        description.Accept(writer);
+        JsonDocument disabledDocument(Path("adaptive-cholesky-test.json"),buffer.GetString());
+        Scene scene;
+        const auto disabled=std::dynamic_pointer_cast<AdaptiveFunctionSpaceGaussianProcessMedium>(
+            scene.fetchMedium(disabledDocument));
+        require(disabled && !disabled->settings().numericalFallback,"JSON disables numerical fallback");
+        auto restored=disabled->toJson(document.GetAllocator());
+        require(!restored["adaptive"]["numerical_fallback"].GetBool(),"fallback mode survives JSON round trip");
+    }
     IndependentPathSampler rng(711,false);
     Medium::MediumState state{}; state.reset(); rng.startPath(0,0);
     MediumSample sample{};
@@ -335,6 +424,8 @@ int main(int argc,char **argv)
     try {
         const std::string mode=argc>1?argv[1]:"all";
         if(mode=="gaussian" || mode=="all") gaussian();
+        if(mode=="cholesky" || mode=="all") choleskyOnly();
+        if(mode=="eigen_fallback" || mode=="all") eigenFallback();
         if(mode=="bounds" || mode=="all") bounds();
         if(mode=="first_hit" || mode=="all") firstHit();
         if(mode=="medium" || mode=="all") mediumChecks();

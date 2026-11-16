@@ -31,7 +31,8 @@ struct AdaptiveFunctionSpaceGaussianProcessMedium::Context : GPContext, MediumPa
     ag::GradientPlane gradientPlane;
     bool misReady = false;
     const AdaptiveFunctionSpaceGaussianProcessMedium *owner = nullptr;
-    Context(double length, const ag::Settings &s) : sampler(length,s.rankTolerance,s.maxSamples) {}
+    Context(double length, const ag::Settings &s)
+        : sampler(length,s.rankTolerance,s.maxSamples,s.numericalFallback) {}
     // Published contexts are immutable. MediumState::reset drops pathContext;
     // this no-op prevents a reset on a copied branch from corrupting its parent.
     void reset() override {}
@@ -66,6 +67,7 @@ void AdaptiveFunctionSpaceGaussianProcessMedium::fromJson(JsonPtr value, const S
         a.getField("max_samples",_settings.maxSamples);
         a.getField("max_steps",_settings.maxSteps);
         a.getField("enabled",_settings.adaptive);
+        a.getField("numerical_fallback",_settings.numericalFallback);
         a.getField("statistics",_statistics);
     }
     _settings.validate();
@@ -84,7 +86,8 @@ rapidjson::Value AdaptiveFunctionSpaceGaussianProcessMedium::toJson(Allocator &a
             "probability_tolerance",_settings.probabilityTolerance,
             "minimum_step",_settings.minimumStep,"root_tolerance",_settings.rootTolerance,
             "rank_tolerance",_settings.rankTolerance,"max_samples",_settings.maxSamples,
-            "max_steps",_settings.maxSteps,"enabled",_settings.adaptive,"statistics",_statistics}};
+            "max_steps",_settings.maxSteps,"enabled",_settings.adaptive,
+            "numerical_fallback",_settings.numericalFallback,"statistics",_statistics}};
 }
 
 void AdaptiveFunctionSpaceGaussianProcessMedium::prepareForRender()
@@ -120,6 +123,7 @@ void AdaptiveFunctionSpaceGaussianProcessMedium::prepareForRender()
     _rays=0; _hits=0; _queries=0; _redundant=0; _steps=0; _minimumSteps=0;
     _refinements=0; _invalidBirths=0; _invalidGradients=0;
     _rankDecompositions=0;
+    _choleskyRebuilds=0; _varianceClamps=0; _jointCovarianceClamps=0; _largestVarianceCorrection=0;
     _misEvents=0; _neePdfQueries=0; _neeGradientQueries=0; _degenerateGradients=0;
 }
 
@@ -190,6 +194,8 @@ AdaptiveFunctionSpaceGaussianProcessMedium::trace(PathSampleGenerator &rng, cons
     }
     const auto beforeQ=c->sampler.queries(), beforeR=c->sampler.redundant();
     const auto beforeD=c->sampler.rankDecompositions();
+    const auto beforeC=c->sampler.choleskyRebuilds(), beforeV=c->sampler.varianceClamps();
+    const auto beforeJ=c->sampler.jointCovarianceClamps();
     auto value = [&](double s) {
         const Vec3d p=o+w*s;
         return mean(p)+_sigma*c->sampler.sample(valueObservation(p),rand_normal_2(rng).x());
@@ -248,6 +254,12 @@ AdaptiveFunctionSpaceGaussianProcessMedium::trace(PathSampleGenerator &rng, cons
     _queries.fetch_add(c->sampler.queries()-beforeQ);
     _redundant.fetch_add(c->sampler.redundant()-beforeR);
     _rankDecompositions.fetch_add(c->sampler.rankDecompositions()-beforeD);
+    _choleskyRebuilds.fetch_add(c->sampler.choleskyRebuilds()-beforeC);
+    _varianceClamps.fetch_add(c->sampler.varianceClamps()-beforeV);
+    _jointCovarianceClamps.fetch_add(c->sampler.jointCovarianceClamps()-beforeJ);
+    double correction=_largestVarianceCorrection.load();
+    while (correction<c->sampler.largestVarianceCorrection() &&
+        !_largestVarianceCorrection.compare_exchange_weak(correction,c->sampler.largestVarianceCorrection())) {}
     _steps.fetch_add(result.steps); _minimumSteps.fetch_add(result.minimumSteps);
     _refinements.fetch_add(result.refinements);
     return c;
@@ -339,6 +351,12 @@ void AdaptiveFunctionSpaceGaussianProcessMedium::teardownAfterRender()
         {"minimum_steps",_minimumSteps.load()},{"root_refinements",_refinements.load()},
         {"invalid_births",_invalidBirths.load()},{"invalid_gradients",_invalidGradients.load()},
         {"double_rank_decompositions",_rankDecompositions.load()},{"arithmetic","double"},
+        {"numerical_fallback",_settings.numericalFallback},
+        {"fallback_policy","cholesky_failure_eigen_only"},
+        {"cholesky_rebuilds",_choleskyRebuilds.load()},
+        {"eigen_variance_clamps",_varianceClamps.load()},
+        {"eigen_joint_covariance_clamps",_jointCovarianceClamps.load()},
+        {"largest_normalized_variance_correction",_largestVarianceCorrection.load()},
         {"one_d_sampling",_oneDSampling},{"mis_events",_misEvents.load()},
         {"nee_pdf_queries",_neePdfQueries.load()},{"nee_gradient_queries",_neeGradientQueries.load()},
         {"degenerate_gradient_events",_degenerateGradients.load()}}.dump() << '\n';
