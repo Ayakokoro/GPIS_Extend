@@ -5,6 +5,7 @@
 #include "math/conditional/mathutility/Gaussian1D.h"
 #include "math/conditional/mathutility/GaussianMoments1D.h"
 #include "math/conditional/mathutility/SmallGaussian.h"
+#include "math/ClassicGlobalMath.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -342,6 +343,11 @@ MeanJet ConditionalFlightKernel::meanJet(double age) const {
         field_.mean->evaluate(state_.birthPosition+age*state_.direction);
 }
 
+double ConditionalFlightKernel::scalarMeanValue(double age,bool transition) const {
+    Profile::count(transition ? Profile::Counter::TransitionScalarQueries : Profile::Counter::LocalFarScalarQueries);
+    return field_.mean->evaluateValue(state_.birthPosition+age*state_.direction);
+}
+
 double ConditionalFlightKernel::meanValueDifference(double age,double *error) const {
     if(error) *error=0;
     return meanRay_ ? meanRay_->valueDifference(age,error) :
@@ -389,12 +395,12 @@ double ConditionalFlightKernel::pointIntervalMajorant(double lo,double hi,double
         std::numeric_limits<double>::infinity(),parentMaximum);
 }
 
-MeanRayBounds ConditionalFlightKernel::pointMeanBounds(double lo,double hi,double lipschitz) const {
+MeanRayBounds ConditionalFlightKernel::pointMeanBounds(double lo,double hi,double lipschitz,bool scalarOnly,bool transition) const {
     const double middle=0.5*lo+0.5*hi;
     double value;
     {
         Profile::Scope point(Profile::Stage::BoundSdfPoint);
-        value=meanValue(middle);
+        value=scalarOnly ? scalarMeanValue(middle,transition) : meanValue(middle);
     }
     if(!std::isfinite(value))
         throw NumericError(NumericStatus::InvalidMajorant,"nonfinite point/Lipschitz mean");
@@ -415,6 +421,59 @@ MeanRayBounds ConditionalFlightKernel::pointMeanBounds(double lo,double hi,doubl
     mean.midpointError=error;
     mean.certified=true;
     return mean;
+}
+
+double ConditionalFlightKernel::transitionIntervalMajorant(double lo,double hi,double lipschitz,
+        double tightenExpectedEvents,double parentMaximum) const {
+    Profile::Scope profile(Profile::Stage::IntervalBound);
+    Profile::Scope detail(Profile::Stage::BoundTransition);
+    Profile::count(Profile::Counter::TransitionBoundQueries);
+    if(!(lo>0 && hi>lo && hi<=maximumAgeInDomain()) ||
+       !(lipschitz>=0) || !std::isfinite(lipschitz) ||
+       !(tightenExpectedEvents>=0) || !(parentMaximum>=0))
+        throw NumericError(NumericStatus::InvalidInput,"invalid transition midpoint interval");
+    const auto mean=pointMeanBounds(lo,hi,lipschitz,true,true);
+    // The reducer intersects the signed prior/correction enclosure with a
+    // cone about the cancellation-safe conditional midpoint. Keep actual
+    // interval moments here; tail envelopes discard that near-birth structure.
+    return boundedIntervalMajorant(mean,lo,hi,tightenExpectedEvents,parentMaximum,false);
+}
+
+double ConditionalFlightKernel::localFarIntervalMajorant(double lo,double hi,double lipschitz,
+        double gradientBound,double parentMaximum) const {
+    Profile::Scope profile(Profile::Stage::IntervalBound);
+    Profile::Scope region(Profile::Stage::BoundLocalFar);
+    Profile::Scope detail(Profile::Stage::BoundSimple);
+    Profile::count(Profile::Counter::LocalFarBoundQueries);
+    if(!(lo>0 && hi>lo && hi<=maximumAgeInDomain()) ||
+       !(lipschitz>=0) || !std::isfinite(lipschitz) ||
+       !(gradientBound>=0) || !std::isfinite(gradientBound) || !(parentMaximum>=0))
+        throw NumericError(NumericStatus::InvalidInput,"invalid local far interval");
+    using I=bounds::Interval;
+    const double q=(I(lo)*bounds::sqrt(I(inverseLength2_))).lower;
+    if(!(q>=2) || !std::isfinite(q))
+        throw NumericError(NumericStatus::InvalidInput,"local far interval must begin beyond two directional lengths");
+    const auto mean=pointMeanBounds(lo,hi,lipschitz,true);
+    // Refresh from this interval's age, not the configured switching age.
+    // Beyond 32 lengths retain the tiny certified residual at 32; this avoids
+    // enormous polynomial arguments while preserving a conservative bound.
+    const auto f=makeFarBounds(q,32.0);
+    const I sd(f.minimumSd,f.maximumSd);
+    const double fmin=(I(mean.minimumValue)-I(f.valueCorrection)).lower;
+    const double fmax=(I(mean.maximumValue)+I(f.valueCorrection)).upper;
+    const double zmin=(I(fmin)/sd).lower;
+    const double derivative=(I(-gradientBound)-I(f.slopeCorrection)-
+        I(0,f.regressionMax)*I(fmax)).lower;
+    const double slopeSd=upward(bounds::sqrt(I(sigma2_)*I(inverseLength2_)).upper);
+    // Use the same Mills ratio and crossing-flux functions as classic_global,
+    // including its guard, instead of the looser 1-z negative-tail envelope.
+    double density,flux;
+    { Profile::Scope mills(Profile::Stage::BoundMills);density=ClassicGlobal::density(zmin,1.0); }
+    { Profile::Scope area(Profile::Stage::BoundFlux);flux=ClassicGlobal::negativePartMean(derivative,slopeSd); }
+    const double maximum=density/f.minimumSd*flux*(1.0+1e-5);
+    if(!(maximum>=0) || !std::isfinite(maximum))
+        throw NumericError(NumericStatus::InvalidMajorant,"nonfinite local far majorant");
+    return std::min(parentMaximum,upward(maximum));
 }
 
 double ConditionalFlightKernel::simpleIntervalMajorant(double lo,double hi,double lipschitz,
@@ -482,39 +541,71 @@ bool ConditionalFlightKernel::coarseMajorant(double lo,double &hi,double &maximu
 
 double ConditionalFlightKernel::farIntervalMajorant(const MeanRayBounds &mb) const {
     Profile::Scope detail(Profile::Stage::BoundFarTail);
+    if (!farBounds_.ready) farBounds_=makeFarBounds(farBoundStartScale_);
+    return applyFarBounds(mb,farBounds_);
+}
+
+ConditionalFlightKernel::FarBounds ConditionalFlightKernel::makeFarBounds(double startScale,double maximumScale) const {
     using I=bounds::Interval;
-    if (!farBounds_.ready) {
-        Profile::count(Profile::Counter::FarBoundSetups);
-        // All residual envelopes decrease for q>=Q>=2. A cutoff above 8
-        // can conservatively reuse Q=8, avoiding overflow at extreme settings.
-        const I q(std::min(farBoundStartScale_,8.0)), q2=q*q;
-        const I rootA=bounds::sqrt(I(inverseLength2_));
-        const I c=bounds::exp(I(-0.5)*q2), e=bounds::exp(-q2);
-        const I v=I(1)-(I(1)+q2)*e;
-        const I df(std::abs(deltaValue_)), dk(std::abs(deltaSlope_));
-        farBounds_.valueCorrection=upward(((df+q*dk/rootA)*c).upper);
-        farBounds_.slopeCorrection=upward(((rootA*q*df+(q2-I(1))*dk)*c).upper);
-        farBounds_.minimumSd=bounds::down(bounds::sqrt(I(sigma2_)*v).lower/boundGuard);
-        farBounds_.maximumSd=upward(bounds::sqrt(I(sigma2_)).upper);
-        farBounds_.regressionMax=upward((rootA*q*q2*e/v).upper);
-        // The normalized conditional slope variance N/V^2 <= 1 exactly.
-        // It follows from x-2+(x+2)exp(-x)>=0, x=q^2>=0.
-        farBounds_.kappaMax=upward(rootA.upper);
-        farBounds_.ready=true;
-    }
-    const auto &f=farBounds_;
+    FarBounds f;
+    Profile::count(Profile::Counter::FarBoundSetups);
+    // All residual envelopes decrease for q>=Q>=2. Reuse a finite earlier
+    // envelope beyond maximumScale, avoiding overflow at extreme settings.
+    const I q(std::min(startScale,maximumScale)), q2=q*q;
+    const I rootA=bounds::sqrt(I(inverseLength2_));
+    const I c=bounds::exp(I(-0.5)*q2), e=bounds::exp(-q2);
+    const I v=I(1)-(I(1)+q2)*e;
+    const I df(std::abs(deltaValue_)), dk(std::abs(deltaSlope_));
+    f.valueCorrection=upward(((df+q*dk/rootA)*c).upper);
+    f.slopeCorrection=upward(((rootA*q*df+(q2-I(1))*dk)*c).upper);
+    f.minimumSd=bounds::down(bounds::sqrt(I(sigma2_)*v).lower/boundGuard);
+    f.maximumSd=upward(bounds::sqrt(I(sigma2_)).upper);
+    f.regressionMax=upward((rootA*q*q2*e/v).upper);
+    // The normalized conditional slope variance N/V^2 <= 1 exactly.
+    // It follows from x-2+(x+2)exp(-x)>=0, x=q^2>=0.
+    f.kappaMax=upward(rootA.upper);
+    f.ready=true;
+    return f;
+}
+
+double ConditionalFlightKernel::applyFarBounds(const MeanRayBounds &mb,const FarBounds &f) const {
     const MomentBounds moments{{f.minimumSd,f.maximumSd},{0,f.regressionMax},0,f.kappaMax,true};
     return applyMomentBounds(bounds::down(mb.minimumValue-f.valueCorrection),
         bounds::up(mb.maximumValue+f.valueCorrection),
         bounds::down(mb.minimumDerivative-f.slopeCorrection),moments,true);
 }
 
+double ConditionalFlightKernel::globalFarMajorant(double startScale) const {
+    Profile::Scope detail(Profile::Stage::BoundFarTail);
+    if(!(startScale>=2) || !std::isfinite(startScale))
+        throw NumericError(NumericStatus::InvalidInput,"global far scale must be finite and at least two");
+    const auto global=field_.mean->globalMagnitudeBounds();
+    if(!global || !(global->maximumAbsoluteValue>=0) || !std::isfinite(global->maximumAbsoluteValue) ||
+       !(global->maximumGradientNorm>=0) || !std::isfinite(global->maximumGradientNorm))
+        throw NumericError(NumericStatus::InvalidInput,"global far tracking requires finite global mean bounds");
+    MeanRayBounds mean;
+    const bool symmetric=std::isnan(global->minimumValue) && std::isnan(global->maximumValue);
+    mean.minimumValue=symmetric ? -global->maximumAbsoluteValue : global->minimumValue;
+    mean.maximumValue=symmetric ? global->maximumAbsoluteValue : global->maximumValue;
+    if(!std::isfinite(mean.minimumValue) || !std::isfinite(mean.maximumValue) ||
+       mean.minimumValue>mean.maximumValue)
+        throw NumericError(NumericStatus::InvalidInput,"invalid signed global mean bounds");
+    mean.minimumDerivative=-global->maximumGradientNorm;
+    mean.maximumDerivative=global->maximumGradientNorm;
+    mean.certified=true;
+    const double maximum=applyFarBounds(mean,makeFarBounds(startScale));
+    if(!(maximum>=0) || !std::isfinite(maximum))
+        throw NumericError(NumericStatus::InvalidMajorant,"nonfinite global far majorant");
+    Profile::count(Profile::Counter::GlobalFarSetups);
+    return maximum;
+}
+
 double ConditionalFlightKernel::boundedIntervalMajorant(const MeanRayBounds &mb,double lo,double hi,
-        double tightenExpectedEvents,double parentMaximum) const {
+        double tightenExpectedEvents,double parentMaximum,bool allowFarTail) const {
     Profile::Scope detail(Profile::Stage::BoundAlgebra);
     const double a=inverseLength2_;
     if (!mb.certified) throw NumericError(NumericStatus::InvalidMajorant,"uncertified ray mean bounds");
-    if (lo>=farBoundBegin_) {
+    if (allowFarTail && lo>=farBoundBegin_) {
         const double far=std::min(parentMaximum,farIntervalMajorant(mb));
         if (std::isfinite(far)) {
             Profile::count(Profile::Counter::FarBoundAccepted);
@@ -560,8 +651,9 @@ double ConditionalFlightKernel::boundedIntervalMajorant(const MeanRayBounds &mb,
         double fmax=bounds::up(mb.maximumValue+correction.upper);
         const double kmin=bounds::down(mb.minimumDerivative+slopeCorrection.lower);
         const double kmax=bounds::up(mb.maximumDerivative+slopeCorrection.upper);
+        const double centerError=um<1e-3 ? differenceError : midpointError;
         const double radius=0.5*(hi-lo)*std::max(std::abs(kmin),std::abs(kmax))*boundGuard+
-            roundoff+(um<1e-3 ? differenceError : midpointError);
+            roundoff+(allowFarTail ? centerError : std::max(centerError,midpointError));
         fmin=std::max(fmin,center-radius);
         fmax=std::min(fmax,center+radius);
         return applyMomentBounds(fmin,fmax,kmin,moments,true);

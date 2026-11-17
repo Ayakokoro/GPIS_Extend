@@ -17,6 +17,10 @@ struct ConditionalTrackingSettings {
     bool normalizedBoundOnly = false; // experimental: skip the second, moment-form upper bound
     double farBoundStartScale = 0.0;   // 0 disables; >=2 caches a certified SE tail envelope
     double simpleBoundStartScale = 0.0; // 0 disables; >=2 uses the simple midpoint/Lipschitz SE-tail bound
+    double globalFarStartScale = 0.0; // 0 disables; >=2 replaces the entire far tail by one global SE bound
+    double localFarStartScale = 0.0; // 0 disables; >=2 uses scalar geometric proposals and local Lipschitz/SE bounds
+    bool transitionPointBounds = false; // after certified birth: scalar midpoint, full conditional moments, no grid clipping
+    double transitionMaxExpectedEvents = 4.0; // refine midpoint proposals by their certified optical depth
     double shadowRouletteThreshold = 0.1; // classic_global shadow roulette; 0 disables
     double step = 0.0;                 // world distance; 0 selects stepScale*ell
     double stepScale = 0.5;            // multiple of the directional GP length
@@ -46,10 +50,14 @@ class ConditionalSegment {
     Vector3 _w;
     double _length, _age;
     double _meanLipschitz, _classicBegin=std::numeric_limits<double>::infinity();
+    double _meanGradientBound, _localFarBegin=std::numeric_limits<double>::infinity();
     ConditionalTrackingSettings _tracking;
     ConditionalFlightKernel _straight;
     ConditionalBirthMajorant _birthBound;
     double _tailMaximum=0;
+    double _globalFarBegin=std::numeric_limits<double>::infinity(); // distance from this segment's origin
+    mutable double _globalFarMaximum=std::numeric_limits<double>::quiet_NaN();
+    double globalFarMaximum() const;
     const SinglePointNeuralModel *_neuralModel=nullptr;
     std::unique_ptr<SinglePointNeuralFlight> _neuralFlight;
     double _hazardEnvelope=1;
@@ -60,7 +68,8 @@ public:
                        const Point3 &origin, const Vector3 &direction, double length,
                        const ConditionalTrackingSettings &tracking = {},
                        const SinglePointNeuralModel *neuralModel = nullptr,
-                       double meanLipschitz = std::numeric_limits<double>::infinity());
+                       double meanLipschitz = std::numeric_limits<double>::infinity(),
+                       double meanGradientBound = std::numeric_limits<double>::quiet_NaN());
     ~ConditionalSegment();
     ConditionalScalarStatistics statistics(double t) const;
     Gaussian<3> gradient(double t) const;

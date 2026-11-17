@@ -216,6 +216,10 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_normalized_bound_only",_tracking.normalizedBoundOnly);
     value.getField("tracking_far_bound_start_scale",_tracking.farBoundStartScale);
     value.getField("tracking_simple_bound_start_scale",_tracking.simpleBoundStartScale);
+    value.getField("tracking_global_far_start_scale",_tracking.globalFarStartScale);
+    value.getField("tracking_local_far_start_scale",_tracking.localFarStartScale);
+    value.getField("tracking_transition_point_bounds",_tracking.transitionPointBounds);
+    value.getField("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents);
     value.getField("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold);
     _tracking.step=_trackingStep;
     value.getField("tracking_step_scale",_tracking.stepScale);
@@ -254,6 +258,10 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_normalized_bound_only",_tracking.normalizedBoundOnly,allocator);
     value.AddMember("tracking_far_bound_start_scale",_tracking.farBoundStartScale,allocator);
     value.AddMember("tracking_simple_bound_start_scale",_tracking.simpleBoundStartScale,allocator);
+    value.AddMember("tracking_global_far_start_scale",_tracking.globalFarStartScale,allocator);
+    value.AddMember("tracking_local_far_start_scale",_tracking.localFarStartScale,allocator);
+    value.AddMember("tracking_transition_point_bounds",_tracking.transitionPointBounds,allocator);
+    value.AddMember("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents,allocator);
     value.AddMember("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold,allocator);
     value.AddMember("tracking_step_scale",_tracking.stepScale,allocator);
     value.AddMember("tracking_age_scale",_tracking.ageScale,allocator);
@@ -305,6 +313,8 @@ void GlobalConditionalMedium::prepareForRender() {
     else throw std::runtime_error("global_conditional: this scene mean does not provide certified SDF queries");
     if(_tracking.majorantMode==cg::ConditionalMajorantMode::TwoConstants && !_field.mean->globalMagnitudeBounds())
         throw std::runtime_error("tracking_majorant two_constants requires a clamped VDB SDF or constant mean with global bounds");
+    if(_tracking.globalFarStartScale>0 && !_field.mean->globalMagnitudeBounds())
+        throw std::runtime_error("tracking_global_far_start_scale requires a clamped VDB SDF or constant mean with global bounds");
     if(_singlePointNeural) {
         if(!_singlePointModel)
             throw std::runtime_error("global_conditional_neural: loadResources must precede prepareForRender");
@@ -388,7 +398,7 @@ try
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     // Geometry nearT suppresses self-intersections only. It must not cut out
     // part of the medium next to a collision or a transparent boundary.
-    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz);
+    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz,_gradientBound);
     cg::Random rng(sampler); double t;
     cg::ConditionalTrackingWork neuralWork;
     const bool escaped=segment.track(rng,true,t,_singlePointNeural ? &neuralWork : nullptr)!=0;
@@ -464,7 +474,7 @@ try
     observeBirth(state->distanceDiagnostic,*c,ray,_singlePointNeural);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
-    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz);
+    cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz,_gradientBound);
     cg::Random rng(sampler); double t;
     cg::ConditionalTrackingWork neuralWork;
     const double tr=segment.track(rng,false,t,_singlePointNeural ? &neuralWork : nullptr);

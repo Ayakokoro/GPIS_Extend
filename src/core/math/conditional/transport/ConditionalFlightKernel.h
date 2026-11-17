@@ -52,6 +52,9 @@ public:
     // One constant for every age >= begin, using precomputed global mean bounds.
     // Unlike twoSegmentMajorants(), this does not query any tail intervals.
     double constantTailMajorant(double begin) const;
+    // Certified SE residual envelope for every age >= startScale * directional ell.
+    // No spatial interval query or macrocell traversal; startScale must be >=2.
+    double globalFarMajorant(double startScale) const;
     double birthAdjacentMajorant(double begin, double end,
                                 const ConditionalBirthMajorant& birth) const;
     ConditionalMajorants twoSegmentMajorants(double end) const;
@@ -67,6 +70,17 @@ public:
     double nextMeanBoundary(double begin,double end) const;
     bool coarseMajorant(double begin,double &end,double &maximum) const;
     double meanValue(double age) const { return meanJet(age).value; }
+    double scalarMeanValue(double age,bool transition=false) const;
+    // Preserve signed conditional cancellation and exact moment bounds even
+    // when a cached far envelope is enabled for ordinary grid intervals.
+    double transitionIntervalMajorant(double begin,double end,double meanLipschitz,
+                                     double tightenExpectedEvents=4.0,
+                                     double parentMaximum=std::numeric_limits<double>::infinity()) const;
+    // Local midpoint/Lipschitz cone and an SE envelope refreshed at begin.
+    // Uses direct scalar queries, no macrocell or fine-ray certificates.
+    double localFarIntervalMajorant(double begin,double end,double meanLipschitz,
+                                   double gradientBound,
+                                   double parentMaximum=std::numeric_limits<double>::infinity()) const;
     // Uses the same scalar field and conditional reducer as intervalMajorant,
     // replacing spatial interval propagation with a world-space Lipschitz cone.
     double pointIntervalMajorant(double begin,double end,double meanLipschitz,
@@ -85,10 +99,11 @@ private:
         bool hasJet=false;
     };
     PointStatistics &pointStatistics(double age) const;
-    MeanRayBounds pointMeanBounds(double begin,double end,double meanLipschitz) const;
+    MeanRayBounds pointMeanBounds(double begin,double end,double meanLipschitz,bool scalarOnly=false,
+                                 bool transition=false) const;
     double farIntervalMajorant(const MeanRayBounds &mean) const;
     double boundedIntervalMajorant(const MeanRayBounds &mean,double begin,double end,
-                                  double tightenExpectedEvents,double parentMaximum) const;
+                                  double tightenExpectedEvents,double parentMaximum,bool allowFarTail=true) const;
     MeanRayBounds meanRayBounds(double begin,double end,const SdfRayQueryOptions &options = {}) const;
     double meanValueDifference(double age,double *error=nullptr) const;
     MeanJet meanJet(double age) const;
@@ -99,6 +114,8 @@ private:
         bool ready = false;
         double valueCorrection, slopeCorrection, minimumSd, maximumSd, regressionMax, kappaMax;
     };
+    FarBounds makeFarBounds(double startScale,double maximumScale=8.0) const;
+    double applyFarBounds(const MeanRayBounds &mean, const FarBounds &factors) const;
     mutable FarBounds farBounds_;
     double simpleBoundStartScale_, simpleBoundBegin_=std::numeric_limits<double>::infinity();
     struct SimpleBounds {

@@ -4,8 +4,11 @@
 #if OPENVDB_AVAILABLE
 class MacrocellRecordingGrid final : public Tungsten::GpisSdfGrid {
 public:
-    struct Counts { int fine=0,coarse=0,boundaries=0; };
+    struct Counts { int fine=0,coarse=0,boundaries=0,jets=0,samples=0,scalar=0; };
     mutable Counts counts;
+    double evaluateValue(const V &p) const override {
+        ++counts.scalar;return GpisSdfGrid::evaluateValue(p);
+    }
     std::unique_ptr<cg::MeanRayCursor> createRayCursor(const V &o,const V &w) const override {
         class Cursor final : public cg::MeanRayCursor {
             std::unique_ptr<cg::MeanRayCursor> _inner;
@@ -16,8 +19,8 @@ public:
             double nextBoundary(double lo,double hi) override {
                 ++_counts.boundaries;return _inner->nextBoundary(lo,hi);
             }
-            cg::MeanRaySample sample(double t) override { return _inner->sample(t); }
-            cg::MeanJet evaluate(double t) override { return _inner->evaluate(t); }
+            cg::MeanRaySample sample(double t) override { ++_counts.samples;return _inner->sample(t); }
+            cg::MeanJet evaluate(double t) override { ++_counts.jets;return _inner->evaluate(t); }
             double valueDifference(double t,double *error=nullptr) override { return _inner->valueDifference(t,error); }
             cg::MeanRayBounds rayBounds(double lo,double hi,const Tungsten::SdfRayQueryOptions &options) override {
                 ++_counts.fine;return _inner->rayBounds(lo,hi,options);
@@ -140,6 +143,52 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
         const auto farTrace=trace(relaxed,collision);
         check(farTrace.coarse==1 && farTrace.fine==0 && farTrace.boundaries==0,
             "far relaxation uses directional ell and retained conditioning age");
+    }
+
+    // A true global tail bypasses both levels of the actual VDB cursor, even
+    // with geometry proposals and tiny near-field step/event limits enabled.
+    recording->initializeMagnitudeBounds();
+    for(bool collision:{false,true}) {
+        auto global=settings;global.globalFarStartScale=2;
+        global.geometryStep=true;global.step=1e-12;global.maxExpectedEvents=1e-12;
+        const cg::ConditionalSegment flight(f,birth,birth.birthPosition+1.1*V::UnitZ(),
+            V::UnitZ(),0.2,global,nullptr,recording->gradientBound);
+        recording->counts={};
+        OpticalDepthSampler sampler({std::numeric_limits<float>::min()});cg::Random rng(sampler);
+        cg::ConditionalTrackingWork work;double hit;
+        close(flight.track(rng,collision,hit,&work),1,0,"VDB global-tail fixture escapes");
+        check(work.intervals==1 && recording->counts.coarse==0 && recording->counts.fine==0 &&
+            recording->counts.boundaries==0,"VDB global tail skips macro bounds, fine bounds and DDA");
+    }
+
+    // The local far tracker also bypasses grid traversal. Its two proposal
+    // queries must use the new direct scalar path, not prepare a ray-cell jet.
+    for(bool collision:{false,true}) {
+        auto local=settings;local.localFarStartScale=2;local.step=1e-12;local.maxExpectedEvents=64;
+        const cg::ConditionalSegment flight(f,birth,birth.birthPosition+1.1*V::UnitZ(),
+            V::UnitZ(),0.2,local,nullptr,1,recording->gradientBound);
+        recording->counts={};
+        OpticalDepthSampler sampler({std::numeric_limits<float>::min()});cg::Random rng(sampler);
+        cg::ConditionalTrackingWork work;double hit;
+        close(flight.track(rng,collision,hit,&work),1,0,"VDB local-tail fixture escapes");
+        check(work.intervals==1 && recording->counts.scalar==2 && recording->counts.jets==0 &&
+            recording->counts.samples==0 && recording->counts.coarse==0 && recording->counts.fine==0 &&
+            recording->counts.boundaries==0,"local far uses only scalar proposals/midpoints without ray-cell construction");
+    }
+
+    for(bool collision:{false,true}) {
+        auto midpoint=settings;midpoint.transitionPointBounds=true;midpoint.localFarStartScale=4;
+        midpoint.step=1e-12;midpoint.ageScale=1e-12;midpoint.maxExpectedEvents=64;
+        midpoint.transitionMaxExpectedEvents=64;
+        const cg::ConditionalSegment flight(f,birth,birth.birthPosition+.4*V::UnitZ(),
+            V::UnitZ(),.2,midpoint,nullptr,1,recording->gradientBound);
+        recording->counts={};
+        OpticalDepthSampler sampler({std::numeric_limits<float>::min()});cg::Random rng(sampler);
+        cg::ConditionalTrackingWork work;double hit;
+        close(flight.track(rng,collision,hit,&work),1,0,"VDB transition fixture escapes");
+        check(work.intervals==1 && recording->counts.scalar==2 && recording->counts.jets==0 &&
+            recording->counts.samples==0 && recording->counts.coarse==0 && recording->counts.fine==0 &&
+            recording->counts.boundaries==0,"transition scalar midpoint crosses cells without age cap or DDA");
     }
 
     // Independent uncached-hazard integration checks both tracking estimators.

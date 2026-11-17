@@ -27,9 +27,26 @@ inline void sdfChecks()
         birth.direction=V(.4,.2,.3).normalized();
         birth.birthValue=.3;birth.birthGradient=birth.direction;
         const cg::ConditionalFlightKernel kernel(f,birth);
+        for(double q:{2.,4.,8.}) {
+            const double bound=kernel.globalFarMajorant(q);
+            for(int i=0;i<=200;++i)
+                check(kernel.evaluate(q+20.0*i/200).hazard.value<=bound*(1+1e-10),
+                    "global far certificate covers signed transformed-grid field and clamps");
+        }
+        for(double lo:{2.001,4.,8.,16.}) {
+            const double hi=lo+3;
+            const double bound=kernel.localFarIntervalMajorant(lo,hi,global->maximumGradientNorm,global->maximumGradientNorm);
+            for(int i=0;i<=200;++i)
+                check(kernel.evaluate(lo+(hi-lo)*i/200).hazard.value<=bound*(1+1e-10),
+                    "local far scalar certificate covers transformed grid cells and clamps");
+        }
         for(double lo:{.1,1.5,3.0}) {
             const double hi=lo+3;
+            const double transition=kernel.transitionIntervalMajorant(lo,hi,global->maximumGradientNorm);
             const double bound=kernel.pointIntervalMajorant(lo,hi,global->maximumGradientNorm);
+            for(int i=0;i<=100;++i)
+                check(kernel.evaluate(lo+(hi-lo)*i/100).hazard.value<=transition*(1+1e-10),
+                    "transition midpoint covers transformed signed grid cells and clamps");
             for(int i=0;i<=100;++i)
                 check(kernel.evaluate(lo+(hi-lo)*i/100).hazard.value<=bound*(1+1e-10),
                     "point/Lipschitz bound covers transformed grid faces and clamps");
@@ -39,8 +56,12 @@ inline void sdfChecks()
     for(int i=0;i<3000;++i) {
         const V p(20*globalRng.uniform01()-10,20*globalRng.uniform01()-10,20*globalRng.uniform01()-10);
         const auto jet=grid->evaluate(p);
+        close(grid->evaluateValue(p),jet.value,1e-13*std::max(1.,std::abs(jet.value)),
+            "direct scalar interpolation agrees with original field including negative scale and clamps");
         check(std::abs(jet.value)<=global->maximumAbsoluteValue && jet.gradient.norm()<=global->maximumGradientNorm,
             "cached global bounds cover transformed negative-scale field, clamp and exterior");
+        check(jet.value>=global->minimumValue && jet.value<=global->maximumValue,
+            "signed global range covers negative scale and world transform");
     }
     auto nearlyConstant=*grid;
     for(auto &node:nearlyConstant.data.values) node=1e20f;

@@ -4,6 +4,7 @@
 #include "math/conditional/core/Types.h"
 #include "math/SdfQueries.hpp"
 #include <memory>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -32,6 +33,9 @@ struct MeanRaySample {
 // An unbounded analytic SDF must not advertise this capability.
 struct MeanMagnitudeBounds {
     double maximumAbsoluteValue, maximumGradientNorm;
+    // Optional signed range; older providers retain the symmetric certificate.
+    double minimumValue = std::numeric_limits<double>::quiet_NaN();
+    double maximumValue = std::numeric_limits<double>::quiet_NaN();
 };
 
 // Optional per-flight query state. The field remains immutable and shared;
@@ -87,6 +91,9 @@ public:
     // derived from the resolved value either way.
     virtual std::optional<double> intrinsicSigma() const { return std::nullopt; }
     virtual MeanJet evaluate(const Point3& x) const = 0;
+    // Point-only proposals need no gradient or ray-cell polynomial. Providers
+    // may override this without changing the existing jet/cursor arithmetic.
+    virtual double evaluateValue(const Point3& x) const { return evaluate(x).value; }
     virtual std::unique_ptr<MeanRayCursor> createRayCursor(const Point3&,const Vector3&) const {
         return nullptr;
     }
@@ -183,7 +190,7 @@ public:
     MeanJet evaluate(const Point3&) const override { return {value_, Vector3::Zero()}; }
     BoundsSummary bounds(const Bounds3&) const override { return {value_, 0.0, true}; }
     std::optional<MeanMagnitudeBounds> globalMagnitudeBounds() const override {
-        return MeanMagnitudeBounds{std::abs(value_),0.0};
+        return MeanMagnitudeBounds{std::abs(value_),0.0,value_,value_};
     }
     std::optional<Vector3> affineGradient() const override { return Vector3::Zero(); }
 private:

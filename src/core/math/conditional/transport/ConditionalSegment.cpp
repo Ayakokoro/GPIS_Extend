@@ -2,6 +2,7 @@
 #include "MajorantOpticalDepth.h"
 #include "SinglePointNeural.h"
 #include "math/ConditionalProfile.hpp"
+#include "ConditionalMajorantBounds.h"
 #include <sstream>
 #include <iomanip>
 
@@ -24,6 +25,18 @@ void ConditionalTrackingSettings::validate() const
         throw NumericError(NumericStatus::InvalidInput,"tracking_far_bound_start_scale must be zero or at least two");
     if (!std::isfinite(simpleBoundStartScale) || (simpleBoundStartScale!=0 && simpleBoundStartScale<2))
         throw NumericError(NumericStatus::InvalidInput,"tracking_simple_bound_start_scale must be zero or at least two");
+    if (!std::isfinite(globalFarStartScale) || (globalFarStartScale!=0 && globalFarStartScale<2))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_global_far_start_scale must be zero or at least two");
+    if (globalFarStartScale>0 && majorantMode!=ConditionalMajorantMode::Adaptive)
+        throw NumericError(NumericStatus::InvalidInput,"global far tracking requires adaptive near tracking");
+    if (!std::isfinite(localFarStartScale) || (localFarStartScale!=0 && localFarStartScale<2))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_local_far_start_scale must be zero or at least two");
+    if(localFarStartScale>0 && (globalFarStartScale>0 || majorantMode!=ConditionalMajorantMode::Adaptive))
+        throw NumericError(NumericStatus::InvalidInput,"local far tracking requires adaptive near tracking and excludes global far mode");
+    if(transitionPointBounds && majorantMode!=ConditionalMajorantMode::Adaptive)
+        throw NumericError(NumericStatus::InvalidInput,"transition midpoint bounds require adaptive tracking");
+    if(!(transitionMaxExpectedEvents>0) || !std::isfinite(transitionMaxExpectedEvents))
+        throw NumericError(NumericStatus::InvalidInput,"tracking_transition_max_expected_events must be finite and positive");
     if(majorantMode!=ConditionalMajorantMode::Adaptive && majorantMode!=ConditionalMajorantMode::TwoConstants)
         throw NumericError(NumericStatus::InvalidInput,"invalid conditional majorant mode");
     if(majorantMode==ConditionalMajorantMode::TwoConstants && (geometryStep || pointBounds || simpleBoundStartScale>0))
@@ -52,16 +65,19 @@ void ConditionalTrackingSettings::validate() const
 }
 ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         const Point3 &o,const Vector3 &w,double length,const ConditionalTrackingSettings &tracking,
-        const SinglePointNeuralModel *neuralModel,double meanLipschitz)
+        const SinglePointNeuralModel *neuralModel,double meanLipschitz,double meanGradientBound)
     : _field(f),_origin(o),_w(normalizedOrThrow(w)),_length(length),
-      _age((o-s.birthPosition).dot(_w)),_meanLipschitz(meanLipschitz),_tracking(tracking),
+      _age((o-s.birthPosition).dot(_w)),_meanLipschitz(meanLipschitz),
+      _meanGradientBound(std::isnan(meanGradientBound) ? meanLipschitz : meanGradientBound),_tracking(tracking),
       _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale,tracking.simpleBoundStartScale),
       _neuralModel(neuralModel)
 {
     _tracking.validate();
-    if ((_tracking.geometryStep || _tracking.pointBounds || _tracking.simpleBoundStartScale>0) &&
+    if ((_tracking.geometryStep || _tracking.pointBounds || _tracking.simpleBoundStartScale>0 || _tracking.localFarStartScale>0 || _tracking.transitionPointBounds) &&
         (!(_meanLipschitz>=0) || !std::isfinite(_meanLipschitz)))
         throw NumericError(NumericStatus::InvalidInput,"point/Lipschitz tracking needs a finite world-space mean Lipschitz bound");
+    if(_tracking.localFarStartScale>0 && (!(_meanGradientBound>=0) || !std::isfinite(_meanGradientBound)))
+        throw NumericError(NumericStatus::InvalidInput,"local far tracking needs a finite world-space gradient bound");
     if(_tracking.geometryStep || _tracking.pointBounds)
         _classicBegin=_tracking.classicStartScale/std::sqrt(_w.dot(_field.kernel.precision()*_w));
     if (!(length>=0) || !std::isfinite(length))
@@ -77,6 +93,21 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
     _age=std::max(0.0,_age);
     if(!std::isfinite(_age+length) || _age+length>_straight.maximumAgeInDomain())
         throw NumericError(NumericStatus::InvalidInput,"conditional segment exceeds the field domain");
+    if(_tracking.globalFarStartScale>0) {
+        if(!_field.mean->globalMagnitudeBounds())
+            throw NumericError(NumericStatus::InvalidInput,"global far tracking needs a globally bounded mean");
+        using I=MajorantBounds::Interval;
+        const I inverseLength2(_w.dot(_field.kernel.precision()*_w));
+        const double begin=(I(_tracking.globalFarStartScale)/MajorantBounds::sqrt(inverseLength2)).upper;
+        _globalFarBegin=std::max(0.0,(I(begin)-I(_age)).upper);
+    }
+    if(_tracking.localFarStartScale>0) {
+        using I=MajorantBounds::Interval;
+        const I inverseLength2(_w.dot(_field.kernel.precision()*_w));
+        const double begin=(I(_tracking.localFarStartScale)/MajorantBounds::sqrt(inverseLength2)*
+            I(1+16*std::numeric_limits<double>::epsilon())).upper;
+        _localFarBegin=std::max(0.0,(I(begin)-I(_age)).upper);
+    }
     if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants && _tracking.constantBirthLength>0) {
         const double split=std::min(_age+length,_tracking.constantBirthLength);
         // Keep the certified analytic birth interval, then bound its extension
@@ -133,7 +164,18 @@ double ConditionalSegment::majorant(double lo,double hi,double parentMaximum) co
 }
 double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMaximum) const
 {
+    if(lo>=_localFarBegin)
+        return _straight.localFarIntervalMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound,parentMaximum);
+    if(hi>_localFarBegin)
+        return std::max(baselineMajorant(lo,_localFarBegin,parentMaximum),
+                        baselineMajorant(_localFarBegin,hi,parentMaximum));
+    if(lo>=_globalFarBegin) return std::min(parentMaximum,globalFarMaximum());
+    if(hi>_globalFarBegin)
+        return std::max(baselineMajorant(lo,_globalFarBegin,parentMaximum),
+                        std::min(parentMaximum,globalFarMaximum()));
     const double a=_age+lo,b=_age+hi;
+    if(_tracking.transitionPointBounds && a>=_birthBound.split)
+        return _straight.transitionIntervalMajorant(a,b,_meanLipschitz,_tracking.tightenExpectedEvents,parentMaximum);
     if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants) {
         if(b<=_birthBound.split) return _birthBound.maximum;
         if(a>=_birthBound.split) return _tailMaximum;
@@ -174,6 +216,12 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
     }
     return bound;
 }
+
+double ConditionalSegment::globalFarMaximum() const {
+    if(std::isnan(_globalFarMaximum))
+        _globalFarMaximum=_straight.globalFarMajorant(_tracking.globalFarStartScale);
+    return _globalFarMaximum;
+}
 FlightState ConditionalSegment::samplePositiveEndpoint(Random &rng) const
 {
     // At the birth point there is no new observation to sample.
@@ -210,6 +258,8 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
     struct PendingInterval {
         double begin,end,maximum;
         bool tighten;
+        bool globalFar=false;
+        bool transitionPoint=false;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
         Profile::IntervalLimit limit=Profile::IntervalLimit::TwoConstants;
 #endif
@@ -217,6 +267,57 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
     std::vector<PendingInterval> pending;
     for(double lo=0;lo<_length;) {
         double hi;
+        if(pending.empty() && lo>=_localFarBegin) {
+            double proposal=_length-lo;
+            if(_meanLipschitz>0) {
+                const double value=_straight.scalarMeanValue(_age+lo);
+                if(!std::isfinite(value))
+                    throw NumericError(NumericStatus::InvalidMajorant,"nonfinite local far proposal mean");
+                proposal=std::max(_field.kernel.sigma()/_meanLipschitz,
+                                  0.5*std::max(0.0,value)/_meanLipschitz);
+            }
+            hi=std::min(_length,lo+proposal);
+            if(!(hi>lo)) throw NumericError(NumericStatus::InvalidMajorant,"local far proposal cannot advance");
+            pending.push_back({lo,hi,baselineMajorant(lo,hi,std::numeric_limits<double>::infinity()),false});
+            Profile::count(Profile::Counter::ProposedIntervals);
+            Profile::count(Profile::Counter::LocalFarProposals);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            pending.back().limit=Profile::IntervalLimit::LocalFar;
+            Profile::partition(Profile::PartitionPhase::Initial,Profile::IntervalLimit::LocalFar,(_age+lo)/ell,(hi-lo)/ell);
+            Profile::partition(Profile::PartitionPhase::Proposed,Profile::IntervalLimit::LocalFar,(_age+lo)/ell,(hi-lo)/ell);
+#endif
+        }
+        if(pending.empty() && lo>=_globalFarBegin) {
+            hi=_length;
+            pending.push_back({lo,hi,globalFarMaximum(),false,true});
+            Profile::count(Profile::Counter::ProposedIntervals);
+            Profile::count(Profile::Counter::GlobalFarIntervals);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            pending.back().limit=Profile::IntervalLimit::GlobalFar;
+            Profile::partition(Profile::PartitionPhase::Initial,Profile::IntervalLimit::GlobalFar,(_age+lo)/ell,(hi-lo)/ell);
+            Profile::partition(Profile::PartitionPhase::Proposed,Profile::IntervalLimit::GlobalFar,(_age+lo)/ell,(hi-lo)/ell);
+#endif
+        }
+        if(pending.empty() && _tracking.transitionPointBounds && _age+lo>=_birthBound.split) {
+            double proposal=_length-lo;
+            if(_meanLipschitz>0) {
+                const double value=_straight.scalarMeanValue(_age+lo,true);
+                if(!std::isfinite(value))
+                    throw NumericError(NumericStatus::InvalidMajorant,"nonfinite transition proposal mean");
+                proposal=std::max(_field.kernel.sigma()/_meanLipschitz,
+                                  0.5*std::max(0.0,value)/_meanLipschitz);
+            }
+            hi=std::min({_length,lo+proposal,_localFarBegin,_globalFarBegin});
+            if(!(hi>lo)) throw NumericError(NumericStatus::InvalidMajorant,"transition proposal cannot advance");
+            pending.push_back({lo,hi,baselineMajorant(lo,hi,std::numeric_limits<double>::infinity()),false,false,true});
+            Profile::count(Profile::Counter::ProposedIntervals);
+            Profile::count(Profile::Counter::TransitionProposals);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
+            pending.back().limit=Profile::IntervalLimit::Transition;
+            Profile::partition(Profile::PartitionPhase::Initial,Profile::IntervalLimit::Transition,(_age+lo)/ell,(hi-lo)/ell);
+            Profile::partition(Profile::PartitionPhase::Proposed,Profile::IntervalLimit::Transition,(_age+lo)/ell,(hi-lo)/ell);
+#endif
+        }
         if(pending.empty() && twoConstants) {
             // Both constants were computed at construction. Never walk cells,
             // tighten, or subdivide this proposal, even when it is very loose.
@@ -259,6 +360,9 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                 limit=hi==_length ? Profile::IntervalLimit::SegmentEnd : Profile::IntervalLimit::Birth;
 #endif
             }
+            // Finish the near proposal exactly at the global-tail switch. The
+            // same optical-depth clock continues across it without a new draw.
+            hi=std::min({hi,_globalFarBegin,_localFarBegin});
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
             Profile::partition(Profile::PartitionPhase::Initial,limit,(_age+lo)/ell,(hi-lo)/ell);
 #endif
@@ -318,14 +422,16 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         lo=b.begin;
         hi=b.end;
         if(b.tighten) b.maximum=baselineMajorant(lo,hi,b.maximum);
-        while(!twoConstants && _hazardEnvelope*b.maximum*(hi-lo)>_tracking.maxExpectedEvents) {
+        const double eventLimit=b.transitionPoint
+            ? std::min(_tracking.maxExpectedEvents,_tracking.transitionMaxExpectedEvents) : _tracking.maxExpectedEvents;
+        while(!twoConstants && !b.globalFar && _hazardEnvelope*b.maximum*(hi-lo)>eventLimit) {
             Profile::count(Profile::Counter::Splits);
             const double mid=0.5*(lo+hi);
             if(!(mid>lo&&mid<hi)) throw NumericError(NumericStatus::InvalidMajorant,"cannot refine conditional interval");
             // The parent certificate already covers the right half. Tighten
             // it only if tracking reaches it; a collision in the left half
             // should not pay for SDF queries beyond the collision.
-            pending.push_back({mid,hi,b.maximum,true});
+            pending.push_back({mid,hi,b.maximum,true,false,b.transitionPoint});
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
             pending.back().limit=b.limit=Profile::IntervalLimit::EventThreshold;
 #endif

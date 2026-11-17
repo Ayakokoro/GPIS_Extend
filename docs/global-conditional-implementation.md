@@ -183,7 +183,140 @@ bound on deferred right halves and tightens them only when reached, avoiding
 queries past a collision. These changes do not alter the tracking settings or
 renew the birth observation at numerical subdivisions.
 
-## Experimental two-constant tracking
+## Experimental constant-majorant tracking
+
+The opt-in `tracking_transition_point_bounds=true` replaces the interval
+construction after the certified birth prefix and before either configured
+far switch. It uses direct scalar midpoint/Lipschitz cones and geometric
+distance proposals, without age/step caps or macrocell/fine-cell clipping.
+`tracking_transition_max_expected_events` (default 4) limits the certified
+expected candidate count per processed leaf; the ordinary global event limit
+also applies. Large proposals are refined while preserving the exponential
+optical-depth clock and the original conditioning observation.
+
+This mode keeps signed value/slope correction intervals, intersects the value
+range with the cancellation-safe conditional midpoint cone, and uses full
+conditional moment bounds. It deliberately bypasses the cached SE tail
+shortcut until the explicit far switch. Tiny-age midpoint differences retain
+the existing stable difference query; actual candidate and collision-gradient
+evaluation is unchanged. Birth-only flights and disabled-mode samples retain
+their previous random-number behavior. The mode requires a finite certified
+Lipschitz constant and adaptive tracking. Diagnostic timers distinguish
+`bound_transition`, `bound_local_far` and `birth_bound`; counters and partition
+labels also identify transition proposals and scalar queries.
+
+
+### Local midpoint/Lipschitz far tracking
+
+```json
+"tracking_global_far_start_scale": 0,
+"tracking_local_far_start_scale": 4
+```
+
+The local switch defaults to zero (disabled), accepts finite values at least
+two, and is mutually exclusive with global far and `two_constants` tracking.
+Near tracking remains unchanged up to `Q * directional ell`. Beyond that age,
+the proposal length is `max(sigma/L, max(m(begin),0)/(2*L))`, clipped to the
+segment endpoint; for `L=0` it covers the rest of the segment. Fixed-step,
+age-step and macrocell controls apply only to the near part. The ordinary
+expected-candidate threshold can still subdivide a local far proposal, using
+the same local point bounds on its children. No macrocell or fine-grid boundary
+query is made for any far proposal or refinement. One optical-depth clock spans
+the switch and all subdivisions.
+
+`MeanField::evaluateValue` provides a direct scalar query. The VDB override
+interpolates the eight original nodes without gradients or ray-cell polynomial
+construction. The new proposal and midpoint paths use this method; existing
+jet/cursor paths remain unchanged, including exact conditional hazard/gradient
+evaluation at candidate events. Other mean providers can use the default scalar
+adapter to their existing evaluator.
+
+For an interval `[a,b]` with midpoint `c`, let `d=(b-a)/2` and define the spatial
+cone `m_minus=m(c)-L*d-epsilon`, `m_plus=m(c)+L*d+epsilon`. `epsilon` includes
+the existing point/coordinate/outward-rounding allowances. The SE envelopes
+`C0,C1,s_min,s_max,gamma_max` below are refreshed from `a/ell`, rather than
+cached at the configured switch age. Define
+
+```text
+z_minus   = min((m_minus-C0)/s_min, (m_minus-C0)/s_max)
+eta_minus = -G-C1-gamma_max*max(0,m_plus+C0)
+M         = H(z_minus)/s_min * A(eta_minus, sigma/ell)
+```
+
+Here `H(z)=phi(z)/Phi(z)` and `A(mu,s)=E[(-N(mu,s^2))_+]`. `L` is the certified
+world-space mean Lipschitz constant, while `G` is the separately configured
+gradient norm bound from `ClassicGlobalMedium`; both are passed to path and
+shadow tracking. The formula uses `ClassicGlobal::density` and
+`ClassicGlobal::negativePartMean`, including the classic `1+1e-5` guard and the
+conditional outward guards. It does not use the looser `1-z` negative-tail
+Mills envelope. The conditional slope standard deviation is bounded by the
+prior value `sigma/ell`, and the exact conditional target is retained.
+
+As the SE corrections decay, this reduces to the same local classic majorant
+up to floating-point guards. Beyond 32 directional lengths, the tiny certified
+residual envelope at 32 is retained to avoid extreme polynomial arguments; no
+residual is forcibly set to zero. Tests compare the limit at 16 and 40 lengths
+against the actual classic functions, including means of -30 and -8 sigma.
+
+Diagnostics add `local_far_proposals`, `local_far_bound_queries`,
+`local_far_scalar_queries` and the `local_far` interval partition. Tests cover
+anisotropy, transformed/clamped VDBs, direct scalar routing without ray-cell
+construction, preserved near-only random streams, switch-crossing/resumed
+delta and ratio tracking, and the stationary-majorant limit.
+
+### Adaptive near field with a global SE far tail
+
+`tracking_global_far_start_scale` is an independent, opt-in hybrid switch:
+
+```json
+"tracking_global_far_start_scale": 4
+```
+
+Its default is zero (disabled); nonzero values must be finite and at least two.
+It requires adaptive near tracking and a globally bounded mean (the clamped VDB
+or a constant mean). Distance is measured from the retained conditioning birth,
+using the directional correlation length. At `Q * ell`, the near proposal ends
+and the remaining segment uses one cached constant majorant. This tail performs
+no macrocell queries, fine boundary traversal, geometric proposals, tightening,
+or expected-event subdivision. Candidate points still evaluate the exact
+birth-conditioned hazard. Delta and ratio tracking retain the same residual
+exponential clock through the switch; neither observations nor paths are reset.
+
+VDB initialization now also caches signed `minimumValue` and `maximumValue`,
+with outward rounding after mean offset/scale, alongside the existing absolute
+value and gradient bounds. These certify the trilinear field and its clamped
+exterior. Older bounded providers may omit the signed range and use `[-S0,S0]`.
+The gradient certificate comes from grid edge differences and the world map;
+it is not assumed to be one.
+
+The new `globalFarMajorant(Q)` reuses the certified SE residual envelopes of
+`farIntervalMajorant`, replacing only the spatial ranges by the global ranges.
+For `Q >= 2`, let `c=exp(-Q^2/2)`, `v=1-(1+Q^2)exp(-Q^2)`,
+`df=abs(birthValue-m0)`, `dk=abs(w dot (birthGradient-grad m0))`. The cached bounds are
+
+```text
+C0       = (df + Q*ell*dk) * c
+C1       = (Q*df/ell + (Q^2-1)*dk) * c
+s_min    = sigma * sqrt(v),     s_max = sigma
+gamma_max= Q^3*exp(-Q^2)/(ell*v)
+kappa_max= 1/ell
+```
+
+Apply the existing normalized moment enclosure to
+`meanF in [m_min-C0,m_max+C0]`, `meanK >= -G-C1`,
+`sd in [s_min,s_max]`, `regression in [0,gamma_max]`.
+All arithmetic retains the existing outward guards; cutoffs above eight may
+conservatively reuse the residual envelope at eight. This does not replace the
+conditional target by its stationary limit. The constant is constructed lazily
+when the flight reaches the far tail and reused on subsequent queries.
+
+Profiling adds `global_far_setups`, `global_far_intervals`, and a `global_far`
+partition. A looser global majorant may create more null candidates than local
+macrocell bounds; the mode places no artificial cap on their count. This hybrid
+switch is distinct from the older `two_constants` mode described below, whose
+tail can start extremely close to birth and uses a different, looser formula.
+
+### Two constants from birth
 
 Set `"tracking_majorant": "two_constants"` on the `global_conditional` medium
 to compute one birth majorant and one tail majorant at the beginning of a

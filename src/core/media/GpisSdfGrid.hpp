@@ -14,6 +14,8 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
     Eigen::Vector3d translation;
     double scale, offset, gradientBound;
     double magnitudeBound = std::numeric_limits<double>::quiet_NaN();
+    double minimumValueBound = std::numeric_limits<double>::quiet_NaN();
+    double maximumValueBound = std::numeric_limits<double>::quiet_NaN();
 
     struct Macrocell {
         double minimumValue,maximumValue,maximumNodeMagnitude;
@@ -58,12 +60,15 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
         }
         Eigen::Vector3d edge = Eigen::Vector3d::Zero();
         double magnitude=0, arithmeticScale=0;
+        double minimum=std::numeric_limits<double>::infinity(), maximum=-minimum;
         // Ignore the unused padding/background discontinuity outside the
         // clamped interpolation domain; it cannot affect any field query.
         for (int z = lo.z(); z <= hi.z(); ++z)
             for (int y = lo.y(); y <= hi.y(); ++y)
                 for (int x = lo.x(); x <= hi.x(); ++x) {
                     const double v = at(x, y, z);
+                    const double scaled=(v+offset)*scale;
+                    minimum=std::min(minimum,scaled);maximum=std::max(maximum,scaled);
                     magnitude=std::max(magnitude,std::abs((v+offset)*scale));
                     arithmeticScale=std::max(arithmeticScale,(std::abs(v)+std::abs(offset))*std::abs(scale));
                     if (x < hi.x()) edge.x() = std::max(edge.x(), std::abs(at(x+1, y, z) - v));
@@ -76,6 +81,8 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
         // Include roundoff from the value/gradient interpolants and transforms.
         const double pad=128*std::numeric_limits<double>::epsilon();
         magnitudeBound=std::nextafter(magnitude+pad*arithmeticScale,std::numeric_limits<double>::infinity());
+        minimumValueBound=std::nextafter(minimum-pad*arithmeticScale,-std::numeric_limits<double>::infinity());
+        maximumValueBound=std::nextafter(maximum+pad*arithmeticScale,std::numeric_limits<double>::infinity());
         // The direct gradient query sums signed node contributions. Its
         // cancellation error depends on node magnitude even for a flat grid.
         const double gradientPad=pad*arithmeticScale*
@@ -113,8 +120,11 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
         return (value + offset)*scale;
     }
     const char *typeName() const override { return "vdb_sdf"; }
+    double evaluateValue(const Eigen::Vector3d &p) const override {
+        return evaluate(Vec3d(p.x(),p.y(),p.z()),nullptr);
+    }
     std::optional<ConditionalGpis::MeanMagnitudeBounds> globalMagnitudeBounds() const override {
-        return ConditionalGpis::MeanMagnitudeBounds{magnitudeBound,gradientBound};
+        return ConditionalGpis::MeanMagnitudeBounds{magnitudeBound,gradientBound,minimumValueBound,maximumValueBound};
     }
     ConditionalGpis::MeanJet evaluate(const Eigen::Vector3d &p) const override;
     std::unique_ptr<ConditionalGpis::MeanRayCursor> createRayCursor(
