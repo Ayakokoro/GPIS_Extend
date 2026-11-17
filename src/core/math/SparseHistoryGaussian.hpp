@@ -35,6 +35,9 @@ struct ProbabilitySettings {
     // Optional shared table. An absent table retains the numerical reference.
     std::shared_ptr<const BivariateNormalCdfTable> bivariateTable;
     std::shared_ptr<ProbabilityStatistics> statistics;
+    // Fixed five-point CDF approximation, including fixed-rule recursive
+    // conditioning above two dimensions. No accuracy-triggered CDF fallback.
+    bool gaussLegendre5 = false;
     // C++ numerical-reference switch for validation; not a scene setting.
     bool referenceCovariance = false;
 };

@@ -36,6 +36,41 @@ void validate(const ProbabilitySettings &s)
         !(s.relativeTolerance > 0) || !std::isfinite(s.relativeTolerance) ||
         s.initialSamples < 16 || s.maxSamples < s.initialSamples)
         throw NumericError(NumericStatus::InvalidInput, "invalid sparse-history probability settings");
+    if(s.gaussLegendre5 && s.bivariateTable)
+        throw NumericError(NumericStatus::InvalidInput, "five-point CDF and CDF table are mutually exclusive");
+}
+
+template<class Function>
+double gaussLegendre5(const Function &f,double lo,double hi)
+{
+    constexpr std::array<double,5> nodes{{0,-0.5384693101056831,0.5384693101056831,
+                                        -0.9061798459386640,0.9061798459386640}};
+    constexpr std::array<double,5> weights{{128.0/225.0,0.4786286704993665,0.4786286704993665,
+                                          0.2369268850561891,0.2369268850561891}};
+    const double half=0.5*(hi-lo),mid=lo+half;
+    double sum=0;
+    for(std::size_t i=0;i<nodes.size();++i) sum+=weights[i]*f(mid+half*nodes[i]);
+    return half*sum;
+}
+
+double pairProbabilityGaussLegendre5(double a,double b,double rho)
+{
+    const double angle=std::asin(rho);
+    const auto integrand=[=](double theta) {
+        const double c=std::cos(theta),s=std::sin(theta);
+        // Equivalent to (a*a+b*b-2*a*b*sin(theta))/(2*cos(theta)^2),
+        // with a nonnegative sum that avoids cancellation near equal a,b.
+        const double d=(a-b*s)/c;
+        return std::exp(-0.5*(d*d+b*b))/(2*Pi);
+    };
+    const double pa=cg::normalCdf(a),pb=cg::normalCdf(b);
+    const double value=rho<=0.8 ? pa*pb+gaussLegendre5(integrand,0,angle)
+        : std::min(pa,pb)-gaussLegendre5(integrand,angle,0.5*Pi);
+    // Fixed quadrature can overshoot in small tails. Enforce probability
+    // bounds directly; this experimental mode never retries with integration.
+    const double upper=std::min(pa,pb);
+    const double lower=std::min(upper,std::max(0.0,pa+pb-1.0));
+    return std::clamp(value,lower,upper);
 }
 
 Estimate integrate(const std::function<double(double)> &f, double lo, double hi,
@@ -66,6 +101,8 @@ Estimate pairProbability(double a, double b, double rho, const ProbabilitySettin
     }
     if (rho == 0) return {cg::normalCdf(a)*cg::normalCdf(b), 0};
     if (a == 0 && b == 0) return {0.25+std::asin(rho)/(2*Pi), 8*Epsilon};
+    // No error estimate or accuracy gate is applied to the fixed-rule mode.
+    if(settings.gaussLegendre5) return {pairProbabilityGaussLegendre5(a,b,rho),0};
     if(settings.bivariateTable) {
         if(settings.statistics) settings.statistics->tableAttempts.fetch_add(1,std::memory_order_relaxed);
         const auto estimate=settings.bivariateTable->lookup(a,b,rho,0.25*settings.relativeTolerance);
@@ -204,7 +241,8 @@ Estimate recursiveOrthant(const Eigen::VectorXd &m, const Eigen::MatrixXd &c,
         const double z=-quantileFromLog(std::log(probability)+std::log(u));
         return orthant(remaining+cross*z,conditional,settings,true,relativeOnly).value;
     };
-    const auto result=integrate(f,0,1,settings);
+    const auto result=settings.gaussLegendre5 ? Estimate{gaussLegendre5(f,0,1),0}
+                                            : integrate(f,0,1,settings);
     return {probability*result.value,probability*result.error};
 }
 
@@ -256,6 +294,11 @@ Estimate orthant(const Eigen::VectorXd &inputMean,const Eigen::MatrixXd &inputCo
         for(int i=0;i<3;++i) for(int j=0;j<i;++j) value+=std::asin(std::clamp(c(i,j),-1.0,1.0))/(4*Pi);
         if(value < -128*Epsilon) throw NumericError(NumericStatus::InvalidCovariance,"negative orthant probability");
         return {std::max(0.0,value),omitted+128*Epsilon};
+    }
+    if(settings.gaussLegendre5) {
+        auto r=recursiveOrthant(m,c,settings,relativeOnly);
+        r.value=std::clamp(r.value,0.0,1.0);r.error+=omitted;
+        return r;
     }
     if(n==3) {
         const auto fast=positiveTriple(m,c,settings);

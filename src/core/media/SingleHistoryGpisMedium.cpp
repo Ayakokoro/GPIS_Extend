@@ -214,8 +214,9 @@ void SingleHistoryGpisMedium::fromJson(JsonPtr value,const Scene &scene)
         options.getField("probability_initial_samples",_settings.probability.initialSamples);
         options.getField("probability_max_samples",_settings.probability.maxSamples);
         options.getField("probability_method",_probabilityMethod);
-        if(_probabilityMethod!="numeric" && _probabilityMethod!="lut")
-            options.parseError("probability_method must be numeric or lut");
+        if(_probabilityMethod!="numeric" && _probabilityMethod!="lut" && _probabilityMethod!="gauss_legendre5")
+            options.parseError("probability_method must be numeric, lut or gauss_legendre5");
+        _settings.probability.gaussLegendre5=_probabilityMethod=="gauss_legendre5";
         if(_probabilityMethod=="lut")
             _cdfTableFile=scene.fetchResource(options.getRequiredMember("cdf_table"));
         else if(options["cdf_table"])
