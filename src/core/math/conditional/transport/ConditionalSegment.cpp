@@ -5,6 +5,7 @@
 #include "math/ConditionalProfile.hpp"
 #include "math/ConditionalRayProfile.hpp"
 #include "ConditionalMajorantBounds.h"
+#include <boost/container/small_vector.hpp>
 #include <sstream>
 #include <iomanip>
 
@@ -84,7 +85,8 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         const Point3 &o,const Vector3 &w,double length,const ConditionalTrackingSettings &tracking,
         const SinglePointNeuralModel *neuralModel,double meanLipschitz,double meanGradientBound)
     : _field(f),_origin(o),_w(normalizedOrThrow(w)),_length(length),
-      _age((o-s.birthPosition).dot(_w)),_meanLipschitz(meanLipschitz),
+      _age((o-s.birthPosition).dot(_w)),_inverseEll(std::sqrt(_w.dot(f.kernel.precision()*_w))),
+      _meanLipschitz(meanLipschitz),
       _meanGradientBound(std::isnan(meanGradientBound) ? meanLipschitz : meanGradientBound),_tracking(tracking),
       _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale,tracking.simpleBoundStartScale),
       _neuralModel(neuralModel)
@@ -98,7 +100,7 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
     if(_tracking.localFarStartScale>0 && (!(_meanGradientBound>=0) || !std::isfinite(_meanGradientBound)))
         throw NumericError(NumericStatus::InvalidInput,"local far tracking needs a finite world-space gradient bound");
     if(_tracking.geometryStep || _tracking.pointBounds)
-        _classicBegin=_tracking.classicStartScale/std::sqrt(_w.dot(_field.kernel.precision()*_w));
+        _classicBegin=_tracking.classicStartScale/_inverseEll;
     if (!(length>=0) || !std::isfinite(length))
         throw NumericError(NumericStatus::InvalidInput,"conditional segment must be finite");
     const Vector3 d=o-s.birthPosition;
@@ -145,7 +147,7 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
     }
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
     if(auto *r=RayProfile::active()) {
-        r->age=_age;r->effectiveDirection=_w;r->ell=1/std::sqrt(_w.dot(_field.kernel.precision()*_w));
+        r->age=_age;r->effectiveDirection=_w;r->ell=1/_inverseEll;
         r->split=_birthBound.split;r->far=_localFarBegin;
     }
 #endif
@@ -171,7 +173,7 @@ double ConditionalSegment::hazard(double t) const
 }
 double ConditionalSegment::correctedHazard(double t,ConditionalTrackingWork *work,bool knownInside) const
 {
-    if (_tracking.classicLocalBand && _tracking.classicLocalBand->density(_origin+t*_w)==0)
+    if (_tracking.classicLocalBand && !_tracking.classicLocalBand->hasDensity(_origin+t*_w))
         return 0;
     if(!knownInside && _tracking.exteriorCutoffSigma>0 && _straight.scalarMeanValue(_age+t)>_exteriorCutoff)
         return 0;
@@ -200,7 +202,7 @@ double ConditionalSegment::majorant(double lo,double hi,double parentMaximum) co
 double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMaximum,bool permitMacro) const
 {
     const bool macro=permitMacro && _tracking.macrocellBounds && _age+lo>=_tracking.macrocellStartScale/
-        std::sqrt(_w.dot(_field.kernel.precision()*_w));
+        _inverseEll;
     if(lo>=_localFarBegin && _tracking.farIntegralBounds)
         return std::min(parentMaximum,_straight.farIntegralMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound).value(_age+hi));
     if(lo>=_localFarBegin)
@@ -215,7 +217,7 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
     const double a=_age+lo,b=_age+hi;
     if(_tracking.coupledBounds && a>=_birthBound.split)
         return _straight.coupledIntervalMajorant(a,b,_meanLipschitz,
-            a<_tracking.coupledLocalScale/std::sqrt(_w.dot(_field.kernel.precision()*_w)),parentMaximum,macro);
+            a<_tracking.coupledLocalScale/_inverseEll,parentMaximum,macro);
     if(_tracking.transitionIntegralBounds && a>=_birthBound.split)
         return std::min(parentMaximum,_straight.transitionIntegralMajorant(a,b,_meanLipschitz).value(a));
     if(_tracking.transitionPointBounds && a>=_birthBound.split)
@@ -297,7 +299,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
     } capture{diagnostics,work,traversed,neuralWork};
     const bool twoConstants=_tracking.majorantMode==ConditionalMajorantMode::TwoConstants;
     hit=_length;
-    const double ell=1/std::sqrt(_w.dot(_field.kernel.precision()*_w));
+    const double ell=1/_inverseEll;
     const double maximumStep=_tracking.fixedStepLimit
         ? (_tracking.step>0 ? _tracking.step : _tracking.stepScale*ell)
         : std::numeric_limits<double>::infinity();
@@ -316,7 +318,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         Profile::IntervalLimit limit=Profile::IntervalLimit::TwoConstants;
 #endif
     };
-    std::vector<PendingInterval> pending;
+    boost::container::small_vector<PendingInterval,4> pending;
     const auto constantBound=[&](double begin,double end,double parent,bool permitMacro=true) {
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
         RayProfile::BoundScope scope(begin,end);

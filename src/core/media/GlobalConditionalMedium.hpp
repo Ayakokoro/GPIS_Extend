@@ -35,10 +35,16 @@ struct ConditionalEventContext final : MediumEventContext {
 class GlobalConditionalMedium final : public ClassicGlobalMedium {
     ConditionalGpis::GPSSField _field;
     ConditionalGpis::ConditionalTrackingSettings _tracking;
+    double _collisionStartStep = 0.0;
+    bool _jitterCollisionStart = true;
     std::optional<ClassicLocalField> _bandField;
     std::unique_ptr<ClassicLocalGrid> _bandGrid;
     ConditionalNonGpSurfacePolicy _nonGpSurfacePolicy = ConditionalNonGpSurfacePolicy::RetainEndpoint;
     bool _fpGradient = false, _bridgeCorrection = true;
+    // 1 samples both direct proposals, 0 samples the light alone. Larger
+    // periods keep both proposals in one path sample per group of this size.
+    uint32 _directPhaseSamplePeriod = 1;
+    bool _binaryShadowVisibility = false;
     FirstPassageGradient::AnchorSelection _anchorSelection = FirstPassageGradient::AnchorSelection::Fixed5Snr;
     std::shared_ptr<PhaseFunction> _deltaPhase;
     mutable std::atomic<std::uint64_t> _correctedCollisions{0}, _gradientFallbacks{0};
@@ -67,6 +73,7 @@ public:
         const Vec3f &incomingDirection,MediumState &) const;
     bool sampleDistance(PathSampleGenerator &,const Ray &,MediumState &,MediumSample &) const override;
     Vec3f transmittance(PathSampleGenerator &,const Ray &,bool,bool,MediumState *) const override;
+    Vec3f shadowTransmittance(PathSampleGenerator &,const Ray &,MediumState *,bool retainEndpoint) const;
     float pdf(PathSampleGenerator &,const Ray &,bool,bool) const override;
     Vec3f sigmaA(Vec3f) const override { return Vec3f(0.0f); }
     Vec3f sigmaS(Vec3f) const override;
@@ -75,6 +82,12 @@ public:
     const ConditionalGpis::ConditionalTrackingSettings &trackingSettings() const { return _tracking; }
     ConditionalNonGpSurfacePolicy nonGpSurfacePolicy() const { return _nonGpSurfacePolicy; }
     bool gradientCorrectionEnabled() const { return _fpGradient; }
+    bool lightOnlyDirectSampling(uint32 sampleIndex) const {
+        if (_directPhaseSamplePeriod<=1) return _directPhaseSamplePeriod==0;
+        // Alternate the selected slot so both odd/even variance buffers see MIS.
+        const uint32 slot=(sampleIndex/_directPhaseSamplePeriod)&1u;
+        return sampleIndex%_directPhaseSamplePeriod!=slot;
+    }
     bool neuralCorrectionEnabled() const { return _singlePointNeural; }
     bool bridgeCorrectionEnabled() const { return _bridgeCorrection; }
     FirstPassageGradient::AnchorSelection anchorSelection() const { return _anchorSelection; }

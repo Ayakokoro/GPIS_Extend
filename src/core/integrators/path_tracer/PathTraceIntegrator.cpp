@@ -50,13 +50,17 @@ PathTraceIntegrator::~PathTraceIntegrator()
 
 void PathTraceIntegrator::diceTiles()
 {
-    for (uint32 y = _rect.min().y(); y < _rect.max().y(); y += TileSize) {
-        for (uint32 x = _rect.min().x(); x < _rect.max().x(); x += TileSize) {
+    // Independent CPU paths keep their per-pixel sample sequence across tiles.
+    // Smaller tasks keep a few costly high-bounce tiles from stalling the pass.
+    const uint32 size=_settings.independentPathSampling && !_settings.wavefrontGpis &&
+                      ThreadUtils::pool->threadCount()>=16 ? TileSize/2 : TileSize;
+    for (uint32 y = _rect.min().y(); y < _rect.max().y(); y += size) {
+        for (uint32 x = _rect.min().x(); x < _rect.max().x(); x += size) {
             _tiles.emplace_back(
                 x,
                 y,
-                min(TileSize, _rect.max().x() - x),
-                min(TileSize, _rect.max().y() - y),
+                min(size, _rect.max().x() - x),
+                min(size, _rect.max().y() - y),
                 _scene->rendererSettings().useSobol() ?
                     std::unique_ptr<PathSampleGenerator>(new SobolPathSampler(MathUtil::hash32(_sampler.nextI()))) :
                     std::unique_ptr<PathSampleGenerator>(new UniformPathSampler(MathUtil::hash32(_sampler.nextI())))

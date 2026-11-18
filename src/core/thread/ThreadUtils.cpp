@@ -54,8 +54,11 @@ void parallelFor(uint32 start, uint32 end, uint32 partitions, std::function<void
     };
     if (partitions == 1)
         taskRun(0, 1, 0);
-    else
-        pool->yield(*pool->enqueue(taskRun, partitions));
+    else {
+        auto task = pool->enqueue(taskRun, partitions);
+        pool->yield(*task);
+        task->wait();
+    }
 }
 
 }

@@ -9,6 +9,7 @@ struct TraceSettings
 {
     bool enableConsistencyChecks;
     bool enableTwoSidedShading;
+    bool countForwardBounces = false;
     int minBounces;
     int maxBounces;
 
@@ -26,6 +27,7 @@ struct TraceSettings
         value.getField("max_bounces", maxBounces);
         value.getField("enable_consistency_checks", enableConsistencyChecks);
         value.getField("enable_two_sided_shading", enableTwoSidedShading);
+        value.getField("count_forward_bounces", countForwardBounces);
     }
 
     rapidjson::Value toJson(rapidjson::Document::AllocatorType &allocator) const
@@ -35,6 +37,7 @@ struct TraceSettings
         v.AddMember("max_bounces", maxBounces, allocator);
         v.AddMember("enable_consistency_checks", enableConsistencyChecks, allocator);
         v.AddMember("enable_two_sided_shading", enableTwoSidedShading, allocator);
+        v.AddMember("count_forward_bounces", countForwardBounces, allocator);
         return std::move(v);
     }
 };

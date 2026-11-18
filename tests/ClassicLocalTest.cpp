@@ -91,6 +91,7 @@ void gridChecks(const std::filesystem::path &file) {
                     for (int i=0; i<=40; ++i) {
                         const double t=segment.begin+(segment.end-segment.begin)*i/40;
                         const double rho=grid.density(o+t*w);
+                        require(grid.hasDensity(o+t*w)==(rho>0),"support predicate matches interpolated density");
                         require(rho>=0 && rho<=segment.densityMaximum,"density majorant misses trilinear support");
                     }
                     previous=segment.end; ++intervals;
@@ -113,6 +114,10 @@ void conditionalBandChecks(const std::filesystem::path &file) {
     namespace cg=Tungsten::ConditionalGpis;
     fixture(file,false,false,true);
     ClassicLocalGrid band(file.generic_string(),"sdf","density",Mat4f(),1);
+    for(int i=-24;i<=40;++i) {
+        const V point(-.4+i*.0625,.2,.1);
+        require(band.hasDensity(point)==(band.density(point)>0),"support near isolated active nodes and faces");
+    }
     const V origin(-3,.2,.1), direction=V::UnitX();
     cg::GPSSField field{std::make_shared<cg::ConstantMean>(.3),cg::CovarianceKernel(1,Eigen::Matrix3d::Identity()),
         {V::Constant(-100),V::Constant(100)}};

@@ -22,24 +22,13 @@ namespace bounds = MajorantBounds;
 double upward(double x) {
     if (!(x >= 0.0) || !std::isfinite(x))
         throw NumericError(NumericStatus::InvalidMajorant, "non-finite conditional majorant");
-    const double result=std::nextafter(x * boundGuard, std::numeric_limits<double>::infinity());
+    const double result=bounds::up(x * boundGuard);
     if (!std::isfinite(result))
         throw NumericError(NumericStatus::InvalidMajorant, "conditional majorant overflow");
     return result;
 }
 
-// Positive series: truncation after 20 terms is below double roundoff for u<=1.
-// The bounds below allow for both this remainder and floating-point arithmetic.
-std::pair<double,double> scaledExponentialRemainders(double u) {
-    double e2=0.5, term=0.5;
-    for (int n=1; n<=20; ++n) { term *= u/(n+2); e2 += term; }
-    double e4=1.0/12.0;
-    term=e4;
-    for (int n=1; n<=12; ++n) {
-        term *= u*u/((2*n+3.0)*(2*n+4.0)); e4 += term;
-    }
-    return {e2,e4};
-}
+using bounds::scaledExponentialRemainders;
 
 struct SeFactors { double valueVariance, slopeVariance, regression; };
 

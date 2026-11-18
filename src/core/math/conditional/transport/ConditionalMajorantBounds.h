@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace Tungsten::ConditionalGpis::MajorantBounds {
 
@@ -81,19 +82,34 @@ inline Interval quadraticPolynomialRange(Interval c0,Interval c1,Interval c2,
     return result;
 }
 
+// For 0 <= q <= 1, both series have positive coefficients. After terms
+// 16 and 8 their absolute tails are at most (20/19)/19! and (1.01)*2/22!.
+// The sums are >= 1/2 and 1/12. Coefficient rounding and Horner evaluation
+// therefore fit well inside the relative allowance used by seRemainders.
+inline std::pair<double,double> scaledExponentialRemainders(double q) {
+    static constexpr auto second=[] {
+        std::array<double,17> c{0.5};
+        for(int i=1;i<=16;++i) c[i]=c[i-1]/(i+2);
+        return c;
+    }();
+    static constexpr auto fourth=[] {
+        std::array<double,9> c{1.0/12.0};
+        for(int i=1;i<=8;++i) c[i]=c[i-1]/((2*i+3.0)*(2*i+4.0));
+        return c;
+    }();
+    double e2=second.back(),e4=fourth.back();
+    for(int i=15;i>=0;--i) e2=second[i]+q*e2;
+    const double q2=q*q;
+    for(int i=7;i>=0;--i) e4=fourth[i]+q2*e4;
+    return {e2,e4};
+}
+
 struct SeRemainders { Interval second,fourth; };
 inline SeRemainders seRemainders(double q) {
-    // E2=sum q^n/(n+2)!, E4=sum 2q^(2n)/(2n+4)!, 0<=q<=1.
-    // Every term is positive. Bound both the arithmetic error and the omitted
-    // tails by their next term times a geometric-series bound.
-    double e2=0.5,t2=0.5,e4=1.0/12,t4=e4;
-    for(int n=1;n<=20;++n) { t2*=q/(n+2); e2+=t2; }
-    for(int n=1;n<=12;++n) { t4*=q*q/((2*n+3.0)*(2*n+4.0)); e4+=t4; }
+    const auto [e2,e4]=scaledExponentialRemainders(q);
     constexpr double error=256*std::numeric_limits<double>::epsilon();
-    const double tail2=t2*q/23/(1-q/24);
-    const double tail4=t4*q*q/(29*30)/(1-q*q/(31*32));
-    return {{down(e2*(1-error)),up((e2+tail2)*(1+error))},
-            {down(e4*(1-error)),up((e4+tail4)*(1+error))}};
+    return {{down(e2*(1-error)),up(e2*(1+error))},
+            {down(e4*(1-error)),up(e4*(1+error))}};
 }
 
 struct SeVarianceBounds {

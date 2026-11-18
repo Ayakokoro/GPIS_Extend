@@ -31,6 +31,8 @@ public:
     class Cursor {
         const Impl *_grid;
         Eigen::Vector3d _origin, _direction;
+        Eigen::Vector3d _nextFace;
+        Eigen::Vector3i _cell;
         double _begin, _end;
     public:
         Cursor(const ClassicLocalGrid &grid, const Eigen::Vector3d &origin,
@@ -46,6 +48,7 @@ public:
                      int macrocellResolution=0);
     ~ClassicLocalGrid();
     double density(const Eigen::Vector3d &world) const;
+    bool hasDensity(const Eigen::Vector3d &world) const;
     Eigen::Vector3d meanGradient(const Eigen::Vector3d &world) const;
 };
 }

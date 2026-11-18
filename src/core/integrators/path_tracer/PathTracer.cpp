@@ -10,6 +10,24 @@
 
 namespace Tungsten {
 
+namespace {
+bool continueAfterRoulette(PathSampleGenerator &sampler, Vec3f &throughput, int bounce,
+                           bool forwardBoundary, float targetWeight) {
+    const float weight = std::abs(throughput).max();
+    float probability;
+    if (targetWeight > 0) {
+        if (forwardBoundary || weight >= targetWeight) return true;
+        probability = weight/targetWeight;
+    } else {
+        if (!(bounce > 2 && weight < 0.1f)) return true;
+        probability = weight;
+    }
+    if (!sampler.nextBoolean(probability)) return false;
+    throughput /= probability;
+    return true;
+}
+}
+
 PathTracer::PathTracer(TraceableScene *scene, const PathTracerSettings &settings, uint32 threadId,
                        GpRayBatchBackend *gpRayBatchBackend)
 : TraceBase(scene, settings, threadId),
@@ -210,20 +228,16 @@ Vec3f PathTracer::traceSample(Vec2u pixel, PathSampleGenerator &sampler, uint sp
             break;
         }
 
-        float roulettePdf = std::abs(throughput).max();
-        if (bounce > 2 && roulettePdf < 0.1f) {
-            if (sampler.nextBoolean(roulettePdf))
-                throughput /= roulettePdf;
-            else
-                return finish("russian_roulette", emission);
-        }
+        if (_settings.enablePathRoulette && !continueAfterRoulette(sampler, throughput, bounce,
+                hitSurface && info.bsdf->lobes().isForward(), _settings.rouletteTargetWeight))
+            return finish("russian_roulette", emission);
 
         if (std::isnan(ray.dir().sum() + ray.pos().sum()))
             return finish("nonfinite_ray", nanDirColor);
         if (std::isnan(throughput.sum() + emission.sum()))
             return finish("nonfinite_weight", nanBsdfColor);
 
-        if (!(hitSurface && info.bsdf->lobes().isForward())) {
+        if (_settings.countForwardBounces || !(hitSurface && info.bsdf->lobes().isForward())) {
             bounce++;
         }
 
@@ -522,20 +536,16 @@ PathTracer::SampleStatus PathTracer::advanceSample(PathState &path, PathSampleGe
         if (throughput.max() == 0.0f)
             break;
 
-        float roulettePdf = std::abs(throughput).max();
-        if (bounce > 2 && roulettePdf < 0.1f) {
-            if (sampler.nextBoolean(roulettePdf))
-                throughput /= roulettePdf;
-            else
-                return finish(emission);
-        }
+        if (_settings.enablePathRoulette && !continueAfterRoulette(sampler, throughput, bounce,
+                hitSurface && info.bsdf->lobes().isForward(), _settings.rouletteTargetWeight))
+            return finish(emission);
 
         if (std::isnan(ray.dir().sum() + ray.pos().sum()))
             return finish(Vec3f(0.f));
         if (std::isnan(throughput.sum() + emission.sum()))
             return finish(Vec3f(0.f));
 
-        if (!(hitSurface && info.bsdf->lobes().isForward())) {
+        if (_settings.countForwardBounces || !(hitSurface && info.bsdf->lobes().isForward())) {
             bounce++;
         }
 

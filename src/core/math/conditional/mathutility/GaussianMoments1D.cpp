@@ -35,8 +35,27 @@ PositiveResult positiveRawMoment(int order, double mean, double stddev,
             value = (mean * mean * mean + 3.0 * mean * stddev * stddev) * p +
                     (mean * mean * stddev + 2.0 * stddev * stddev * stddev) * d;
         }
-        value = validateNonnegative(value, std::pow(std::abs(mean) + stddev, order), policy);
+        if (!(value >= 0.0))
+            value = validateNonnegative(value, std::pow(std::abs(mean) + stddev, order), policy);
         if (value > 0.0) return {value, std::log(value), 0.0, NumericStatus::Ok};
+    }
+
+    if (order == 1 && a <= -5.0) {
+        // With x=-a, the inverse Mills ratio is x+c, with
+        // c=1/(x+2/(x+3/(...))). Thus phi(x)-x*Phi(-x)=phi(x)*c/(x+c).
+        // Bound the omitted tail by [0,33/x]. At x>=5 the resulting two
+        // 32-level convergents agree to double precision.
+        const double x = -a;
+        if (!std::isfinite(x)) return exactZero();
+        double low = 0.0, high = 33.0/x;
+        for (int n=32; n>=1; --n) {
+            const double nextLow = n/(x+high);
+            high = n/(x+low);
+            low = nextLow;
+        }
+        const double c = 0.5*low + 0.5*high;
+        const double logValue = std::log(stddev) + normalLogPdf(x) + std::log(c) - std::log(x+c);
+        return positiveFromLog(logValue);
     }
 
     const double r = static_cast<double>(order);

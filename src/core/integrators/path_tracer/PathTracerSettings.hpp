@@ -4,6 +4,7 @@
 #include "integrators/TraceSettings.hpp"
 
 #include "io/JsonObject.hpp"
+#include <cmath>
 #include <stdexcept>
 
 namespace Tungsten {
@@ -19,6 +20,9 @@ struct PathTracerSettings : public TraceSettings
     bool gpisPathPool;
     bool independentPathSampling;
     uint32 gpisMaxActivePaths, gpisBatchSize, gpisInflightBatches;
+    bool enablePathRoulette = true;
+    // Zero keeps the original late-bounce roulette.
+    float rouletteTargetWeight = 0.0f;
 
     PathTracerSettings()
     : enableLightSampling(true),
@@ -52,6 +56,10 @@ struct PathTracerSettings : public TraceSettings
         value.getField("gpis_max_active_paths", gpisMaxActivePaths);
         value.getField("gpis_batch_size", gpisBatchSize);
         value.getField("gpis_inflight_batches", gpisInflightBatches);
+        value.getField("roulette_target_weight", rouletteTargetWeight);
+        value.getField("enable_path_roulette", enablePathRoulette);
+        if (!(rouletteTargetWeight>=0.0f) || !std::isfinite(rouletteTargetWeight))
+            throw std::runtime_error("roulette_target_weight must be finite and nonnegative");
         if (wavefrontGpis && gpisPathPool && !independentPathSampling)
             throw std::runtime_error("gpis_path_pool requires independent_path_sampling");
         if (!gpisMaxActivePaths || gpisMaxActivePaths > 1048576 ||
@@ -74,7 +82,9 @@ struct PathTracerSettings : public TraceSettings
             "independent_path_sampling", independentPathSampling,
             "gpis_max_active_paths", gpisMaxActivePaths,
             "gpis_batch_size", gpisBatchSize,
-            "gpis_inflight_batches", gpisInflightBatches
+            "gpis_inflight_batches", gpisInflightBatches,
+            "roulette_target_weight", rouletteTargetWeight,
+            "enable_path_roulette", enablePathRoulette
         };
     }
 };

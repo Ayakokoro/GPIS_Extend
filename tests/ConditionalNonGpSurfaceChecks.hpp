@@ -52,6 +52,36 @@ inline void nonGpSurfaceChecks()
     crossing->birth.birthGradient=V(0,0,-1.9);
     auto surfaceState=keep;
     surfaceState.pathContext=crossing;
+    {
+        auto binary=makeMedium(R"("binary_shadow_visibility":true)");
+        rapidjson::Document document;
+        check(binary->toJson(document.GetAllocator())["binary_shadow_visibility"].GetBool(),
+            "binary shadow visibility survives serialization");
+        auto birth=std::make_shared<ConditionalPathContext>(*crossing);
+        birth->owner=binary.get();
+        birth->birth.birthGradient=V(0,0,-0.7);
+        unsigned visible=0;
+        for(unsigned i=0;i<128;++i) {
+            auto path=surfaceState;
+            path.pathContext=birth;
+            auto shadow=path;
+            IndependentPathSampler a(321,false),b(321,false);
+            a.startPath(0,i);b.startPath(0,i);
+            MediumSample hit{};
+            check(binary->sampleDistance(a,ray,path,hit),"binary visibility reference flight");
+            const Vec3f tr=binary->transmittance(b,ray,false,false,&shadow);
+            check(tr==Vec3f(hit.exited ? 1.f : 0.f),"shadow matches the first real collision");
+            if(hit.exited) {
+                ++visible;
+                auto p=std::dynamic_pointer_cast<const ConditionalPathContext>(path.pathContext);
+                auto s=std::dynamic_pointer_cast<const ConditionalPathContext>(shadow.pathContext);
+                check(p && s && p->birth.birthValue==s->birth.birthValue &&
+                    p->birth.birthGradient==s->birth.birthGradient,"visible shadow retains its conditional endpoint");
+            }
+        }
+        check(visible>0 && visible<128,"binary shadow fixture covers both visibility outcomes");
+        binary->teardownAfterRender();
+    }
     cg::ConditionalSegment reference(retained->field(),crossing->birth,crossing->position,
         V::UnitZ(),.5,retained->trackingSettings());
     for(bool clipped : {false,true}) for(bool collision : {false,true}) {
@@ -76,6 +106,35 @@ inline void nonGpSurfaceChecks()
         check(diagnostic.flight.at("tracking_start_distance")==begin &&
             diagnostic.flight.at("birth_value")==.3 && !state.startsAtScatteringSurface,
             "only the first segment after a scattering surface consumes the physical epsilon");
+    }
+    // GP offsets use world units even when the ray direction is not unit length.
+    for(bool jitter : {false,true}) {
+        auto experiment=makeMedium(std::string(R"("tracking_collision_start_step":0.0625,"tracking_collision_start_jitter":)")+
+                (jitter ? "true" : "false"));
+        for(bool gpBirth : {false,true}) for(bool collision : {false,true}) {
+            auto c=std::make_shared<ConditionalPathContext>(*observation);
+            c->owner=experiment.get();c->birth.birthValue=gpBirth ? 0.0 : .3;
+            c->birth.birthGradient=V::UnitZ();
+            auto state=surfaceState;state.pathContext=c;state.distanceDiagnostic=&diagnostic;
+            state.startsAtScatteringSurface=!gpBirth;
+            IndependentPathSampler actual(923,false),expected(923,false);
+            actual.startPath(2,4);expected.startPath(2,4);
+            const double begin=.125+(gpBirth ? .0625*(jitter ? double(expected.next1D()) : 1.0) : 0.0);
+            cg::ConditionalSegment referenceSegment(experiment->field(),c->birth,c->position,
+                    V::UnitZ(),.5,experiment->trackingSettings());
+            cg::Random rng(expected);double hit;
+            const double weight=referenceSegment.track(rng,collision,hit,nullptr,begin);
+            if(collision) {
+                MediumSample sample{};
+                check(experiment->sampleDistance(actual,ray,state,sample) && sample.t==float(hit/2) &&
+                        sample.exited==(weight!=0),"GP offset collision distance");
+            } else {
+                check(experiment->transmittance(actual,ray,true,true,&state)==Vec3f(float(weight)),
+                        "GP offset shadow weight");
+            }
+            check(diagnostic.flight.at("tracking_start_distance")==begin &&
+                    diagnostic.flight.at("birth_value")==c->birth.birthValue,"GP offset preserves the observation");
+        }
     }
     auto shortState=surfaceState;
     shortState.startsAtScatteringSurface=true;

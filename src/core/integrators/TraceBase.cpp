@@ -4,7 +4,6 @@
 #include "media/ClassicGlobalMedium.hpp"
 #include "media/GlobalConditionalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
-#include "media/GlobalConditionalMedium.hpp"
 #include "media/PoissonEllipsoidMedium.hpp"
 #ifdef TUNGSTEN_ENABLE_NEURAL_RENEWAL
 #include "media/NeuralRenewalMedium.hpp"
@@ -13,6 +12,25 @@
 namespace Tungsten {
 
 namespace {
+bool lightOnlyVolumeEstimate(const Medium *medium,const MediumSample &sample) {
+    const auto *conditional=dynamic_cast<const GlobalConditionalMedium *>(medium);
+    return conditional && conditional->lightOnlyDirectSampling(sample.rayInfo.pixelSampleSegment.z()) &&
+        !sample.phase->isSpecular();
+}
+
+Vec3f shadowSegmentTransmittance(PathSampleGenerator &sampler,const Ray &ray,const Medium &medium,
+        bool startsOnSurface,bool endsOnSurface,Medium::MediumState &state,
+        const Primitive *boundary,const Primitive *endCap,const IntersectionTemporary &data) {
+    if (const auto *conditional=dynamic_cast<const GlobalConditionalMedium *>(&medium)) {
+        // Only a transparent crossing that stays in this medium can consume
+        // the endpoint observation. The shadow estimator needs its weight in all cases.
+        const bool continues=boundary && boundary!=endCap &&
+            boundary->selectMedium(&medium,!boundary->hitBackside(data))==&medium;
+        return conditional->shadowTransmittance(sampler,ray,&state,continues);
+    }
+    return medium.transmittance(sampler,ray,startsOnSurface,endsOnSurface,&state);
+}
+
 void beginEllipsoidSurfaceFlight(const Medium *medium,Medium::MediumState &state) {
     const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
     if (ellipsoid && ellipsoid->hasDensityMultiplier())
@@ -167,6 +185,7 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
 
             throughput *= transparency;
             mediumStateIterBlank.info.pixelSampleSegment.w() ++;
+            if (_settings.countForwardBounces) ++bounce;
 
             if (bounce >= _settings.maxBounces)
                 return Vec3f(0.0f);
@@ -186,7 +205,8 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
                 pdfForward *= forward;
                 pdfBackward *= backward;
             } else {
-                throughput *= medium->transmittance(sampler, ray, startsOnSurface, endsOnSurface, &mediumStateIter);
+                throughput *= shadowSegmentTransmittance(sampler,ray,*medium,startsOnSurface,
+                    endsOnSurface,mediumStateIter,info.primitive,endCap,data);
             }
             mediumStateIter.distanceDiagnostic = previousDiagnostic;
             if (_pathDiagnostics && !ComputePdfs) {
@@ -197,6 +217,7 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
                     {"throughput_before",D::vector(throughputBefore)},{"throughput_after",D::vector(throughput)}});
             }
         }
+        if (!ComputePdfs && throughput == 0.0f) return Vec3f(0.0f);
         if (info.primitive == nullptr || info.primitive == endCap)
             return bounce >= _settings.minBounces ? throughput : Vec3f(0.0f);
         const Medium *nextMedium = info.primitive->selectMedium(medium, !info.primitive->hitBackside(data));
@@ -265,6 +286,7 @@ bool TraceBase::advanceShadow(ShadowState &shadow, PathSampleGenerator &sampler,
                 }
                 auto event = makeLocalScatterEvent(shadow.data, shadow.info, shadow.ray, nullptr);
                 Vec3f transparency = shadow.info.bsdf->eval(event.makeForwardEvent(), false);
+                if (_settings.countForwardBounces) ++shadow.bounce;
                 if (transparency == 0.0f || shadow.bounce >= _settings.maxBounces) {
                     shadow.throughput = Vec3f(0.0f);
                     shadow.stage = Stage::Finished;
@@ -285,8 +307,8 @@ bool TraceBase::advanceShadow(ShadowState &shadow, PathSampleGenerator &sampler,
                 shadow.stage = Stage::Intersection;
             } else {
                 if (shadow.medium)
-                    shadow.throughput *= shadow.medium->transmittance(sampler, shadow.ray,
-                        shadow.startsOnSurface, true, &shadow.state);
+                    shadow.throughput *= shadowSegmentTransmittance(sampler,shadow.ray,*shadow.medium,
+                        shadow.startsOnSurface,true,shadow.state,shadow.info.primitive,shadow.endCap,shadow.data);
                 shadow.stage = Stage::Boundary;
             }
         }
@@ -315,6 +337,10 @@ bool TraceBase::advanceShadow(ShadowState &shadow, PathSampleGenerator &sampler,
             return false;
         }
         if (shadow.stage == Stage::Boundary) {
+            if (shadow.throughput == 0.0f) {
+                shadow.stage = Stage::Finished;
+                break;
+            }
             if (!shadow.info.primitive || shadow.info.primitive == shadow.endCap) {
                 if (shadow.bounce < _settings.minBounces)
                     shadow.throughput = Vec3f(0.0f);
@@ -424,8 +450,8 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                             direct.firstResult *= SampleWarp::powerHeuristic(direct.lightSample.pdf,
                                 event.info->bsdf->pdf(event));
                     } else {
-                        bool disableMIS = sample.phase->isSpecular() &&
-                            sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE;
+                        bool disableMIS = lightOnlyVolumeEstimate(medium,sample) ||
+                            (sample.phase->isSpecular() && sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE);
                         if (!light.isDirac() && !disableMIS)
                             direct.firstResult *= SampleWarp::powerHeuristic(direct.lightSample.pdf,
                                 sample.phase->pdf(parentRay.dir(), direct.lightSample.d, sample));
@@ -435,6 +461,10 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
             direct.stage = Stage::ScatterSample;
         }
         if (direct.stage == Stage::ScatterSample) {
+            if (!direct.surface && lightOnlyVolumeEstimate(medium,sample)) {
+                direct.stage=Stage::Finished;
+                break;
+            }
             direct.stage = Stage::Finished;
             if (light.isDirac())
                 break;
@@ -790,7 +820,8 @@ Vec3f TraceBase::volumeLightSample(PathSampleGenerator &sampler,
 
     Vec3f lightF = f*e/lightSample.pdf;
 
-    bool disableMIS = mediumSample.phase->isSpecular() && mediumSample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE;
+    bool disableMIS = lightOnlyVolumeEstimate(medium,mediumSample) ||
+        (mediumSample.phase->isSpecular() && mediumSample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE);
     if (!light.isDirac() && !disableMIS) {
         lightF *= SampleWarp::powerHeuristic(lightSample.pdf, mediumSample.phase->pdf(parentRay.dir(), lightSample.d, mediumSample));
     }
@@ -862,7 +893,7 @@ Vec3f TraceBase::volumeSampleDirect(const Primitive &light,
                     const Ray &parentRay)
 {
     Vec3f result = volumeLightSample(sampler, mediumSample, mediumState, light, medium, bounce, parentRay);
-    if (!light.isDirac())
+    if (!light.isDirac() && !lightOnlyVolumeEstimate(medium,mediumSample))
         result += volumePhaseSample(light, sampler, mediumSample, mediumState, medium, bounce, parentRay);
 
     return result;

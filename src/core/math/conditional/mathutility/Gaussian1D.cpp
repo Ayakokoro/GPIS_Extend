@@ -1,6 +1,7 @@
 // Ported from macrofacet; see ../PORT.md for provenance and adaptations.
 #include "math/conditional/mathutility/Gaussian1D.h"
 #include "math/conditional/mathutility/RootFinding.h"
+#include <boost/math/special_functions/erf.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -19,7 +20,7 @@ double normalCdf(double z) { return 0.5 * std::erfc(-z / kSqrtTwo); }
 double normalLogCdf(double z) {
     if (z > 0.0) return std::log1p(-0.5 * std::erfc(z / kSqrtTwo));
     const double ordinary = 0.5 * std::erfc(-z / kSqrtTwo);
-    if (ordinary > 0.0) return std::log(ordinary);
+    if (ordinary >= std::numeric_limits<double>::min()) return std::log(ordinary);
 
     const long double x = -static_cast<long double>(z);
     long double term = 1.0L;
@@ -60,6 +61,10 @@ double normalQuantileFromLogCdf(double logU) {
         throw std::invalid_argument("log CDF quantile requires a finite negative value");
     }
     if (logU > std::log(0.5)) return -normalQuantile(-std::expm1(logU));
+    // In the normal range 2p is representable to full relative precision.
+    // Keep the log-domain inverse for probabilities below that range.
+    if (logU >= std::log(std::numeric_limits<double>::min()))
+        return -kSqrtTwo * boost::math::erfc_inv(2.0 * std::exp(logU));
     double lo = -2.0;
     while (normalLogCdf(lo) > logU) lo *= 2.0;
     NumericPolicy inversePolicy = defaultNumericPolicy();

@@ -1,6 +1,8 @@
 #include "GpisSdfGrid.hpp"
 #include "math/conditional/transport/ConditionalMajorantBounds.h"
 #include "math/conditional/mathutility/NumericPolicy.h"
+#include "thread/ThreadPool.hpp"
+#include "thread/ThreadUtils.hpp"
 #include <array>
 
 namespace Tungsten {
@@ -24,11 +26,13 @@ void GpisSdfGrid::buildMacrocells(int cellSize)
         macrocellDimensions[a]=(last[a]-macrocellOrigin[a])/cellSize+1;
     }
     macrocells.resize(size_t(macrocellDimensions.x())*macrocellDimensions.y()*macrocellDimensions.z());
-    for(int z=0;z<macrocellDimensions.z();++z)
+    const uint32 depth=uint32(macrocellDimensions.z());
+    const auto workers=ThreadUtils::pool ? std::max(1u,ThreadUtils::pool->threadCount()) : 1u;
+    ThreadUtils::parallelFor(0,depth,std::min(workers,depth),[&](uint32 z) {
         for(int y=0;y<macrocellDimensions.y();++y)
             for(int x=0;x<macrocellDimensions.x();++x) {
                 Macrocell &block=macrocells[(size_t(z)*macrocellDimensions.y()+y)*macrocellDimensions.x()+x];
-                const Vec3i index(x,y,z);
+                const Vec3i index(x,y,int(z));
                 Vec3i firstNode,lastNode;
                 for(int a=0;a<3;++a) {
                     // Include one neighbouring interpolation cell on each face.
@@ -57,6 +61,7 @@ void GpisSdfGrid::buildMacrocells(int cellSize)
                 block.minimumValue=std::min((lower+offset)*scale,(upper+offset)*scale);
                 block.maximumValue=std::max((lower+offset)*scale,(upper+offset)*scale);
             }
+    });
     macrocellSize=cellSize;
 }
 
@@ -80,6 +85,9 @@ class GridRayCursor final : public cg::MeanRayCursor {
     std::array<double,4> _value{};
     std::array<rb::Interval,4> _certificate;
     std::array<Eigen::Vector3d,3> _gradient;
+    std::array<double,8> _cornerValues{};
+    Eigen::Vector3d _fraction=Eigen::Vector3d::Zero(), _step=Eigen::Vector3d::Zero();
+    bool _gradientReady=false;
     struct Endpoint {
         double t=std::numeric_limits<double>::quiet_NaN();
         cg::MeanJet jet;
@@ -189,10 +197,13 @@ class GridRayCursor final : public cg::MeanRayCursor {
         const Eigen::Vector3d step=active/_rate;
         _value.fill(0);
         std::array<double,4> magnitude{};
-        for(auto &g:_gradient) g.setZero();
+        _fraction=fraction;
+        _step=step;
+        _gradientReady=false;
         double sum=0;
         for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
             const double c=_grid.at(cell[0]+x,cell[1]+y,cell[2]+z);
+            _cornerValues[4*z+2*y+x]=c;
             sum+=std::abs(c);
             const double sx=x ? 1:-1,sy=y ? 1:-1,sz=z ? 1:-1;
             const double ax=x ? fraction.x():1-fraction.x(),dx=sx*step.x();
@@ -208,9 +219,6 @@ class GridRayCursor final : public cg::MeanRayCursor {
             magnitude[1]+=std::abs(c)*(std::abs(dx)*yz0+ax*by1);
             magnitude[2]+=std::abs(c)*(std::abs(dx)*by1+ax*std::abs(yz2));
             magnitude[3]+=std::abs(c*dx*yz2);
-            _gradient[0]+=c*Eigen::Vector3d(sx*yz0,sy*ax*az,sz*ax*ay);
-            _gradient[1]+=c*Eigen::Vector3d(sx*yz1,sy*(ax*dz+dx*az),sz*(ax*dy+dx*ay));
-            _gradient[2]+=c*Eigen::Vector3d(sx*yz2,sy*dx*dz,sz*dx*dy);
         }
         _sumScaled=std::abs(_grid.scale)*sum;
         _value[0]+=_grid.offset;
@@ -226,8 +234,27 @@ class GridRayCursor final : public cg::MeanRayCursor {
                 rb::Interval(rb::down(_value[k]-error),rb::up(_value[k]+error));
             _usable&=std::isfinite(_certificate[k].lower) && std::isfinite(_certificate[k].upper);
         }
+    }
+
+    // Extinction and interval bounds need only the polynomial along the ray.
+    // Construct the full gradient once if this cell supplies an observation.
+    void prepareGradient() {
+        if(_gradientReady) return;
+        for(auto &g:_gradient) g.setZero();
+        for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+            const double c=_cornerValues[4*z+2*y+x];
+            const double sx=x ? 1:-1,sy=y ? 1:-1,sz=z ? 1:-1;
+            const double ax=x ? _fraction.x():1-_fraction.x(),dx=sx*_step.x();
+            const double ay=y ? _fraction.y():1-_fraction.y(),dy=sy*_step.y();
+            const double az=z ? _fraction.z():1-_fraction.z(),dz=sz*_step.z();
+            _gradient[0]+=c*Eigen::Vector3d(sx*(ay*az),sy*ax*az,sz*ax*ay);
+            _gradient[1]+=c*Eigen::Vector3d(sx*(ay*dz+dy*az),sy*(ax*dz+dx*az),sz*(ax*dy+dx*ay));
+            _gradient[2]+=c*Eigen::Vector3d(sx*(dy*dz),sy*dx*dz,sz*dx*dy);
+        }
+        const Eigen::Vector3d mask(_axes[0].mask,_axes[1].mask,_axes[2].mask);
         for(auto &g:_gradient)
             g=(_grid.scale*_grid.worldToIndex.transpose()*g.cwiseProduct(mask)).eval();
+        _gradientReady=true;
     }
 
     cg::MeanJet reference(double t) {
@@ -421,6 +448,7 @@ public:
     cg::MeanJet evaluate(double t) override {
         prepare(t);
         if(ambiguous(t)) return reference(t);
+        prepareGradient();
         const double s=(t-_anchor)*_rate;
         return {_value[0]+s*(_value[1]+s*(_value[2]+s*_value[3])),
                 (_gradient[0]+s*(_gradient[1]+s*_gradient[2])).eval()};

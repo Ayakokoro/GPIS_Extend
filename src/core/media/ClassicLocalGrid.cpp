@@ -1,6 +1,8 @@
 #include "ClassicLocalGrid.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
+#include "thread/ThreadPool.hpp"
+#include "thread/ThreadUtils.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -78,7 +80,7 @@ struct GridView {
         }
     }
 
-    double sample(const V &world, V *gradient=nullptr) const {
+    double sample(const V &world, V *gradient=nullptr, bool supportOnly=false) const {
         const V q=worldToIndex*world+translation;
         if (!q.allFinite()) throw std::runtime_error("classic_local: nonfinite grid query");
         if (gradient) gradient->setZero();
@@ -87,6 +89,14 @@ struct GridView {
         const Eigen::Vector3i base=q.array().floor().cast<int>();
         const V fraction=q-base.cast<double>();
         auto accessor=grid->getAccessor();
+        if(supportOnly && (base.array()>=minimum.array()).all() && (base.array()<maximum.array()).all()) {
+            // Density nodes are finite and nonnegative. The nearest corner
+            // contributes at least 1/8 of its value even on voxel faces.
+            const nanovdb::Coord nearest(base[0]+(fraction.x()>=.5),
+                                         base[1]+(fraction.y()>=.5),
+                                         base[2]+(fraction.z()>=.5));
+            if(accessor.getValue(nearest)>0) return 1;
+        }
         double value=0,corners[2][2][2]; V g=V::Zero();
         for (int z=0; z<2; ++z) for (int y=0; y<2; ++y) for (int x=0; x<2; ++x) {
             const double node=accessor.getValue(nanovdb::Coord(base[0]+x,base[1]+y,base[2]+z));
@@ -121,6 +131,13 @@ struct ClassicLocalGrid::Impl {
     V width;
     Eigen::Vector3i first, last, dimensions;
     std::vector<double> maxima;
+    double densityAt(const V &world,bool supportOnly) const {
+        // Match macrofacet's NanoVdbMean active domain: [minNode,maxNode+1].
+        const V q=sdf.worldToIndex*world+sdf.translation;
+        if ((q.array()<sdf.minimum.cast<double>().array()).any() ||
+            (q.array()>(sdf.maximum.cast<double>().array()+1)).any()) return 0;
+        return density.sample(world,nullptr,supportOnly);
+    }
     double face(int axis, int index) const {
         return index==dimensions[axis] ? double(last[axis]) : first[axis]+index*width[axis];
     }
@@ -141,10 +158,13 @@ struct ClassicLocalGrid::Impl {
             count*=size_t(n);
         }
         maxima.resize(count);
-        auto accessor=density.grid->getAccessor();
-        for (int z=0; z<dimensions.z(); ++z) for (int y=0; y<dimensions.y(); ++y)
+        const uint32 depth=uint32(dimensions.z());
+        const auto workers=ThreadUtils::pool ? std::max(1u,ThreadUtils::pool->threadCount()) : 1u;
+        ThreadUtils::parallelFor(0,depth,std::min(workers,depth),[&](uint32 z) {
+            auto accessor=density.grid->getAccessor();
+            for (int y=0; y<dimensions.y(); ++y)
             for (int x=0; x<dimensions.x(); ++x) {
-                const Eigen::Vector3i cell(x,y,z);
+                const Eigen::Vector3i cell(x,y,int(z));
                 Eigen::Vector3i lo,hi;
                 for (int a=0; a<3; ++a) {
                     // One-cell halo covers cell selection at rounded DDA faces.
@@ -162,6 +182,7 @@ struct ClassicLocalGrid::Impl {
                 maxima[(size_t(z)*dimensions.y()+y)*dimensions.x()+x]=maximum==0 ? 0 :
                     std::nextafter(maximum*(1+guard),std::numeric_limits<double>::infinity());
             }
+        });
     }
 };
 
@@ -180,13 +201,9 @@ ClassicLocalGrid::ClassicLocalGrid(const std::string &file, const std::string &s
 }
 ClassicLocalGrid::~ClassicLocalGrid()=default;
 double ClassicLocalGrid::density(const V &world) const {
-    // Match macrofacet's NanoVdbMean active domain: [minNode,maxNode+1].
-    // Density interpolation support alone can extend one cell beyond it.
-    const V q=_impl->sdf.worldToIndex*world+_impl->sdf.translation;
-    if ((q.array()<_impl->sdf.minimum.cast<double>().array()).any() ||
-        (q.array()>(_impl->sdf.maximum.cast<double>().array()+1)).any()) return 0;
-    return _impl->density.sample(world);
+    return _impl->densityAt(world,false);
 }
+bool ClassicLocalGrid::hasDensity(const V &world) const { return _impl->densityAt(world,true)!=0; }
 V ClassicLocalGrid::meanGradient(const V &world) const {
     V gradient; _impl->sdf.sample(world,&gradient); return gradient;
 }
@@ -224,15 +241,12 @@ ClassicLocalGrid::Cursor::Cursor(const ClassicLocalGrid &grid,const V &origin,
          (_grid->density.worldToIndex.cwiseAbs()*direction.cwiseAbs()));
     if (_begin<_end && (!error.allFinite() || error.maxCoeff()>=0.25))
         throw std::runtime_error("classic_local: grid ray transform lacks precision");
-}
-
-bool ClassicLocalGrid::Cursor::next(Segment &segment) {
-    if (!(_begin<_end)) return false;
-    int cell[3]; double end=_end;
+    if (!(_begin<_end)) return;
     for (int a=0; a<3; ++a) {
         const double q=_origin[a]+_begin*_direction[a];
         const double u=std::clamp((q-_grid->first[a])/_grid->width[a],0.0,double(_grid->dimensions[a]-1));
         int index=int(std::floor(u));
+        _nextFace[a]=_end;
         if (_direction[a]!=0) {
             const auto crossing=[&](int face) {
                 return (_grid->face(a,face)-_origin[a])/_direction[a];
@@ -240,17 +254,34 @@ bool ClassicLocalGrid::Cursor::next(Segment &segment) {
             if (_direction[a]>0) {
                 while (index+1<_grid->dimensions[a] && crossing(index+1)<=_begin) ++index;
                 while (index>0 && crossing(index)>_begin) --index;
-                end=std::min(end,crossing(index+1));
+                _nextFace[a]=crossing(index+1);
             } else {
                 while (index>0 && crossing(index)<=_begin) --index;
                 while (index+1<_grid->dimensions[a] && crossing(index+1)>_begin) ++index;
-                end=std::min(end,crossing(index));
+                _nextFace[a]=crossing(index);
             }
         }
-        cell[a]=index;
+        _cell[a]=index;
     }
+}
+
+bool ClassicLocalGrid::Cursor::next(Segment &segment) {
+    if (!(_begin<_end)) return false;
+    const double end=std::min(_end,_nextFace.minCoeff());
     if (!(end>_begin)) throw std::runtime_error("classic_local: density DDA failed to advance");
-    segment={_begin,end,_grid->maxima[(size_t(cell[2])*_grid->dimensions.y()+cell[1])*_grid->dimensions.x()+cell[0]]};
+    const size_t index=(size_t(_cell.z())*_grid->dimensions.y()+_cell.y())*_grid->dimensions.x()+_cell.x();
+    segment={_begin,end,_grid->maxima[index]};
+    if (end<_end) for (int a=0;a<3;++a) {
+        // Recompute absolute crossings, including all axes tied at an edge.
+        // Adding a constant delta instead would accumulate rounding error.
+        while (_nextFace[a]<=end) {
+            _cell[a]+=_direction[a]>0 ? 1 : -1;
+            if (_cell[a]<0 || _cell[a]>=_grid->dimensions[a])
+                throw std::runtime_error("classic_local: density DDA crossed outside clipped domain");
+            const int face=_cell[a]+(_direction[a]>0 ? 1 : 0);
+            _nextFace[a]=(_grid->face(a,face)-_origin[a])/_direction[a];
+        }
+    }
     _begin=end; return true;
 }
 void ClassicLocalGrid::Cursor::appendVoxelBoundaries(std::vector<double> &knots) const {
@@ -275,6 +306,7 @@ ClassicLocalGrid::ClassicLocalGrid(const std::string &,const std::string &,const
 }
 ClassicLocalGrid::~ClassicLocalGrid()=default;
 double ClassicLocalGrid::density(const Eigen::Vector3d &) const { throw std::runtime_error("NanoVDB unavailable"); }
+bool ClassicLocalGrid::hasDensity(const Eigen::Vector3d &) const { throw std::runtime_error("NanoVDB unavailable"); }
 Eigen::Vector3d ClassicLocalGrid::meanGradient(const Eigen::Vector3d &) const { throw std::runtime_error("NanoVDB unavailable"); }
 ClassicLocalGrid::Cursor::Cursor(const ClassicLocalGrid &,const Eigen::Vector3d &,const Eigen::Vector3d &,double,double) {
     throw std::runtime_error("NanoVDB unavailable");

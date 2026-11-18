@@ -21,8 +21,18 @@ namespace {
 Eigen::Vector3d eigen(const Vec3f &p) { return {p.x(),p.y(),p.z()}; }
 Eigen::Vector3d eigen(const Vec3d &p) { return {p.x(),p.y(),p.z()}; }
 Vec3f vec(const Eigen::Vector3d &p) { return Vec3f(float(p.x()),float(p.y()),float(p.z())); }
-double trackingBegin(const Ray &ray,const Medium::MediumState &state,double speed) {
-    return state.startsAtScatteringSurface ? std::max(0.f,std::min(ray.nearT(),ray.farT()))*speed : 0.0;
+double trackingBegin(const Ray &ray,const Medium::MediumState &state,double speed,
+        const ConditionalPathContext &context,double collisionStep,bool jitter,PathSampleGenerator &sampler) {
+    const double farDistance=double(ray.farT())*speed;
+    const double nearDistance=std::clamp(double(ray.nearT())*speed,0.0,farDistance);
+    // A zero observation at this position identifies a fresh GP collision.
+    // Delay only the first tracking query. The conditioned value, gradient,
+    // and absolute distances along the flight still refer to the original hit.
+    if(collisionStep>0 && context.birth.birthValue==0 && context.position==context.birth.birthPosition) {
+        const double offset=collisionStep*(jitter ? double(sampler.next1D()) : 1.0);
+        return std::min(farDistance,nearDistance+offset);
+    }
+    return state.startsAtScatteringSurface ? nearDistance : 0.0;
 }
 void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathContext &c,const Ray &ray,bool neural,double begin) {
     if (!diagnostic || !diagnostic->collectFlight) return;
@@ -209,6 +219,12 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     } else if(value["single_point_neural"])
         value.parseError("single_point_neural requires type global_conditional_neural");
     _tracking=cg::ConditionalTrackingSettings{};
+    _collisionStartStep=0.0;
+    _jitterCollisionStart=true;
+    value.getField("tracking_collision_start_step",_collisionStartStep);
+    value.getField("tracking_collision_start_jitter",_jitterCollisionStart);
+    if(!std::isfinite(_collisionStartStep) || _collisionStartStep<0)
+        value.parseError("tracking_collision_start_step must be finite and nonnegative");
     std::string majorantMode="adaptive";
     value.getField("tracking_majorant",majorantMode);
     if(majorantMode=="two_constants") _tracking.majorantMode=cg::ConditionalMajorantMode::TwoConstants;
@@ -231,6 +247,10 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_proposal_scale",_tracking.proposalScale);
     value.getField("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents);
     value.getField("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold);
+    value.getField("binary_shadow_visibility",_binaryShadowVisibility);
+    bool lightOnly=false;
+    if (value.getField("light_only_direct_sampling",lightOnly)) _directPhaseSamplePeriod=lightOnly ? 0u : 1u;
+    value.getField("direct_phase_sample_period",_directPhaseSamplePeriod);
     _tracking.step=_trackingStep;
     value.getField("tracking_step_scale",_tracking.stepScale);
     value.getField("tracking_age_scale",_tracking.ageScale);
@@ -254,6 +274,10 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
 }
 rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     auto value=ClassicGlobalMedium::toJson(allocator);
+    if(_collisionStartStep>0) {
+        value.AddMember("tracking_collision_start_step",_collisionStartStep,allocator);
+        value.AddMember("tracking_collision_start_jitter",_jitterCollisionStart,allocator);
+    }
     value["type"].SetString(_singlePointNeural ? "global_conditional_neural" : "global_conditional",allocator);
     if(_singlePointNeural) {
         rapidjson::Value neural(rapidjson::kObjectType);
@@ -287,6 +311,8 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_proposal_scale",_tracking.proposalScale,allocator);
     value.AddMember("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents,allocator);
     value.AddMember("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold,allocator);
+    value.AddMember("binary_shadow_visibility",_binaryShadowVisibility,allocator);
+    value.AddMember("direct_phase_sample_period",_directPhaseSamplePeriod,allocator);
     value.AddMember("tracking_step_scale",_tracking.stepScale,allocator);
     value.AddMember("tracking_age_scale",_tracking.ageScale,allocator);
     value.AddMember("tracking_max_expected_events",_tracking.maxExpectedEvents,allocator);
@@ -429,7 +455,7 @@ try
         throw cg::NumericError(cg::NumericStatus::InvalidInput,"global_conditional needs a finite boundary-enclosed segment");
     const auto c=context(sampler,ray,state);
     const double speed=eigen(ray.dir()).norm();
-    const double begin=trackingBegin(ray,state,speed);
+    const double begin=trackingBegin(ray,state,speed,*c,_collisionStartStep,_jitterCollisionStart,sampler);
     observeBirth(state.distanceDiagnostic,*c,ray,_singlePointNeural,begin);
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
@@ -512,13 +538,18 @@ try
     return false;
 }
 Vec3f GlobalConditionalMedium::transmittance(PathSampleGenerator &sampler,const Ray &ray,bool,bool,MediumState *state) const
+{
+    return shadowTransmittance(sampler,ray,state,true);
+}
+Vec3f GlobalConditionalMedium::shadowTransmittance(PathSampleGenerator &sampler,const Ray &ray,
+        MediumState *state,bool retainEndpoint) const
 try
 {
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Shadow);
     if(!state) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional transmittance requires path state");
     const auto c=context(sampler,ray,*state);
     const double speed=eigen(ray.dir()).norm();
-    const double begin=trackingBegin(ray,*state,speed);
+    const double begin=trackingBegin(ray,*state,speed,*c,_collisionStartStep,_jitterCollisionStart,sampler);
     observeBirth(state->distanceDiagnostic,*c,ray,_singlePointNeural,begin);
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
@@ -532,12 +563,18 @@ try
     cg::Random rng(sampler); double t;
 #endif
     cg::ConditionalTrackingWork neuralWork;
-    const double tr=segment.track(rng,false,t,_singlePointNeural ? &neuralWork : nullptr,begin);
+    // Collision tracking gives a Bernoulli visibility query of the same
+    // conditional field. A surviving same-medium boundary still needs its endpoint.
+    const double tr=segment.track(rng,_binaryShadowVisibility,t,_singlePointNeural ? &neuralWork : nullptr,begin);
     state->startsAtScatteringSurface=false;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
     rayProfile.finish(tr,t);
 #endif
     if(_singlePointNeural) recordNeuralWork(neuralWork);
+    if (!retainEndpoint) {
+        state->pathContext.reset();
+        return Vec3f(float(tr));
+    }
     auto next=std::make_shared<ConditionalPathContext>(*c);
     next->position=c->position+double(ray.farT())*speed*w; next->rayOrigin=ray.hitpoint();
     // Shadow traversal uses the same endpoint renewal as distance sampling,

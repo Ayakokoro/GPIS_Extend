@@ -44,6 +44,14 @@ cg::Gaussian<4> reference(const cg::GPSSField &f, const cg::FlightState &s, cons
 
 void stage1()
 {
+    for (double logP : {-0.01,-0.6931471805599453,-20.,-700.,-740.,-1200.})
+        close(cg::normalLogCdf(cg::normalQuantileFromLogCdf(logP)),logP,
+              3e-12*std::max(1.,std::abs(logP)),"normal quantile log-tail round trip");
+    // High-precision values of log(phi(x)-x*Phi(-x)), including underflow in value space.
+    for (const auto &pair : {std::pair<double,double>{5,-16.74430116266099},
+                 {8,-37.12236426169263},{12,-77.90910054500735},{40,-808.29856835662}})
+        close(cg::negativePartMean(pair.first,1.).logValue,pair.second,2e-12,
+              "negative Gaussian flux tail");
     samePointStatisticsChecks();
     auto f=field();
     cg::FlightState s;

@@ -60,6 +60,7 @@ class ConditionalSegment {
     Point3 _origin;
     Vector3 _w;
     double _length, _age;
+    double _inverseEll;
     double _meanLipschitz, _classicBegin=std::numeric_limits<double>::infinity();
     double _meanGradientBound, _localFarBegin=std::numeric_limits<double>::infinity();
     ConditionalTrackingSettings _tracking;

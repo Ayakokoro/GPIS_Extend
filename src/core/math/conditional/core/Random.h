@@ -4,6 +4,7 @@
 #include "math/conditional/core/Types.h"
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <random>
 #include "sampling/PathSampleGenerator.hpp"
 
@@ -11,13 +12,13 @@ namespace Tungsten::ConditionalGpis {
 
 class Random {
 public:
-    explicit Random(std::uint64_t seed = 1) : engine_(seed) {}
+    explicit Random(std::uint64_t seed = 1) : engine_(std::in_place,seed) {}
 
     explicit Random(PathSampleGenerator &sampler) : sampler_(&sampler) {}
 
     double uniform01() {
         if (sampler_) return sampler_->next1D();
-        return std::generate_canonical<double, 64>(engine_);
+        return std::generate_canonical<double, 64>(*engine_);
     }
 
     double openUniform01() {
@@ -26,12 +27,16 @@ public:
         return u;
     }
 
-    double standardNormal() { return sampler_ ? std::sqrt(-2.0*std::log(openUniform01()))*std::cos(2.0*kPi*openUniform01()) : normal_(engine_); }
-    std::uint64_t integer() { return engine_(); }
+    double standardNormal() { return sampler_ ? std::sqrt(-2.0*std::log(openUniform01()))*std::cos(2.0*kPi*openUniform01()) : normal_(*engine_); }
+    std::uint64_t integer() {
+        if (!engine_) engine_.emplace();
+        return (*engine_)();
+    }
 
 private:
     PathSampleGenerator *sampler_ = nullptr;
-    std::mt19937_64 engine_;
+    // A renderer-backed sampler usually never needs its own 312-word engine.
+    std::optional<std::mt19937_64> engine_;
     std::normal_distribution<double> normal_{0.0, 1.0};
 };
 

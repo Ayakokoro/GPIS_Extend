@@ -10,6 +10,8 @@
 
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
+#include "thread/ThreadPool.hpp"
+#include "thread/ThreadUtils.hpp"
 
 #include "Debug.hpp"
 
@@ -466,14 +468,17 @@ bool VdbGrid::exportLinearDensity(DenseDensity &out) const
     out.clampMin = clampMin;
     out.clampMax = clampMax;
     out.values.resize(x * y * z);
-    const auto &tree = _densityGrid->tree();
-    for (int iz = 0; iz < dimensions.z(); ++iz)
+    const auto workers = ThreadUtils::pool ? std::max(1u, ThreadUtils::pool->threadCount()) : 1u;
+    ThreadUtils::parallelFor(0, uint32(z), std::min(workers,uint32(z)), [&](uint32 iz) {
+        // A read accessor caches VDB tree nodes and belongs to one slice.
+        auto accessor = _densityGrid->getConstAccessor();
         for (int iy = 0; iy < dimensions.y(); ++iy)
             for (int ix = 0; ix < dimensions.x(); ++ix)
                 out.values[(static_cast<size_t>(iz) * y + iy) * x + ix] =
-                    tree.getValue(openvdb::Coord(origin.x() + ix,
+                    accessor.getValue(openvdb::Coord(origin.x() + ix,
                                                  origin.y() + iy,
-                                                 origin.z() + iz));
+                                                 origin.z() + int(iz)));
+    });
     return true;
 }
 
