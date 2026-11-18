@@ -84,4 +84,31 @@ inline void opticalDepthChecks()
     check(coarse.size()==3 && fine.size()==coarse.size(),"subdivision preserves candidate count");
     for(size_t i=0;i<coarse.size();++i)
         close(coarse[i],fine[i],1e-13,"subdivision preserves candidate positions");
+
+    // Independent intensity M(t)=2t, with primitive t^2: exercise a varying
+    // intensity, subdivision and a subsequent constant interval on one clock.
+    const auto variableEvents=[&](int partitions) {
+        OpticalDepthSampler source({.5f,.25f,.125f,.000001f});
+        cg::Random random(source);cg::MajorantOpticalDepth process;
+        std::vector<double> result;
+        for(int i=0;i<partitions;++i) {
+            double begin=2.*i/partitions,end=2.*(i+1)/partitions,event;
+            while(process.advanceIntegrated(random,begin,end,end*end-begin*begin,
+                [&](double depth) { return std::sqrt(begin*begin+depth); },event)) {
+                result.push_back(event);begin=event;
+            }
+        }
+        double event;
+        check(process.advance(random,1,2,3,event),"integrated clock retains its threshold into a constant segment");
+        result.push_back(event);
+        check(source.calls==3,"variable partitions reuse the exponential clock");
+        return result;
+    };
+    const auto variableCoarse=variableEvents(1),variableFine=variableEvents(200);
+    check(variableCoarse.size()==3 && variableFine.size()==3,"nonconstant clock event count");
+    close(variableCoarse[0],std::sqrt(log2),1e-14,"nonconstant clock first event");
+    close(variableCoarse[1],std::sqrt(3*log2),1e-14,"nonconstant clock second event");
+    close(variableCoarse[2],2+6*log2-4,1e-14,"variable-to-constant residual event");
+    for(size_t i=0;i<variableCoarse.size();++i)
+        close(variableCoarse[i],variableFine[i],1e-13,"nonconstant clock subdivision invariance");
 }

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <limits>
 #include <vector>
+#include <boost/math/special_functions/erf.hpp>
 
 namespace Tungsten::ConditionalGpis {
 namespace {
@@ -198,6 +199,102 @@ FlightState startConditionalExterior(const GPSSField& field, const Point3& entry
     state.birthGradient = sampleGaussianPSD(
         Gaussian<3>{prior.meanG, prior.covarianceG}, rng);
     return state;
+}
+
+double ConditionalIntegralMajorant::value(double age) const {
+    if(gaussianLinear) {
+        const double z=z0-beta*(age-origin),c=std::sqrt(2/kPi);
+        return constant*(z>=0 ? c*std::exp(-.5*z*z) : c-z);
+    }
+    return constant+regressionCoefficient*seFactors(inverseLength2,age).regression;
+}
+
+double ConditionalIntegralMajorant::integral(double begin,double end) const {
+    if(!(begin>0 && end>=begin))
+        throw NumericError(NumericStatus::InvalidInput,"invalid integral majorant ages");
+    if(end==begin) return 0;
+    if(gaussianLinear) {
+        if(beta==0) return value(begin)*(end-begin);
+        const double za=z0-beta*(begin-origin),zb=za-beta*(end-begin),c=std::sqrt(2/kPi);
+        if(za<=0) return constant*(end-begin)*(c-za+.5*beta*(end-begin));
+        const double positiveLength=std::min(end-begin,za/beta),zp=std::max(0.,za-beta*positiveLength);
+        double depth;
+        if(beta*positiveLength*(1+za)<1e-3) {
+            // Stable difference of two almost equal erfc values: three-point
+            // Gauss integrates this tiny Gaussian interval to double accuracy.
+            const double m=.5*(za+zp),h=.5*(za-zp)*std::sqrt(3./5);
+            depth=constant*c*positiveLength*(5*std::exp(-.5*(m-h)*(m-h))+
+                8*std::exp(-.5*m*m)+5*std::exp(-.5*(m+h)*(m+h)))/18;
+        } else depth=constant/beta*(std::erfc(zp/kSqrtTwo)-std::erfc(za/kSqrtTwo));
+        if(zb<0) depth+=constant*(-zb/beta)*(c-.5*zb);
+        return depth;
+    }
+    double logRatio=0;
+    if(regressionCoefficient>0) {
+        const double u=inverseLength2*begin*begin,v=inverseLength2*end*end;
+        const double delta=inverseLength2*(end-begin)*(end+begin);
+        if(v<=1) {
+            const double e0=scaledExponentialRemainders(u).first;
+            const double e1=scaledExponentialRemainders(v).first;
+            // s(t) proportional to t^2*exp(-u/2)*sqrt(E2(u)).
+            logRatio=2*std::log1p((end-begin)/begin)-0.5*delta+
+                0.5*std::log1p((e1-e0)/e0);
+        } else {
+            // V(v)-V(u)=exp(-u)*(u*(1-exp(-delta))+V(delta)).
+            // This avoids subtracting two variances rounded to one in the tail.
+            const double vd=seFactors(1,std::sqrt(delta)).valueVariance;
+            const double difference=std::exp(-u)*(u*(-std::expm1(-delta))+vd);
+            logRatio=0.5*std::log1p(difference/seFactors(inverseLength2,begin).valueVariance);
+        }
+    }
+    return constant*(end-begin)+regressionCoefficient*std::max(0.0,logRatio);
+}
+
+double ConditionalIntegralMajorant::inverseIntegral(double begin,double end,double depth) const {
+    if(depth==0) return begin;
+    const double total=integral(begin,end);
+    if(!(depth>0 && depth<=total) || !std::isfinite(total))
+        throw NumericError(NumericStatus::InvalidInput,"invalid inverse majorant optical depth");
+    if(depth==total) return end;
+    if(gaussianLinear) {
+        if(beta==0) return begin+depth/value(begin);
+        const double za=z0-beta*(begin-origin),c=std::sqrt(2/kPi);
+        double result;
+        if(za>0 && depth<constant/beta*std::erf(za/kSqrtTwo)) {
+            const double p=std::erfc(za/kSqrtTwo)+beta*depth/constant;
+            result=begin+(za-kSqrtTwo*boost::math::erfc_inv(p))/beta;
+        } else {
+            const double offset=za>0 ? za/beta:0;
+            const double remaining=za>0 ? depth-constant/beta*std::erf(za/kSqrtTwo):depth;
+            const double rate=constant*(c-std::min(0.,za));
+            result=begin+offset+2*remaining/(rate+std::sqrt(rate*rate+2*constant*beta*remaining));
+        }
+        // Resolve cancellation for tiny steps. The ordinary case uses the
+        // closed inverse; this fallback maintains the optical-depth contract.
+        double left=begin,right=end;
+        for(int i=0;i<64;++i) {
+            if(!(result>left && result<right)) result=left+.5*(right-left);
+            const double residual=integral(begin,result)-depth;
+            if(std::abs(residual)<=64*std::numeric_limits<double>::epsilon()*depth) return result;
+            if(residual<0) left=result;else right=result;
+            if(!(std::nextafter(left,right)<right)) return right;
+            result-=residual/value(result);
+        }
+        throw NumericError(NumericStatus::NeedHigherPrecision,"Gaussian envelope inverse did not converge");
+    }
+    if(regressionCoefficient==0) return begin+depth/constant;
+    double left=begin,right=end;
+    double x=begin+(end-begin)*(depth/total);
+    for(int i=0;i<96;++i) {
+        const double residual=integral(begin,x)-depth;
+        if(std::abs(residual)<=32*std::numeric_limits<double>::epsilon()*depth) return x;
+        if(residual<0) left=x; else right=x;
+        const double middle=left+0.5*(right-left);
+        if(!(middle>left && middle<right)) return right;
+        const double next=x-residual/value(x);
+        x=next>left && next<right ? next : middle;
+    }
+    throw NumericError(NumericStatus::NeedHigherPrecision,"integrated majorant inverse did not converge");
 }
 
 ConditionalFlightKernel::ConditionalFlightKernel(const GPSSField& field,
@@ -439,8 +536,149 @@ double ConditionalFlightKernel::transitionIntervalMajorant(double lo,double hi,d
     return boundedIntervalMajorant(mean,lo,hi,tightenExpectedEvents,parentMaximum,false);
 }
 
+ConditionalIntegralMajorant ConditionalFlightKernel::transitionIntegralMajorant(
+        double lo,double hi,double lipschitz) const {
+    Profile::Scope profile(Profile::Stage::IntervalBound);
+    Profile::Scope detail(Profile::Stage::BoundTransition);
+    Profile::count(Profile::Counter::TransitionBoundQueries);
+    if(!(lo>0 && hi>lo && hi<=maximumAgeInDomain()) ||
+       !(lipschitz>=0) || !std::isfinite(lipschitz))
+        throw NumericError(NumericStatus::InvalidInput,"invalid integrated transition interval");
+    const auto mb=pointMeanBounds(lo,hi,lipschitz,true,true);
+    using I=bounds::Interval;
+    const double a=inverseLength2_;
+    const I times(lo,hi),exponential=bounds::exp(I(-0.5)*I(a)*times*times);
+    const I correction=exponential*bounds::quadraticPolynomialRange(deltaValue_,deltaSlope_,0,lo,hi);
+    const I slopeCorrection=exponential*bounds::quadraticPolynomialRange(
+        deltaSlope_,-I(a)*I(deltaValue_),-I(a)*I(deltaSlope_),lo,hi);
+    const double kmin=(I(mb.minimumDerivative)+slopeCorrection).lower;
+    const double kmax=(I(mb.maximumDerivative)+slopeCorrection).upper;
+    double fmin=(I(mb.minimumValue)+correction).lower;
+    double fmax=(I(mb.maximumValue)+correction).upper;
+    // Retain the cancellation-safe midpoint enclosure used by the old
+    // transition certificate. It matters when birth and prior means cancel.
+    const double middle=0.5*lo+0.5*hi,um=a*middle*middle;
+    double differenceError=0;
+    const double center=um<1e-3
+        ? state_.birthValue+middle*deltaSlope_+meanValueDifference(middle,&differenceError)+
+          std::expm1(-0.5*um)*(deltaValue_+middle*deltaSlope_)
+        : mb.midpointValue+std::exp(-0.5*um)*(deltaValue_+middle*deltaSlope_);
+    const double roundoff=256*std::numeric_limits<double>::epsilon()*
+        (std::abs(mb.midpointValue)+std::abs(birthMean_.value)+std::abs(deltaValue_)+
+         std::abs(middle*deltaSlope_)+1e-30);
+    const double radius=upward(0.5*(hi-lo)*std::max(std::abs(kmin),std::abs(kmax))+
+        roundoff+std::max(differenceError,mb.midpointError));
+    fmin=std::max(fmin,bounds::down(center-radius));
+    fmax=std::min(fmax,bounds::up(center+radius));
+    const auto moments=prepareMomentBounds(sigma2_,a,lo,hi,true);
+    const I z=I(fmin,fmax)/moments.sd;
+    const auto logR=[](double x) {
+        return x>-8 ? normalLogPdf(x)-normalLogCdf(x) : std::log1p(-x);
+    };
+    // A(d,kappa)<=(-d)+ + kappa/sqrt(2*pi), d>=kmin/s-gamma*z.
+    // Keep z+R(z) together, bounding it by min(C, zmax+ R(max(0,zmin))).
+    // C=sqrt(2/(pi*e)) follows from Phi(z)>=1/2 and max z*phi(z)=phi(1).
+    const double slope=std::max(0.0,-kmin);
+    const double base=(I(slope)/I(moments.sd.lower)+I(moments.kappaMax)*I(kInvSqrtTwoPi)).upper;
+    const double c0=base==0 ? 0 : upward(std::exp(logR(z.lower)+std::log(base)));
+    double c1=0;
+    if(z.upper>0) {
+        const double cap=std::sqrt(2/(kPi*std::exp(1.0)));
+        c1=upward(std::exp(std::min(std::log(cap),std::log(z.upper)+logR(std::max(0.0,z.lower)))));
+    }
+    return {c0,c1,a};
+}
+
+double ConditionalFlightKernel::coupledIntervalMajorant(double lo,double hi,double lipschitz,
+        bool localMean,double parentMaximum,bool macrocell) const {
+    Profile::Scope profile(Profile::Stage::IntervalBound);
+    Profile::Scope detail(Profile::Stage::BoundTransition);
+    Profile::count(Profile::Counter::TransitionBoundQueries);
+    if(!(lo>0 && hi>lo && hi<=maximumAgeInDomain()) ||
+       !(lipschitz>=0) || !std::isfinite(lipschitz))
+        throw NumericError(NumericStatus::InvalidInput,"invalid coupled transition interval");
+    SdfRayQueryOptions options;options.computeBeginDerivative=false;
+    MeanRayBounds mean;
+    if(!macrocell || !macrocellMeanBounds(lo,hi,lipschitz,mean,true))
+        mean=localMean ? meanRayBounds(lo,hi,options) : pointMeanBounds(lo,hi,lipschitz,true,true);
+    if(!mean.certified) throw NumericError(NumericStatus::InvalidMajorant,"uncertified coupled spatial bound");
+    // Enclose the two exponential-polynomial corrections with endpoint/vertex
+    // polynomial extrema. A final absolute Horner error covers coefficient,
+    // multiplication and endpoint roundoff without per-operation CRT calls.
+    const double a=inverseLength2_;
+    const double rlo=std::exp(-.5*a*hi*hi),rhi=std::exp(-.5*a*lo*lo);
+    const auto product=[&](std::pair<double,double> p) {
+        const double v[4]={p.first*rlo,p.first*rhi,p.second*rlo,p.second*rhi};
+        const double pad=1e-12*std::max(std::abs(p.first),std::abs(p.second))*rhi;
+        return std::pair<double,double>{bounds::down(*std::min_element(v,v+4)-pad),
+                                       bounds::up(*std::max_element(v,v+4)+pad)};
+    };
+    const auto correction=product(quadraticRange(deltaValue_,deltaSlope_,0,lo,hi));
+    const auto slopeCorrection=product(quadraticRange(deltaSlope_,-a*deltaValue_,-a*deltaSlope_,lo,hi));
+    const double kmin=bounds::down(mean.minimumDerivative+slopeCorrection.first);
+    const double kmax=bounds::up(mean.maximumDerivative+slopeCorrection.second);
+    double fmin=bounds::down(mean.minimumValue+correction.first),fmax=bounds::up(mean.maximumValue+correction.second);
+    const double middle=.5*lo+.5*hi,u=a*middle*middle;
+    double differenceError=0;
+    const double prior=std::isfinite(mean.midpointValue) ? mean.midpointValue : scalarMeanValue(middle,true);
+    const double center=u<1e-3
+        ? state_.birthValue+middle*deltaSlope_+meanValueDifference(middle,&differenceError)+
+          std::expm1(-.5*u)*(deltaValue_+middle*deltaSlope_)
+        : prior+std::exp(-.5*u)*(deltaValue_+middle*deltaSlope_);
+    const double pad=1e-12*(std::abs(prior)+std::abs(birthMean_.value)+std::abs(deltaValue_)+
+        std::abs(middle*deltaSlope_)+1e-30)+std::max(differenceError,mean.midpointError);
+    const double radius=upward(.5*(hi-lo)*std::max(std::abs(kmin),std::abs(kmax))+pad);
+    fmin=std::max(fmin,bounds::down(center-radius));fmax=std::min(fmax,bounds::up(center+radius));
+    const auto left=seFactors(a,lo),right=seFactors(a,hi);
+    const double smin=bounds::down(std::sqrt(sigma2_*left.valueVariance)/boundGuard);
+    const double smax=upward(std::sqrt(sigma2_*right.valueVariance));
+    if(!(smin>0)) throw NumericError(NumericStatus::NeedHigherPrecision,"coupled variance underflow");
+    const double gmin=std::max(0.,bounds::down(right.regression/boundGuard)),gmax=upward(left.regression);
+    const double z=bounds::down(fmin/(fmin<0 ? smin:smax));
+    const double mu=bounds::down(kmin-(fmax<0 ? gmin:gmax)*fmax-
+        1e-12*(std::abs(kmin)+gmax*std::abs(fmax)));
+    const double d=bounds::down(mu/(mu<0 ? smin:smax));
+    // N/V^2 is monotone from 1/3 to 1. The same stable positive series as the
+    // point law gives its right endpoint; the guard covers arithmetic error.
+    const double kappa=upward(std::sqrt(a*right.slopeVariance/right.valueVariance));
+    const double logR=z>-8 ? normalLogPdf(z)-normalLogCdf(z) : std::log1p(-z);
+    return std::min(parentMaximum,upward(std::exp(logR+logFluxUpper(d,kappa))));
+}
+
+ConditionalIntegralMajorant ConditionalFlightKernel::farIntegralMajorant(double lo,double hi,
+        double lipschitz,double gradientBound) const {
+    Profile::Scope profile(Profile::Stage::IntervalBound);
+    Profile::Scope detail(Profile::Stage::BoundLocalFar);
+    Profile::count(Profile::Counter::LocalFarBoundQueries);
+    if(!(lo>0 && hi>lo && hi<=maximumAgeInDomain()) || !(lipschitz>=0) || !std::isfinite(lipschitz) ||
+       !(gradientBound>=0) || !std::isfinite(gradientBound))
+        throw NumericError(NumericStatus::InvalidInput,"invalid Gaussian/linear tail interval");
+    using I=bounds::Interval;
+    const double q=(I(lo)*bounds::sqrt(I(inverseLength2_))).lower;
+    if(!(q>=2)) throw NumericError(NumericStatus::InvalidInput,"Gaussian/linear tail begins before two lengths");
+    if(!localFarBounds_.ready || lo<localFarBoundsAge_) {
+        localFarBounds_=makeFarBounds(q,32.0);localFarBoundsAge_=lo;
+    }
+    const auto &f=localFarBounds_;
+    const double value=scalarMeanValue(lo),slope=lipschitz==0 ? 0 : upward(lipschitz*state_.direction.norm());
+    const double error=upward(512*std::numeric_limits<double>::epsilon()*
+        (1+std::abs(value)+lipschitz*state_.birthPosition.norm()+slope*hi));
+    const double fmin=(I(value)-I(error)-I(f.valueCorrection)).lower;
+    const double fmax=(I(value)+I(error)+I(slope)*I(hi-lo)+I(f.valueCorrection)).upper;
+    const double mu=(I(-gradientBound*state_.direction.norm())-I(f.slopeCorrection)-
+        I(f.regressionMax)*I(std::max(0.,fmax))).lower;
+    const double slopeSd=upward(std::sqrt(sigma2_*inverseLength2_));
+    ConditionalIntegralMajorant result;
+    result.gaussianLinear=true;result.origin=lo;
+    result.z0=(I(fmin)/I(f.minimumSd,f.maximumSd)).lower;
+    result.beta=(I(slope)/I(f.minimumSd)).upper;
+    if(slope==0) result.beta=0;
+    result.constant=upward(ClassicGlobal::negativePartMean(mu,slopeSd)/f.minimumSd*(1+1e-5));
+    return result;
+}
+
 double ConditionalFlightKernel::localFarIntervalMajorant(double lo,double hi,double lipschitz,
-        double gradientBound,double parentMaximum) const {
+        double gradientBound,double parentMaximum,bool cache,bool macrocell) const {
     Profile::Scope profile(Profile::Stage::IntervalBound);
     Profile::Scope region(Profile::Stage::BoundLocalFar);
     Profile::Scope detail(Profile::Stage::BoundSimple);
@@ -453,16 +691,21 @@ double ConditionalFlightKernel::localFarIntervalMajorant(double lo,double hi,dou
     const double q=(I(lo)*bounds::sqrt(I(inverseLength2_))).lower;
     if(!(q>=2) || !std::isfinite(q))
         throw NumericError(NumericStatus::InvalidInput,"local far interval must begin beyond two directional lengths");
-    const auto mean=pointMeanBounds(lo,hi,lipschitz,true);
+    MeanRayBounds mean;
+    const bool useMacro=macrocell && macrocellMeanBounds(lo,hi,lipschitz,mean,false);
+    if(!useMacro) mean=pointMeanBounds(lo,hi,lipschitz,true);
     // Refresh from this interval's age, not the configured switching age.
     // Beyond 32 lengths retain the tiny certified residual at 32; this avoids
     // enormous polynomial arguments while preserving a conservative bound.
-    const auto f=makeFarBounds(q,32.0);
+    if(cache && (!localFarBounds_.ready || lo<localFarBoundsAge_)) {
+        localFarBounds_=makeFarBounds(q,32.0);localFarBoundsAge_=lo;
+    }
+    const auto f=cache ? localFarBounds_ : makeFarBounds(q,32.0);
     const I sd(f.minimumSd,f.maximumSd);
     const double fmin=(I(mean.minimumValue)-I(f.valueCorrection)).lower;
     const double fmax=(I(mean.maximumValue)+I(f.valueCorrection)).upper;
     const double zmin=(I(fmin)/sd).lower;
-    const double derivative=(I(-gradientBound)-I(f.slopeCorrection)-
+    const double derivative=(I(useMacro ? std::max(-gradientBound,mean.minimumDerivative):-gradientBound)-I(f.slopeCorrection)-
         I(0,f.regressionMax)*I(fmax)).lower;
     const double slopeSd=upward(bounds::sqrt(I(sigma2_)*I(inverseLength2_)).upper);
     // Use the same Mills ratio and crossing-flux functions as classic_global,
@@ -523,6 +766,47 @@ double ConditionalFlightKernel::simpleIntervalMajorant(double lo,double hi,doubl
     if(!std::isfinite(maximum) || maximum>std::numeric_limits<double>::max()/boundGuard)
         return parentMaximum;
     return std::min(parentMaximum,upward(maximum));
+}
+
+bool ConditionalFlightKernel::clipMacrocellInterval(double lo,double &hi) const {
+    if(!meanRay_ || !(hi>lo)) return false;
+    if(!(lo>=macrocellBegin_ && lo<macrocellEnd_)) {
+        // The active GP domain may be a 1e30 sentinel. Query only a finite
+        // forward cache window; coarseRayBounds clips it to the first block.
+        double end=std::min(maximumAgeInDomain(),lo+8/std::sqrt(inverseLength2_));
+        MeanRayBounds mean;
+        Profile::Scope detail(Profile::Stage::BoundSdfCoarse);
+        if(!meanRay_->coarseRayBounds(lo,end,mean) || !mean.certified || !(end>lo)) return false;
+        macrocellMean_=mean;macrocellBegin_=lo;macrocellEnd_=end;
+        macrocellMidpoint_=.5*lo+.5*end;
+    }
+    hi=std::min(hi,macrocellEnd_);
+    return true;
+}
+
+bool ConditionalFlightKernel::macrocellMeanBounds(double lo,double hi,double lipschitz,
+        MeanRayBounds &mean,bool transition) const {
+    double clipped=hi;
+    if(!clipMacrocellInterval(lo,clipped) || clipped<hi) return false;
+    mean=macrocellMean_;
+    const double middle=.5*lo+.5*hi;
+    if(middle!=macrocellMidpoint_ || !std::isfinite(mean.midpointValue)) {
+        mean.midpointValue=scalarMeanValue(middle,transition);
+        // Same conservative world-coordinate/provider allowance as pointMeanBounds.
+        mean.midpointError=upward(512*std::numeric_limits<double>::epsilon()*
+            (1+std::abs(mean.midpointValue)+lipschitz*state_.birthPosition.norm()+
+             lipschitz*state_.direction.norm()*hi));
+    }
+    const double global=upward(lipschitz*state_.direction.norm());
+    mean.minimumDerivative=std::max(mean.minimumDerivative,-global);
+    mean.maximumDerivative=std::min(mean.maximumDerivative,global);
+    const double slope=std::max(std::abs(mean.minimumDerivative),std::abs(mean.maximumDerivative));
+    const double radius=upward(.5*(hi-lo)*slope+mean.midpointError);
+    mean.minimumValue=std::max(mean.minimumValue,bounds::down(mean.midpointValue-radius));
+    mean.maximumValue=std::min(mean.maximumValue,bounds::up(mean.midpointValue+radius));
+    if(mean.minimumValue>mean.maximumValue || mean.minimumDerivative>mean.maximumDerivative)
+        throw NumericError(NumericStatus::InvalidMajorant,"inconsistent macrocell mean enclosure");
+    return true;
 }
 
 bool ConditionalFlightKernel::coarseMajorant(double lo,double &hi,double &maximum) const {
@@ -680,7 +964,7 @@ double ConditionalFlightKernel::boundedIntervalMajorant(const MeanRayBounds &mb,
     return result;
 }
 
-ConditionalBirthMajorant ConditionalFlightKernel::birthMajorant(double end) const {
+ConditionalBirthMajorant ConditionalFlightKernel::birthMajorant(double end,double positiveBirthLipschitz) const {
     Profile::Scope profile(Profile::Stage::BirthBound);
     Profile::count(state_.birthValue==0 ? Profile::Counter::ZeroBirths : Profile::Counter::PositiveBirths);
     if (!(end>=currentAge() && end<=maximumAgeInDomain()))
@@ -688,6 +972,35 @@ ConditionalBirthMajorant ConditionalFlightKernel::birthMajorant(double end) cons
     ConditionalBirthMajorant result;
     if (end==0.0) return result;
     const double a=inverseLength2_, ell=1.0/std::sqrt(a), f0=state_.birthValue;
+    if(f0>0 && std::isfinite(positiveBirthLipschitz)) {
+        if(!(positiveBirthLipschitz>=0))throw NumericError(NumericStatus::InvalidInput,"negative positive-birth Lipschitz bound");
+        // Unlike a zero birth, F0>0 needs no local curvature certificate.
+        // |mu(t)-F0| <= (L+|deltaSlope|)t + a*t^2/2*(|deltaValue|+t*|deltaSlope|).
+        // This remains valid across nonsmooth interpolation-cell boundaries.
+        const double L=upward(positiveBirthLipschitz*state_.direction.norm());
+        const double ds=std::abs(deltaSlope_),dv=std::abs(deltaValue_);
+        double h=std::min(end,.5*ell),deviation;
+        for(int i=0;;++i) {
+            deviation=upward(h*(L+ds)+.5*a*h*h*(dv+h*ds));
+            if(deviation<=.5*f0)break;
+            h*=.5;
+            if(i>=1024 || !(h>0))throw NumericError(NumericStatus::NeedHigherPrecision,"positive birth cannot advance");
+        }
+        const auto factors=bounds::seVarianceBounds(bounds::squaredKernelDistance(a,h));
+        const auto varianceScale=bounds::Interval(sigma2_)*bounds::Interval(a)*bounds::Interval(a);
+        const double vmin=(varianceScale*factors.scaledValue).lower/boundGuard;
+        const double vmax=upward((varianceScale*bounds::Interval(.5)).upper);
+        const double slope=upward(L+(1+a*h*h)*ds+a*h*dv);
+        // gamma<=2/t and A<=(-meanAtZero)+ + sd/sqrt(2*pi).
+        const double common=upward(2*(L+ds)+a*h*(dv+h*ds)+slope+
+            slopeStddevBound(sigma2_,a,h)*kInvSqrtTwoPi);
+        const double separation=(f0-deviation)/boundGuard;
+        result.split=result.smoothEnd=h;result.slope=state_.birthGradient.dot(state_.direction);
+        result.curvature=std::numeric_limits<double>::infinity();
+        result.maximum=envelopeMaximum(std::log(std::sqrt(2/kPi)*(2*f0+h*common)/std::sqrt(vmin)),
+            separation*separation/(2*vmax),3,4,h);
+        return result;
+    }
     // The first Taylor interval must lie inside one smooth interpolation cell.
     double smoothEnd=std::min(end,0.5*ell);
     const double firstBoundary=nextMeanBoundary(0.0,smoothEnd);

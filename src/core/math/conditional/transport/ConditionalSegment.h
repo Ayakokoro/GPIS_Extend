@@ -20,7 +20,12 @@ struct ConditionalTrackingSettings {
     double globalFarStartScale = 0.0; // 0 disables; >=2 replaces the entire far tail by one global SE bound
     double localFarStartScale = 0.0; // 0 disables; >=2 uses scalar geometric proposals and local Lipschitz/SE bounds
     bool transitionPointBounds = false; // after certified birth: scalar midpoint, full conditional moments, no grid clipping
-    double transitionMaxExpectedEvents = 4.0; // refine midpoint proposals by their certified optical depth
+    bool transitionIntegralBounds = false; // experimental C0+C1*s'/s transition; sample its analytic optical depth
+    bool coupledBounds = false; // age-scaled local derivative certificates, then midpoint certificates
+    bool farIntegralBounds = false; // Gaussian/linear Lipschitz envelope; refresh after each candidate
+    double coupledLocalScale = 0.5; // local spatial derivative bounds before this age / ell
+    double proposalScale = 1.0; // geometric proposal width multiplier
+    double transitionMaxExpectedEvents = 4.0; // 0 disables transition event-budget subdivision, including the global cap
     double shadowRouletteThreshold = 0.1; // classic_global shadow roulette; 0 disables
     double step = 0.0;                 // world distance; 0 selects stepScale*ell
     double stepScale = 0.5;            // multiple of the directional GP length
@@ -28,6 +33,9 @@ struct ConditionalTrackingSettings {
     double maxExpectedEvents = 64.0;   // refine when majorant*length exceeds this
     double tightenExpectedEvents = 4.0;// run expensive bound above this; 0 always
     int macrocellSize = 0;             // 0 disables; power-of-two cell width, 2..64
+    double macrocellMinExpectedEvents = 0; // query blocks only above this baseline optical cost
+    bool macrocellBounds = false;      // cached spatial certificates for coupled/far bounds
+    double macrocellStartScale = 0.25; // keep the analytic birth and optional fine prefix
     double macrocellMaxExpectedEvents = 1.0; // otherwise descend to fine cells
     double macrocellFarStartScale = 4.0; // distance from conditioning birth / directional ell
     double macrocellFarMaxExpectedEvents = 0.0; // 0 disables far-field relaxation
@@ -61,7 +69,7 @@ class ConditionalSegment {
     const SinglePointNeuralModel *_neuralModel=nullptr;
     std::unique_ptr<SinglePointNeuralFlight> _neuralFlight;
     double _hazardEnvelope=1;
-    double baselineMajorant(double begin, double end, double parentMaximum) const;
+    double baselineMajorant(double begin, double end, double parentMaximum,bool permitMacro=true) const;
     double correctedHazard(double t, ConditionalTrackingWork *work) const;
 public:
     ConditionalSegment(const GPSSField &field, const FlightState &birth,

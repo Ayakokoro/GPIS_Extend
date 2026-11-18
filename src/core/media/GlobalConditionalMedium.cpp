@@ -5,6 +5,7 @@
 #include "math/conditional/transport/DirectionalGradient.h"
 #include "math/conditional/transport/SinglePointNeural.h"
 #include "math/ConditionalProfile.hpp"
+#include "math/ConditionalRayProfile.hpp"
 #include "math/FirstPassageGradient.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
@@ -219,6 +220,11 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_global_far_start_scale",_tracking.globalFarStartScale);
     value.getField("tracking_local_far_start_scale",_tracking.localFarStartScale);
     value.getField("tracking_transition_point_bounds",_tracking.transitionPointBounds);
+    value.getField("tracking_transition_integral_bounds",_tracking.transitionIntegralBounds);
+    value.getField("tracking_coupled_bounds",_tracking.coupledBounds);
+    value.getField("tracking_far_integral_bounds",_tracking.farIntegralBounds);
+    value.getField("tracking_coupled_local_scale",_tracking.coupledLocalScale);
+    value.getField("tracking_proposal_scale",_tracking.proposalScale);
     value.getField("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents);
     value.getField("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold);
     _tracking.step=_trackingStep;
@@ -227,6 +233,9 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_max_expected_events",_tracking.maxExpectedEvents);
     value.getField("tracking_tighten_expected_events",_tracking.tightenExpectedEvents);
     value.getField("tracking_macrocell_size",_tracking.macrocellSize);
+    value.getField("tracking_macrocell_bounds",_tracking.macrocellBounds);
+    value.getField("tracking_macrocell_min_expected_events",_tracking.macrocellMinExpectedEvents);
+    value.getField("tracking_macrocell_start_scale",_tracking.macrocellStartScale);
     value.getField("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents);
     value.getField("tracking_macrocell_far_start_scale",_tracking.macrocellFarStartScale);
     value.getField("tracking_macrocell_far_max_expected_events",_tracking.macrocellFarMaxExpectedEvents);
@@ -261,6 +270,11 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_global_far_start_scale",_tracking.globalFarStartScale,allocator);
     value.AddMember("tracking_local_far_start_scale",_tracking.localFarStartScale,allocator);
     value.AddMember("tracking_transition_point_bounds",_tracking.transitionPointBounds,allocator);
+    value.AddMember("tracking_transition_integral_bounds",_tracking.transitionIntegralBounds,allocator);
+    value.AddMember("tracking_coupled_bounds",_tracking.coupledBounds,allocator);
+    value.AddMember("tracking_far_integral_bounds",_tracking.farIntegralBounds,allocator);
+    value.AddMember("tracking_coupled_local_scale",_tracking.coupledLocalScale,allocator);
+    value.AddMember("tracking_proposal_scale",_tracking.proposalScale,allocator);
     value.AddMember("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents,allocator);
     value.AddMember("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold,allocator);
     value.AddMember("tracking_step_scale",_tracking.stepScale,allocator);
@@ -268,6 +282,9 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_max_expected_events",_tracking.maxExpectedEvents,allocator);
     value.AddMember("tracking_tighten_expected_events",_tracking.tightenExpectedEvents,allocator);
     value.AddMember("tracking_macrocell_size",_tracking.macrocellSize,allocator);
+    value.AddMember("tracking_macrocell_bounds",_tracking.macrocellBounds,allocator);
+    value.AddMember("tracking_macrocell_min_expected_events",_tracking.macrocellMinExpectedEvents,allocator);
+    value.AddMember("tracking_macrocell_start_scale",_tracking.macrocellStartScale,allocator);
     value.AddMember("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents,allocator);
     value.AddMember("tracking_macrocell_far_start_scale",_tracking.macrocellFarStartScale,allocator);
     value.AddMember("tracking_macrocell_far_max_expected_events",_tracking.macrocellFarMaxExpectedEvents,allocator);
@@ -398,10 +415,21 @@ try
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
     // Geometry nearT suppresses self-intersections only. It must not cut out
     // part of the medium next to a collision or a transparent boundary.
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
+    cg::RayProfile::Flight rayProfile(c->birth,c->position,w,ray.farT()*speed,true,state.bounce);
+#endif
     cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz,_gradientBound);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
+    rayProfile.constructed();cg::RayProfile::Sampler recordingSampler(sampler);
+    cg::Random rng(recordingSampler); double t;
+#else
     cg::Random rng(sampler); double t;
+#endif
     cg::ConditionalTrackingWork neuralWork;
     const bool escaped=segment.track(rng,true,t,_singlePointNeural ? &neuralWork : nullptr)!=0;
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
+    rayProfile.finish(escaped ? 1 : 0,t);
+#endif
     if(_singlePointNeural) recordNeuralWork(neuralWork);
     if (state.distanceDiagnostic && state.distanceDiagnostic->collectFlight)
         state.distanceDiagnostic->flight["sampled_distance"] = t;
@@ -474,10 +502,21 @@ try
     observeBirth(state->distanceDiagnostic,*c,ray,_singlePointNeural);
     const double speed=eigen(ray.dir()).norm();
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
+    cg::RayProfile::Flight rayProfile(c->birth,c->position,w,ray.farT()*speed,false,state->bounce);
+#endif
     cg::ConditionalSegment segment(_field,c->birth,c->position,w,ray.farT()*speed,_tracking,_singlePointModel.get(),_lipschitz,_gradientBound);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
+    rayProfile.constructed();cg::RayProfile::Sampler recordingSampler(sampler);
+    cg::Random rng(recordingSampler); double t;
+#else
     cg::Random rng(sampler); double t;
+#endif
     cg::ConditionalTrackingWork neuralWork;
     const double tr=segment.track(rng,false,t,_singlePointNeural ? &neuralWork : nullptr);
+#if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
+    rayProfile.finish(tr,t);
+#endif
     if(_singlePointNeural) recordNeuralWork(neuralWork);
     auto next=std::make_shared<ConditionalPathContext>(*c);
     next->position=c->position+double(ray.farT())*speed*w; next->rayOrigin=ray.hitpoint();

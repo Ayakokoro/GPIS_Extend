@@ -31,6 +31,19 @@ struct ConditionalBirthMajorant {
     double curvature = 0.0;
 };
 
+// M(t)=constant+regressionCoefficient*s'(t)/s(t), in absolute flight age.
+// Certified only on the interval supplied to transitionIntegralMajorant().
+struct ConditionalIntegralMajorant {
+    double constant=0, regressionCoefficient=0, inverseLength2=1;
+    // GaussianLinear: constant * E(z0-beta*(t-origin)),
+    // E(z)=sqrt(2/pi)*exp(-z*z/2) for z>=0, sqrt(2/pi)-z otherwise.
+    bool gaussianLinear=false;
+    double origin=0,z0=0,beta=0;
+    double value(double age) const;
+    double integral(double begin,double end) const;
+    double inverseIntegral(double begin,double end,double opticalDepth) const;
+};
+
 struct ConditionalScalarStatistics {
     double meanF, varianceF, meanK, meanAtZero, varianceAtZero;
 };
@@ -48,7 +61,7 @@ public:
     // the latest observation this way; this is not a survival-conditioned GP.
     FlightState samplePositiveEndpoint(double age, Random& rng) const;
     ConditionalScalarStatistics scalarStatistics(double age) const;
-    ConditionalBirthMajorant birthMajorant(double end) const;
+    ConditionalBirthMajorant birthMajorant(double end,double positiveBirthLipschitz=std::numeric_limits<double>::infinity()) const;
     // One constant for every age >= begin, using precomputed global mean bounds.
     // Unlike twoSegmentMajorants(), this does not query any tail intervals.
     double constantTailMajorant(double begin) const;
@@ -69,6 +82,7 @@ public:
     }
     double nextMeanBoundary(double begin,double end) const;
     bool coarseMajorant(double begin,double &end,double &maximum) const;
+    bool clipMacrocellInterval(double begin,double &end) const;
     double meanValue(double age) const { return meanJet(age).value; }
     double scalarMeanValue(double age,bool transition=false) const;
     // Preserve signed conditional cancellation and exact moment bounds even
@@ -76,11 +90,17 @@ public:
     double transitionIntervalMajorant(double begin,double end,double meanLipschitz,
                                      double tightenExpectedEvents=4.0,
                                      double parentMaximum=std::numeric_limits<double>::infinity()) const;
+    ConditionalIntegralMajorant transitionIntegralMajorant(double begin,double end,
+                                                           double meanLipschitz) const;
+    double coupledIntervalMajorant(double begin,double end,double meanLipschitz,bool localMean,
+                                   double parentMaximum=std::numeric_limits<double>::infinity(),bool macrocell=false) const;
+    ConditionalIntegralMajorant farIntegralMajorant(double begin,double end,double meanLipschitz,
+                                                     double gradientBound) const;
     // Local midpoint/Lipschitz cone and an SE envelope refreshed at begin.
     // Uses direct scalar queries, no macrocell or fine-ray certificates.
     double localFarIntervalMajorant(double begin,double end,double meanLipschitz,
                                    double gradientBound,
-                                   double parentMaximum=std::numeric_limits<double>::infinity()) const;
+                                   double parentMaximum=std::numeric_limits<double>::infinity(),bool cache=false,bool macrocell=false) const;
     // Uses the same scalar field and conditional reducer as intervalMajorant,
     // replacing spatial interval propagation with a world-space Lipschitz cone.
     double pointIntervalMajorant(double begin,double end,double meanLipschitz,
@@ -101,6 +121,10 @@ private:
     PointStatistics &pointStatistics(double age) const;
     MeanRayBounds pointMeanBounds(double begin,double end,double meanLipschitz,bool scalarOnly=false,
                                  bool transition=false) const;
+    bool macrocellMeanBounds(double begin,double end,double lipschitz,MeanRayBounds &mean,bool transition) const;
+    mutable MeanRayBounds macrocellMean_;
+    mutable double macrocellBegin_=std::numeric_limits<double>::infinity(),macrocellEnd_=-1;
+    mutable double macrocellMidpoint_=0;
     double farIntervalMajorant(const MeanRayBounds &mean) const;
     double boundedIntervalMajorant(const MeanRayBounds &mean,double begin,double end,
                                   double tightenExpectedEvents,double parentMaximum,bool allowFarTail=true) const;
@@ -117,6 +141,8 @@ private:
     FarBounds makeFarBounds(double startScale,double maximumScale=8.0) const;
     double applyFarBounds(const MeanRayBounds &mean, const FarBounds &factors) const;
     mutable FarBounds farBounds_;
+    mutable FarBounds localFarBounds_;
+    mutable double localFarBoundsAge_=std::numeric_limits<double>::infinity();
     double simpleBoundStartScale_, simpleBoundBegin_=std::numeric_limits<double>::infinity();
     struct SimpleBounds {
         bool ready=false;

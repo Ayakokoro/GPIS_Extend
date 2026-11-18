@@ -9,6 +9,24 @@ namespace Tungsten::ConditionalGpis {
 class MajorantOpticalDepth {
     double remaining_ = -1.0; // negative means the next event needs a new draw
 public:
+    // Same residual clock for a nonconstant intensity. The caller supplies
+    // its integral on [begin,end] and the inverse of that cumulative integral.
+    template<typename Inverse>
+    bool advanceIntegrated(Random &rng,double begin,double end,double depth,
+                           const Inverse &inverse,double &candidate) {
+        if(!(depth>=0) || !std::isfinite(depth))
+            throw NumericError(NumericStatus::InvalidMajorant,"invalid integrated majorant");
+        if(depth==0) return false;
+        if(remaining_<0) remaining_=-std::log(rng.openUniform01());
+        if(remaining_==0) { candidate=begin;remaining_=-1;return true; }
+        if(remaining_>=depth) { remaining_-=depth;return false; }
+        const double next=inverse(remaining_);
+        if(next>=end) { remaining_=0;return false; }
+        if(!(next>begin) || !std::isfinite(next))
+            throw NumericError(NumericStatus::NeedHigherPrecision,"integrated conditional event cannot advance");
+        candidate=next;remaining_=-1;
+        return true;
+    }
     // maximum >= 0 and begin < end. On success, candidate is in [begin,end);
     // otherwise the residual optical depth is retained for the next interval.
     bool advance(Random &rng, double maximum, double begin, double end, double &candidate) {

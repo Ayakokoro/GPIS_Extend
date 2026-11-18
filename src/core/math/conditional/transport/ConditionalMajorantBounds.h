@@ -4,14 +4,35 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace Tungsten::ConditionalGpis::MajorantBounds {
 
 // Small outward-rounded intervals for majorant construction. Transcendentals
 // also receive a libm roundoff allowance; no changes to the global FP mode.
-inline double down(double x) { return std::nextafter(x,-std::numeric_limits<double>::infinity()); }
-inline double up(double x) { return std::nextafter(x,std::numeric_limits<double>::infinity()); }
+// The value of nextafter(x,+/-infinity), inlined for IEEE binary64. Avoid a
+// CRT call for each arithmetic endpoint (hundreds per spatial certificate).
+// No code here depends on nextafter's errno or floating exception side effects.
+inline double down(double x) {
+    if constexpr(std::numeric_limits<double>::is_iec559 && sizeof(double)==sizeof(std::uint64_t)) {
+        if(std::isnan(x) || x==-std::numeric_limits<double>::infinity()) return x;
+        if(x==0) return -std::numeric_limits<double>::denorm_min();
+        std::uint64_t bits;std::memcpy(&bits,&x,sizeof x);
+        bits+=x>0 ? std::uint64_t(-1) : std::uint64_t(1);
+        std::memcpy(&x,&bits,sizeof x);return x;
+    } else return std::nextafter(x,-std::numeric_limits<double>::infinity());
+}
+inline double up(double x) {
+    if constexpr(std::numeric_limits<double>::is_iec559 && sizeof(double)==sizeof(std::uint64_t)) {
+        if(std::isnan(x) || x==std::numeric_limits<double>::infinity()) return x;
+        if(x==0) return std::numeric_limits<double>::denorm_min();
+        std::uint64_t bits;std::memcpy(&bits,&x,sizeof x);
+        bits+=x>0 ? std::uint64_t(1) : std::uint64_t(-1);
+        std::memcpy(&x,&bits,sizeof x);return x;
+    } else return std::nextafter(x,std::numeric_limits<double>::infinity());
+}
 struct Interval {
     double lower,upper;
     Interval(double x=0) : lower(x),upper(x) {}

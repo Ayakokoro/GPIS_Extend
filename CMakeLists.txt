@@ -449,6 +449,10 @@ if (OpenVDB_FOUND AND TBB_FOUND AND nanovdb_FOUND)
     target_link_libraries(surface_probe PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
     add_executable(ray_extinction_probe EXCLUDE_FROM_ALL tools/surface_compare/ray_extinction.cpp)
     target_link_libraries(ray_extinction_probe PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    add_executable(slabs_ray_profiles EXCLUDE_FROM_ALL tools/surface_compare/slabs_ray_profiles.cpp)
+    target_link_libraries(slabs_ray_profiles PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+    add_executable(slabs_transmittance_samples EXCLUDE_FROM_ALL tools/surface_compare/slabs_transmittance_samples.cpp)
+    target_link_libraries(slabs_transmittance_samples PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
     add_executable(surface_path_trace EXCLUDE_FROM_ALL tools/surface_compare/path_trace.cpp)
     target_link_libraries(surface_path_trace PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
     add_executable(surface_bounce_images EXCLUDE_FROM_ALL tools/surface_compare/bounce_images.cpp)
@@ -540,6 +544,65 @@ endif()
 
 add_executable(tungsten src/tungsten/tungsten.cpp)
 target_link_libraries(tungsten ${core_libs})
+# Standalone diagnostics reuse the normal core but recompile every translation
+# unit including ConditionalProfile.hpp (directly or via majorant bounds).
+# Explicit executable objects precede core.lib, so its original copies are not
+# extracted. The public transport interfaces/layouts are unchanged. Keep the
+# uninstrumented twin for image parity and timings without profiler overhead.
+add_executable(tungsten_tracking_benchmark EXCLUDE_FROM_ALL src/tungsten/tungsten.cpp)
+target_link_libraries(tungsten_tracking_benchmark PRIVATE ${core_libs})
+add_executable(tungsten_tracking_profile EXCLUDE_FROM_ALL
+    src/tungsten/tungsten.cpp
+    src/core/media/GlobalConditionalMedium.cpp
+    src/core/media/GpisSdfGrid.cpp
+    src/core/math/SdfFunctionsQueries.cpp
+    src/core/math/SingleHistoryFlight.cpp
+    src/core/math/conditional/transport/ConditionalFlightKernel.cpp
+    src/core/math/conditional/transport/ConditionalSegment.cpp)
+target_compile_definitions(tungsten_tracking_profile PRIVATE TUNGSTEN_ENABLE_CONDITIONAL_PROFILE=1)
+target_link_libraries(tungsten_tracking_profile PRIVATE ${core_libs})
+add_executable(conditional_threshold_sweep EXCLUDE_FROM_ALL tools/surface_compare/threshold_sweep.cpp)
+target_link_libraries(conditional_threshold_sweep PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+add_executable(conditional_threshold_sweep_profile EXCLUDE_FROM_ALL
+    tools/surface_compare/threshold_sweep.cpp
+    src/core/media/GlobalConditionalMedium.cpp
+    src/core/media/GpisSdfGrid.cpp
+    src/core/math/SdfFunctionsQueries.cpp
+    src/core/math/SingleHistoryFlight.cpp
+    src/core/math/conditional/transport/ConditionalFlightKernel.cpp
+    src/core/math/conditional/transport/ConditionalSegment.cpp)
+target_compile_definitions(conditional_threshold_sweep_profile PRIVATE TUNGSTEN_ENABLE_CONDITIONAL_PROFILE=1)
+target_link_libraries(conditional_threshold_sweep_profile PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+add_executable(conditional_transition_benchmark EXCLUDE_FROM_ALL
+    tools/surface_compare/transition_integral_experiment.cpp)
+target_link_libraries(conditional_transition_benchmark PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+add_executable(conditional_transition_experiment EXCLUDE_FROM_ALL
+    tools/surface_compare/transition_integral_experiment.cpp
+    src/core/media/GlobalConditionalMedium.cpp
+    src/core/media/GpisSdfGrid.cpp
+    src/core/math/SdfFunctionsQueries.cpp
+    src/core/math/SingleHistoryFlight.cpp
+    src/core/math/conditional/transport/ConditionalFlightKernel.cpp
+    src/core/math/conditional/transport/ConditionalSegment.cpp)
+target_compile_definitions(conditional_transition_experiment PRIVATE TUNGSTEN_ENABLE_CONDITIONAL_PROFILE=1)
+target_link_libraries(conditional_transition_experiment PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+add_executable(conditional_slow_rays EXCLUDE_FROM_ALL
+    tools/surface_compare/transition_integral_experiment.cpp
+    src/core/media/GlobalConditionalMedium.cpp
+    src/core/media/GpisSdfGrid.cpp
+    src/core/math/SdfFunctionsQueries.cpp
+    src/core/math/SingleHistoryFlight.cpp
+    src/core/math/conditional/transport/ConditionalFlightKernel.cpp
+    src/core/math/conditional/transport/ConditionalSegment.cpp)
+target_compile_definitions(conditional_slow_rays PRIVATE
+    TUNGSTEN_ENABLE_CONDITIONAL_PROFILE=1 TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE=1)
+target_link_libraries(conditional_slow_rays PRIVATE ${core_libs} nlohmann_json::nlohmann_json)
+if (TARGET tungsten_gp_cuda_pathtracer)
+    foreach(diagnostic tungsten_tracking_benchmark tungsten_tracking_profile)
+        target_compile_definitions(${diagnostic} PRIVATE TUNGSTEN_ENABLE_CUDA=1)
+        target_link_libraries(${diagnostic} PRIVATE tungsten_gp_cuda_pathtracer)
+    endforeach()
+endif()
 if (TARGET tungsten_gp_cuda_pathtracer)
     target_compile_definitions(tungsten PRIVATE TUNGSTEN_ENABLE_CUDA=1)
     target_link_libraries(tungsten tungsten_gp_cuda_pathtracer)

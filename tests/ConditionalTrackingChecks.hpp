@@ -17,6 +17,8 @@ inline void trackingChecks()
     globalFarChecks();
     localFarChecks();
     transitionPointChecks();
+    transitionIntegralChecks();
+    coupledTransitionChecks();
     shadowRouletteChecks();
     pointLipschitzTrackingChecks();
     simpleBoundTrackingChecks();
@@ -143,7 +145,10 @@ inline void trackingChecks()
     check(makeMedium(R"("tracking_shadow_roulette_threshold":0)")->trackingSettings().shadowRouletteThreshold==0,
         "zero threshold disables shadow roulette");
     for(const char *invalid : {R"("tracking_classic_start_scale":-1)",
-            R"("tracking_transition_max_expected_events":0)",
+            R"("tracking_coupled_local_scale":-1)",R"("tracking_proposal_scale":0)",
+            R"("tracking_far_integral_bounds":true)",
+            R"("tracking_coupled_bounds":true,"tracking_transition_integral_bounds":true)",
+            R"("tracking_majorant":"two_constants","tracking_coupled_bounds":true)",
             R"("tracking_transition_max_expected_events":-1)",
             R"("tracking_majorant":"two_constants","tracking_transition_point_bounds":true)",
             R"("tracking_local_far_start_scale":1.99)",
@@ -167,7 +172,7 @@ inline void trackingChecks()
         try { makeMedium(invalid); } catch(const std::exception &) { rejected=true; }
         check(rejected,"invalid tracking configuration must fail during loading");
     }
-    for(auto member : {&Settings::localFarStartScale,&Settings::globalFarStartScale,&Settings::simpleBoundStartScale,&Settings::classicStartScale,&Settings::shadowRouletteThreshold,&Settings::farBoundStartScale,&Settings::constantBirthLength,&Settings::step,&Settings::stepScale,&Settings::ageScale,
+    for(auto member : {&Settings::coupledLocalScale,&Settings::proposalScale,&Settings::localFarStartScale,&Settings::globalFarStartScale,&Settings::simpleBoundStartScale,&Settings::classicStartScale,&Settings::shadowRouletteThreshold,&Settings::farBoundStartScale,&Settings::constantBirthLength,&Settings::step,&Settings::stepScale,&Settings::ageScale,
             &Settings::maxExpectedEvents,&Settings::tightenExpectedEvents,&Settings::macrocellMaxExpectedEvents,
             &Settings::macrocellFarStartScale,&Settings::macrocellFarMaxExpectedEvents})
         for(double invalid : {-1.0,std::numeric_limits<double>::infinity(),

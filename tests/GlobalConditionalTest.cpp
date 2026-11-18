@@ -453,6 +453,8 @@ int main(int argc,char **argv)
         if(stage=="knob"||stage=="all") knobChecks();
         if(stage=="bounds"||stage=="all") boundChecks();
         if(stage=="tracking"||stage=="all") trackingChecks();
+        if(stage=="transition_integral") { opticalDepthChecks();transitionPointChecks();transitionIntegralChecks(); }
+        if(stage=="coupled") { opticalDepthChecks();coupledTransitionChecks(); }
         if(stage=="tracking_probe") { check(argc>2,"missing probe scene");trackingProbe(argv[2]); }
         if(stage=="tracking_split_probe") { check(argc>2,"missing probe scene");trackingProbe(argv[2],true); }
         if(stage=="image"||stage=="furnace") {check(argc>2,"missing image");imageCheck(argv[2],stage=="furnace");}

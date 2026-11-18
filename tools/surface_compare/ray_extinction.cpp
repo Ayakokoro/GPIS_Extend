@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -55,6 +56,7 @@ double horizon(const V &o,const V &w,const V &lo,const V &hi) {
     return b;
 }
 struct FrozenRay {cg::FlightState birth;double length=0;J sampledEvent;};
+#include "ray_majorants.hpp"
 int main(int argc,char **argv) {
     try {
         if(argc!=3)throw std::runtime_error("Usage: ray_extinction_probe spec.json curves.json");
@@ -62,7 +64,9 @@ int main(int argc,char **argv) {
         const std::string path=spec.at("scene");const J source=read(path);
         J definition=source.at("media").at(0);definition["type"]="global_conditional";
         definition["fp_gradient"]={{"enabled",false}};
+        std::cout<<"Loading conditional mean and preparing field"<<std::endl;
         Scene scene;auto conditional=std::dynamic_pointer_cast<GlobalConditionalMedium>(medium(scene,definition,path));
+        std::cout<<"Field prepared; selecting frozen camera/reflection path"<<std::endl;
         const V lo=vector(spec.at("box_min")),hi=vector(spec.at("box_max"));
         JsonDocument cd(Path(path),source.at("camera").dump());
         PinholeCamera camera;camera.fromJson(cd,scene);camera.prepareForRender();
@@ -108,12 +112,14 @@ int main(int argc,char **argv) {
             {"camera_origin",json(cameraOrigin)},{"camera_direction",json(cameraDirection)},
             {"birth_source_length_scale",definition.at("gaussian_process").at("covariance").at("lengthScale")},
             {"note","Birth jets and rays sampled once with the production camera, exterior, distance and mirror phase laws. "
-                "The two length scales reuse these exact birth observations and geometric rays. No NEE/roulette RNG draws. "
+                "All requested length scales reuse these exact birth observations and geometric rays. No NEE/roulette RNG draws. "
                 "Profiles continue virtually beyond a sampled GP event without renewal, until the next box/floor boundary. "
                 "At t=0 the conditional renderer returns its exact-zero convention; positive t is exported separately."},
             {"rays",J::array()},{"checks",{{"all_finite_nonnegative",true}}}};
         const int denominator=spec.value("denominator",16384);
         if(denominator<256||denominator>262144)throw std::runtime_error("Invalid curve denominator");
+        std::map<double,std::shared_ptr<ClassicGlobalMedium>> classicCache;
+        std::map<double,std::shared_ptr<GlobalConditionalMedium>> conditionalCache;
         for(size_t ri=0;ri<rays.size();++ri) {
             const auto &ray=rays[ri];
             J record={{"kind",ri==0?"camera_entry":"first_reflection"},
@@ -123,9 +129,27 @@ int main(int argc,char **argv) {
                 {"length",ray.length},{"sampled_event",ray.sampledEvent},{"profiles",J::array()}};
             for(double ell:spec.at("length_scales")) {
                 auto modified=definition;modified["gaussian_process"]["covariance"]["lengthScale"]=ell;
-                auto cm=std::dynamic_pointer_cast<GlobalConditionalMedium>(medium(scene,modified,path));
-                modified["type"]="classic_global";auto classic=medium(scene,modified,path);
+                auto &cm=conditionalCache[ell];
+                if(!cm) cm=ell==definition["gaussian_process"]["covariance"]["lengthScale"].get<double>()
+                    ? conditional : std::dynamic_pointer_cast<GlobalConditionalMedium>(medium(scene,modified,path));
+                modified["type"]="classic_global";
+                auto &classic=classicCache[ell];if(!classic) {
+                    if(spec.value("reuse_loaded_mean",false)) {
+                        // The conditional medium inherits the unmodified public
+                        // classic extinction/mean functions. Share the immutable
+                        // VDB while still evaluating both production code paths.
+                        classic=cm;
+                    } else {
+                        std::cout<<"Loading shared-mean classic reference"<<std::endl;
+                        classic=medium(scene,modified,path);
+                    }
+                }
                 const auto &field=cm->field();cg::ConditionalFlightKernel kernel(field,ray.birth);
+                J bounds;
+                if(spec.value("export_majorants",false)) {
+                    std::cout<<"Exporting majorants for ray "<<ri<<std::endl;
+                    bounds=exportMajorants(field,ray.birth,ray.length,*classic);
+                }
                 std::set<double> times{0,ray.length};
                 for(int i=1;i<denominator;++i)times.insert(ray.length*i/denominator);
                 // Resolve both the near-birth singular scaling and SDF surface
@@ -134,6 +158,16 @@ int main(int argc,char **argv) {
                     const double t=ell*std::pow(10.,-7.+8.*i/512);if(t<ray.length)times.insert(t);
                 }
                 if(ray.sampledEvent.contains("distance"))times.insert(ray.sampledEvent.at("distance").get<double>());
+                if(!bounds.is_null()) {
+                    // Verify each leaf internally and on both sides of every knot.
+                    for(const auto &name:{"classic","old_three","current_two"})
+                        for(const auto &b:bounds[name]) {
+                            const double a=b["begin"],z=b["end"];
+                            for(int j=0;j<=8;++j)times.insert(a+(z-a)*j/8.);
+                            if(a>0)times.insert(std::nextafter(a,0.));
+                            if(z<ray.length)times.insert(std::nextafter(z,ray.length));
+                        }
+                }
                 const double axialVariance=ray.birth.direction.dot(field.kernel.gradientCovarianceAtZero()*ray.birth.direction);
                 J points=J::array();double maxMeanError=0,maxHazardError=0;
                 for(double t:times) {
@@ -144,6 +178,12 @@ int main(int argc,char **argv) {
                     maxMeanError=std::max(maxMeanError,std::abs(mean.value-classic->meanValue(vecd(p))));
                     J row={{"t",t},{"mean",mean.value},{"mean_derivative",ray.birth.direction.dot(mean.gradient)},
                         {"mean_gradient_norm",mean.gradient.norm()},{"classic",a},{"conditional",h}};
+                    if(spec.contains("procedural_translation")) {
+                        const auto reference=SdfFunctions::evaluateJet(SdfFunctions::Function::Knob,
+                            p-vector(spec["procedural_translation"]));
+                        row["procedural_mean"]=reference.value;
+                        row["classic_mean"]=classic->meanValue(vecd(p));
+                    }
                     if(t>0) {
                         const auto s=kernel.scalarStatistics(t);
                         const double sd=std::sqrt(s.varianceF),sdAtZero=std::sqrt(s.varianceAtZero);
@@ -160,7 +200,8 @@ int main(int argc,char **argv) {
                 if(maxMeanError>1e-10||maxHazardError>1e-8)throw std::runtime_error("Shared mean / scalar hazard cross-check failed");
                 record["profiles"].push_back({{"length_scale",ell},{"sigma",field.kernel.sigma()},
                     {"max_mean_error",maxMeanError},{"max_hazard_formula_error",maxHazardError},{"points",points}});
-                cm->teardownAfterRender();classic->teardownAfterRender();
+                if(!bounds.is_null())record["profiles"].back()["majorants"]=bounds;
+                std::cout<<"Verified "<<points.size()<<" profile points for ray "<<ri<<std::endl;
             }
             output["rays"].push_back(std::move(record));
         }
@@ -178,6 +219,9 @@ int main(int argc,char **argv) {
             {"denominator",n},{"extent",extent},{"values",values}};
         const auto target=std::filesystem::absolute(argv[2]);std::filesystem::create_directories(target.parent_path());
         std::ofstream f(target);f<<output.dump();if(!f)throw std::runtime_error("Cannot write curves");
+        for(auto &entry:conditionalCache)if(entry.second!=conditional)entry.second->teardownAfterRender();
+        for(auto &entry:classicCache)
+            if(entry.second!=conditionalCache.at(entry.first))entry.second->teardownAfterRender();
         conditional->teardownAfterRender();std::cout<<"Saved frozen camera and first-reflection curves to "<<target<<'\n';
         return 0;
     }catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
