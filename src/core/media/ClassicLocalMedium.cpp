@@ -50,14 +50,7 @@ void ClassicLocalMedium::fromJson(JsonPtr value,const Scene &scene) {
     JsonSerializable::fromJson(value,scene);
     for (const char *key : {"gaussian_process","phase_function","transmittance","sigma_a","sigma_s","alpha_grid"})
         if (value[key]) value.parseError(std::string("classic_local does not use '")+key+"'; use field and stationary covariance");
-    const auto field=value.getRequiredMember("field");
-    _file=scene.fetchResource(field.getRequiredMember("file"));
-    field.getField("sdf_grid",_sdfName); field.getField("density_grid",_densityName);
-    field.getField("transform",_fieldToWorld); field.getField("macrocell_size",_macrocellSize);
-    if (field["alpha_grid"] || field["use_alpha_grid"])
-        field.parseError("classic_local stationary mode takes gradient covariance from the kernel, not an alpha grid");
-    if (_sdfName.empty() || _densityName.empty() || _macrocellSize<1 || _macrocellSize>64)
-        field.parseError("classic_local: nonempty grid names and macrocell_size in [1,64] are required");
+    _field.fromJson(value.getRequiredMember("field"),scene);
     _covariance=scene.fetchCovarianceFunction(value.getRequiredMember("covariance"));
     if (!_covariance->isStationaryKernel()) value.parseError("classic_local requires a stationary kernel");
     if (auto material=value["material"]) {
@@ -84,14 +77,13 @@ rapidjson::Value ClassicLocalMedium::toJson(Allocator &allocator) const {
     if (_materialType=="mirror") material.add("albedo",_mirrorAlbedo);
     else material.add("eta",_eta,"k",_k,"force_unit_fresnel",_forceUnitFresnel);
     return JsonObject{JsonSerializable::toJson(allocator),allocator,
-        "type","classic_local","field",JsonObject{allocator,"file",*_file,
-            "sdf_grid",_sdfName,"density_grid",_densityName,"transform",_fieldToWorld,"macrocell_size",_macrocellSize},
+        "type","classic_local","field",_field.toJson(allocator),
         "covariance",*_covariance,"material",rapidjson::Value(material),"max_bounces",_maxBounce};
 }
 
 void ClassicLocalMedium::loadResources() {
     _covariance->loadResources();
-    _grid=std::make_unique<ClassicLocalGrid>(_file->absolute().asString(),_sdfName,_densityName,_fieldToWorld,_macrocellSize);
+    _grid=_field.load();
 }
 void ClassicLocalMedium::prepareForRender() {
     if (!_grid) throw std::runtime_error("classic_local: loadResources must precede prepareForRender");

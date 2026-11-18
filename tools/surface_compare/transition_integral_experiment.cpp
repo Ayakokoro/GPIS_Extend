@@ -3,6 +3,7 @@
 #include "media/GpisSdfGrid.hpp"
 #include "integrators/path_tracer/PathTraceIntegrator.hpp"
 #include "io/Scene.hpp"
+#include "io/JsonDocument.hpp"
 #include "thread/ThreadUtils.hpp"
 #include "thread/ThreadPool.hpp"
 #include "math/ConditionalProfile.hpp"
@@ -101,6 +102,13 @@ int main(int argc,char **argv) {
         // tracking modes only between joined renders.
         auto &tracking=const_cast<cg::ConditionalTrackingSettings &>(medium->trackingSettings());
         const auto originalTracking=tracking;
+        std::unique_ptr<ClassicLocalGrid> alternateBand;
+        if (spec.contains("alternate_band")) {
+            JsonDocument fieldDocument(Path(argv[1]),spec.at("alternate_band").dump());
+            ClassicLocalField field;
+            field.fromJson(fieldDocument,*scene);
+            alternateBand=field.load();
+        }
         const double initializationSeconds=seconds(loading);
         if(spec.contains("ray_files"))exportIntegralRays(spec,output,medium->field());
         J report={{"spec",spec},{"initialization_seconds",initializationSeconds},{"runs",J::array()}};
@@ -130,6 +138,14 @@ int main(int argc,char **argv) {
             tracking.macrocellMinExpectedEvents=run.value("macro_min_events",originalTracking.macrocellMinExpectedEvents);
             tracking.macrocellStartScale=run.value("macro_start",originalTracking.macrocellStartScale);
             tracking.macrocellSize=run.value("macro_size",originalTracking.macrocellSize);
+            tracking.exteriorCutoffSigma=run.value("exterior_cutoff_sigma",originalTracking.exteriorCutoffSigma);
+            if (run.value("use_alternate_band",false)) {
+                require(bool(alternateBand),"Run requires an alternate_band field in the specification");
+                tracking.classicLocalBand=alternateBand.get();
+            }
+            if (!run.value("use_classic_local_band",tracking.classicLocalBand!=nullptr))
+                tracking.classicLocalBand=nullptr;
+            else require(tracking.classicLocalBand!=nullptr,"Requested a baked band absent from the scene");
             tracking.validate();
             double macroBuildSeconds=0;
             if(tracking.macrocellBounds) {

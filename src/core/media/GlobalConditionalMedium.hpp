@@ -1,5 +1,6 @@
 #pragma once
 #include "ClassicGlobalMedium.hpp"
+#include "ClassicLocalGrid.hpp"
 #include "math/FirstPassageGradient.hpp"
 #include "math/conditional/transport/ConditionalSegment.h"
 #include "math/conditional/transport/FixedSpeedGradientDistribution.hpp"
@@ -34,6 +35,8 @@ struct ConditionalEventContext final : MediumEventContext {
 class GlobalConditionalMedium final : public ClassicGlobalMedium {
     ConditionalGpis::GPSSField _field;
     ConditionalGpis::ConditionalTrackingSettings _tracking;
+    std::optional<ClassicLocalField> _bandField;
+    std::unique_ptr<ClassicLocalGrid> _bandGrid;
     ConditionalNonGpSurfacePolicy _nonGpSurfacePolicy = ConditionalNonGpSurfacePolicy::RetainEndpoint;
     bool _fpGradient = false, _bridgeCorrection = true;
     FirstPassageGradient::AnchorSelection _anchorSelection = FirstPassageGradient::AnchorSelection::Fixed5Snr;

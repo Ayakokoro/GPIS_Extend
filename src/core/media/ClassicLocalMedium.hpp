@@ -1,5 +1,6 @@
 #pragma once
 #include "Medium.hpp"
+#include "ClassicLocalGrid.hpp"
 #include "math/ClassicGlobalMath.hpp"
 #include "math/Mat4f.hpp"
 #include "io/Path.hpp"
@@ -10,10 +11,8 @@ class CovarianceFunction;
 
 // Baked density with a local unit mean gradient and one stationary covariance.
 class ClassicLocalMedium final : public Medium {
-    PathPtr _file;
-    std::string _sdfName="sdf", _densityName="density", _materialType="conductor";
-    Mat4f _fieldToWorld;
-    int _macrocellSize=8;
+    ClassicLocalField _field;
+    std::string _materialType="conductor";
     std::shared_ptr<CovarianceFunction> _covariance;
     std::unique_ptr<ClassicLocalGrid> _grid;
     std::unique_ptr<ClassicGlobal::GaussianNdf> _ndf;

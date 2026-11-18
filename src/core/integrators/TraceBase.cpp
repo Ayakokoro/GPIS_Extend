@@ -203,6 +203,7 @@ inline Vec3f TraceBase::generalizedShadowRayImpl(PathSampleGenerator &sampler,
         if (nextMedium != medium || !mediumStateIter.pathContext)
             mediumStateIter = mediumStateIterBlank;
         medium = nextMedium;
+        mediumStateIter.startsAtScatteringSurface = false;
         startsOnSurface = true;
 
         ray.setPos(ray.hitpoint());
@@ -325,6 +326,7 @@ bool TraceBase::advanceShadow(ShadowState &shadow, PathSampleGenerator &sampler,
             if (nextMedium != shadow.medium || !shadow.state.pathContext)
                 shadow.state = shadow.blankState;
             shadow.medium = nextMedium;
+            shadow.state.startsAtScatteringSurface = false;
             shadow.startsOnSurface = true;
             shadow.ray.setPos(shadow.ray.hitpoint());
             shadow.initialFarT -= shadow.ray.farT();
@@ -1011,6 +1013,7 @@ void TraceBase::beginSurface(SurfaceState &surface, SurfaceScatterEvent &event,
     Vec3f transparency = event.info->bsdf->eval(event.makeForwardEvent(), false);
     float transparencyScalar = transparency.avg();
     surface.forward = event.sampler->nextBoolean(transparencyScalar);
+    mediumState.startsAtScatteringSurface = !surface.forward;
     if (surface.forward) {
         surface.wo = ray.dir();
         event.pdf = transparencyScalar;
@@ -1055,6 +1058,7 @@ bool TraceBase::finishSurface(SurfaceState &surface, SurfaceScatterEvent &event,
     medium = info.primitive->selectMedium(medium, geometricBackside);
     if (mediumState.pathContext ? medium != previousMedium : geometricBackside != (wi.dot(info.Ng) < 0.0f))
         mediumState.reset();
+    mediumState.startsAtScatteringSurface = !surface.forward;
     if (!surface.forward)
         beginEllipsoidSurfaceFlight(medium,mediumState);
     ray = ray.scatter(ray.hitpoint(), surface.wo, info.epsilon);

@@ -57,6 +57,18 @@ public:
         remaining_ = -1.0;
         return true;
     }
+
+    // Keep the clock in interval-local coordinates. Distinct events may round
+    // to the same ray position while their offsets and optical depths advance.
+    bool advanceFromOffset(Random &rng, double maximum, double begin, double end,
+                           double &offset, double &candidate) {
+        if (!advance(rng, maximum, offset, end - begin, offset))
+            return false;
+        candidate = begin + offset;
+        if (candidate >= end)
+            candidate = std::nextafter(end, begin);
+        return true;
+    }
 };
 
 }

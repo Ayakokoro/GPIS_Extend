@@ -62,6 +62,20 @@ inline void opticalDepthChecks()
     check(rounded.advance(roundedRng,1,face,2,t) && t==face && roundedSampler.calls==1,
         "rounded face neither discards nor resamples its event");
 
+    // Three mathematical events fit between adjacent representable coordinates.
+    // Each gets a distinct offset and is evaluated inside its own half-open interval.
+    OpticalDepthSampler subUlpSampler({.5f,.5f,.5f,.5f});
+    cg::Random subUlpRng(subUlpSampler);
+    cg::MajorantOpticalDepth localClock;
+    double offset=0;
+    for (int i=1;i<=3;++i) {
+        check(localClock.advanceFromOffset(subUlpRng,1e16,1,face,offset,t) && t==1,
+            "sub-ULP candidate remains in its interval");
+        close(offset,i*log2/1e16,1e-30,"sub-ULP free paths accumulate");
+    }
+    check(!localClock.advanceFromOffset(subUlpRng,1e16,1,face,offset,t) && subUlpSampler.calls==4,
+        "sub-ULP candidates consume each exponential once");
+
     // For a fixed rate, subdivision must preserve both candidate locations and
     // RNG consumption. This comparison uses no transport majorant implementation.
     const auto events=[&](int partitions) {

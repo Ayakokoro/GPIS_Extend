@@ -1,5 +1,6 @@
 #include "media/ClassicLocalMedium.hpp"
 #include "media/ClassicLocalGrid.hpp"
+#include "math/conditional/transport/ConditionalSegment.h"
 #include "io/JsonDocument.hpp"
 #include "io/Scene.hpp"
 #include "io/ImageIO.hpp"
@@ -31,7 +32,7 @@ double area(const V &mean,const V &w,double s=1) {
 }
 double density(const V &p) { return 0.8+0.03*(p.x()+0.4)/0.25+0.01*(p.y()-0.2)/0.25; }
 
-void fixture(const std::filesystem::path &path,bool negative=false,bool flat=false) {
+void fixture(const std::filesystem::path &path,bool negative=false,bool flat=false,bool twoBands=false) {
     nanovdb::tools::build::Grid<float> sdf(0.0f,"sdf"),rho(0.0f,"density"),alpha(0.0f,"alpha");
     for (auto *grid:{&sdf,&rho,&alpha}) grid->setTransform(0.25,nanovdb::Vec3d(-0.4,0.2,0.1));
     auto &s=sdf.getAccessor(); auto &d=rho.getAccessor(); auto &a=alpha.getAccessor();
@@ -39,7 +40,8 @@ void fixture(const std::filesystem::path &path,bool negative=false,bool flat=fal
         const nanovdb::Coord index(i,j,k);
         const V p(-0.4+0.25*i,0.2+0.25*j,0.1+0.25*k);
         s.setValue(index,float(flat ? 2 : 0.3*p.x()+2*p.z()));
-        d.setValue(index,float(negative && i==1 && j==1 && k==1 ? -1 : density(p)));
+        const double rho=twoBands && i!=-2 && i!=5 ? 0 : density(p);
+        d.setValue(index,float(negative && i==1 && j==1 && k==1 ? -1 : rho));
         // Deliberately varying: stationary mode must never use this channel.
         a.setValue(index,float(0.001+0.1*(i+3)));
     }
@@ -63,8 +65,22 @@ std::shared_ptr<ClassicLocalMedium> parse(const std::string &json) {
 }
 void gridChecks(const std::filesystem::path &file) {
     int intervals=0;
-    for (int width:{1,4,8}) {
-        ClassicLocalGrid grid(file.generic_string(),"sdf","density",Mat4f(),width);
+    for (int width:{1,4,8,0}) {
+        ClassicLocalGrid grid(file.generic_string(),"sdf","density",Mat4f(),width ? width : 8,width ? 0 : 64);
+        if (!width) {
+            for (int sign:{-1,1}) {
+                ClassicLocalGrid::Cursor axis(grid,V(-3*sign,0,0),sign*V::UnitX(),0,7);
+                ClassicLocalGrid::Segment block;
+                int blocks=0;
+                while (axis.next(block)) {
+                    if (blocks>0 && blocks<59)
+                        close(block.end-block.begin,13*.25/64,1e-12,"fixed-resolution block spacing");
+                    ++blocks;
+                }
+                // The SDF clips off the first source voxel of the 13-voxel density extent.
+                require(blocks==60,"fixed-resolution DDA coverage in both directions");
+            }
+        }
         for (const V &o:{V(-3,0,0),V(0,0,3),V(0.2,0.4,0.7),V(3,-3,2)})
             for (const V &w:{V(1,0.2,0.3),V(-0.4,0.2,-1),V(0,0,-2),V(0,1,0)}) {
                 ClassicLocalGrid::Cursor cursor(grid,o,w,0,7);
@@ -92,6 +108,48 @@ void gridChecks(const std::filesystem::path &file) {
     close(transformed.density(point),density(V::Zero()),1e-7,"reflected/translated density");
     require((transformed.meanGradient(point)-V(0.3,0,-2)).norm()<2e-6,"inverse-transpose gradient transform");
     std::cout<<"grid: "<<intervals<<" DDA intervals, point/gradient/halo/background and reflection checks passed\n";
+}
+void conditionalBandChecks(const std::filesystem::path &file) {
+    namespace cg=Tungsten::ConditionalGpis;
+    fixture(file,false,false,true);
+    ClassicLocalGrid band(file.generic_string(),"sdf","density",Mat4f(),1);
+    const V origin(-3,.2,.1), direction=V::UnitX();
+    cg::GPSSField field{std::make_shared<cg::ConstantMean>(.3),cg::CovarianceKernel(1,Eigen::Matrix3d::Identity()),
+        {V::Constant(-100),V::Constant(100)}};
+    cg::FlightState birth;
+    birth.birthPosition=origin-.5*direction; birth.birthValue=.8;
+    birth.birthGradient=V::Zero(); birth.direction=direction; birth.age=0;
+    cg::ConditionalTrackingSettings settings;
+    settings.shadowRouletteThreshold=0;
+    cg::ConditionalSegment full(field,birth,origin,direction,6,settings);
+    settings.classicLocalBand=&band;
+    cg::ConditionalSegment masked(field,birth,origin,direction,6,settings);
+    // A lone nonzero node extends support one interpolation cell on each side.
+    // The two baked sheets have different densities, but both retain the full conditional rate.
+    double depth=0;
+    for (double center:{2.1,3.85}) {
+        for (double delta:{-.2,0.,.2}) {
+            const double t=center+delta;
+            require(full.hazard(t)>0,"expected nonzero underlying conditional rate");
+            close(masked.hazard(t),full.hazard(t),0,"conditional rate on interpolated support");
+        }
+        constexpr int steps=256;
+        for (int j=0;j<steps;++j) depth+=full.hazard(center-.25+.5*(j+.5)/steps)*(.5/steps);
+    }
+    for (double t:{0.,1.,2.5,3.,4.3,6.}) close(masked.hazard(t),0,0,"conditional rate outside both sheets");
+    const double expected=std::exp(-depth);
+    cg::Random rng(5972);
+    for (bool collision:{true,false}) {
+        double sum=0;
+        constexpr int count=4096;
+        for (int i=0;i<count;++i) {
+            double hit;
+            const double tr=masked.track(rng,collision,hit);
+            sum+=tr;
+            if (collision && tr==0) require(band.density(origin+hit*direction)>0,"hit outside baked support");
+        }
+        close(sum/count,expected,6*std::sqrt(expected*(1-expected)/count),"disconnected conditional band transmission");
+    }
 }
 void transportChecks(const std::filesystem::path &file) {
     const V normal=V(0.3,0,2).normalized();
@@ -149,7 +207,7 @@ void transportChecks(const std::filesystem::path &file) {
             require(phase->sample(rng,wi,event,sample),"local VNDF sample");
             sampled+=V(sample.w.x(),sample.w.y(),sample.w.z());
             close(sample.weight.x(),1,0,"white mirror weight");
-            close(sample.pdf,phase->pdf(wi,sample.w,event),1e-6*std::max(1.0f,sample.pdf),"sampled PDF matches MIS evaluation");
+            close(sample.pdf,phase->pdf(wi,sample.w,event),1e-6*std::max<double>(1,sample.pdf),"sampled PDF matches MIS evaluation");
             close(phase->eval(wi,sample.w,event).x()/phase->pdf(wi,sample.w,event),1,1e-6,"phase eval/pdf consistency for MIS");
         }
         require((sampled/n-integrated).norm()<0.025,"local VNDF distribution vs independent phase integration");
@@ -162,6 +220,15 @@ void transportChecks(const std::filesystem::path &file) {
 void validationChecks(const std::filesystem::path &file,const std::filesystem::path &output) {
     auto rejects=[](const std::string &json) { try { parse(json); } catch (const std::exception &) { return true; } return false; };
     require(rejects(mediumJson(file,0)),"invalid macrocell size");
+    auto fixed=mediumJson(file);
+    fixed.replace(fixed.find("\"macrocell_size\":4"),std::string("\"macrocell_size\":4").size(),"\"macrocell_resolution\":7");
+    auto fixedMedium=parse(fixed);
+    rapidjson::Document doc;
+    auto saved=fixedMedium->toJson(doc.GetAllocator());
+    require(saved["field"]["macrocell_resolution"].GetInt()==7 && !saved["field"].HasMember("macrocell_size"),
+        "preserve fixed-resolution layout in serialized scenes");
+    fixed.insert(fixed.find("\"macrocell_resolution\""),"\"macrocell_size\":4,");
+    require(rejects(fixed),"ambiguous macrocell layout");
     auto alpha=mediumJson(file); alpha.insert(alpha.find("\"macrocell_size\""),"\"alpha_grid\":\"alpha\",");
     require(rejects(alpha),"spatial alpha is unsupported");
     require(rejects(mediumJson(file,4,"{}",R"({"type":"squared_exponential","sigma":0,"lengthScale":1})")),
@@ -208,6 +275,7 @@ int main(int argc,char **argv) {
         const auto output=std::filesystem::absolute(argv[1]); std::filesystem::create_directories(output);
         const auto file=output/"field.nvdb"; fixture(file);
         gridChecks(file); transportChecks(file); validationChecks(file,output); renderFixture(file,output);
+        conditionalBandChecks(output/"two-bands.nvdb");
         std::cout<<"stationary classic_local checks passed\n"; return 0;
     } catch (const std::exception &error) { std::cerr<<error.what()<<"\n"; return 1; }
 }

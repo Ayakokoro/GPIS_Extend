@@ -33,7 +33,8 @@ struct Errors {
 };
 int main(int argc,char **argv) {
     try {
-        require(argc==4,"Usage: gpis_shaderball_bake source.json field.nvdb spacing");
+        const bool classicLocalBand=argc==5 && std::string(argv[4])=="--classic-local-3sigma";
+        require(argc==4 || classicLocalBand,"Usage: gpis_shaderball_bake source.json field.nvdb spacing [--classic-local-3sigma]");
         const fs::path input=fs::absolute(argv[1]),output=fs::absolute(argv[2]);
         require(!fs::exists(output),"Field already exists");
         std::ifstream stream(input);const Json scene=Json::parse(stream);
@@ -47,6 +48,10 @@ int main(int argc,char **argv) {
         };
         const double sigma=gp.at("covariance").at("sigma"),dx=std::stod(argv[3]);
         require(std::isfinite(dx) && dx>0 && sigma>0,"Invalid spacing or sigma");
+        const auto bakedDensity=[&](double value) {
+            if(classicLocalBand && (sigma<=1e-5 || std::abs(value)>3*sigma)) return 0.0;
+            return density(value,sigma);
+        };
         V lo=V::Constant(1e30),hi=-lo;
         int boundaries=0;
         for(const auto &primitive:scene.at("primitives")) {
@@ -93,7 +98,7 @@ int main(int argc,char **argv) {
             leaves.foreach([&](openvdb::FloatTree::LeafNodeType &leaf,size_t) {
                 const auto acc=sdf->getConstAccessor();
                 for(auto it=leaf.beginValueOn();it;++it) {
-                    const double v=density(acc.getValue(it.getCoord()),sigma);
+                    const double v=bakedDensity(acc.getValue(it.getCoord()));
                     require(std::isfinite(v) && v>=0,"Invalid density");it.setValue(float(v));
                 }
             });
@@ -113,7 +118,7 @@ int main(int argc,char **argv) {
             const nanovdb::Coord c(ijk.x(),ijk.y(),ijk.z());const V p=origin+dx*ijk.cast<double>();
             const float expected=float(evaluate(p).value),actual=grid->tree().getValue(c);
             require(actual==expected,"Saved node differs from renderer geometry");
-            require(rhoGrid->tree().getValue(c)==float(density(expected,sigma)),"Saved density mismatch");
+            require(rhoGrid->tree().getValue(c)==float(bakedDensity(expected)),"Saved density mismatch");
             const auto pos=grid->indexToWorld(nanovdb::Vec3d(c.x(),c.y(),c.z()));
             for(int a=0;a<3;++a) require(std::abs(pos[a]-p[a])<1e-12,"World placement mismatch");
         }
@@ -131,7 +136,7 @@ int main(int argc,char **argv) {
                 value+=w.prod()*v;d+=w.prod()*rhoGrid->tree().getValue(coord);
                 for(int a=0;a<3;++a) gradient[a]+=(((bits>>a)&1)?1:-1)*w[(a+1)%3]*w[(a+2)%3]*v/dx;
             }
-            const double e=value-ref.value,g=(gradient-ref.gradient).squaredNorm(),de=d-density(ref.value,sigma);
+            const double e=value-ref.value,g=(gradient-ref.gradient).squaredNorm(),de=d-bakedDensity(ref.value);
             require(std::isfinite(e) && std::isfinite(g) && std::isfinite(de),"Invalid interpolation query");
             all.add(e,g,de);if(std::abs(ref.value)<3*sigma) near.add(e,g,de);
         }
@@ -141,6 +146,7 @@ int main(int argc,char **argv) {
             {"dimensions",{dims.x(),dims.y(),dims.z()}},{"active_nodes",count},{"halo_voxels",halo},
             {"saved_node_checks",4096},{"uniform_interpolation_error",all.json()},{"near_surface_interpolation_error",near.json()},
             {"note","Native procedural knob samples, no axis reflection, half-voxel shift, narrow-band clamp, reinitialization, or geometry substitution. Classic_local interpolates density and normalizes its interpolated gradient."}};
+        if(classicLocalBand) meta["density_support"]="abs(stored sdf node) <= 3*sigma, zero elsewhere; SDF is full-domain";
         std::ofstream metadata(output.string()+".json");metadata<<meta.dump(2)<<'\n';
         require(bool(metadata),"Cannot write metadata");
         std::cout<<"Verified field; near-surface interpolation: "<<near.json().dump()<<std::endl;

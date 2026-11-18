@@ -2,6 +2,7 @@
 #include "ConditionalFlightKernel.h"
 #include <memory>
 
+namespace Tungsten { class ClassicLocalGrid; }
 namespace Tungsten::ConditionalGpis {
 class SinglePointNeuralModel;
 class SinglePointNeuralFlight;
@@ -9,6 +10,8 @@ enum class ConditionalMajorantMode { Adaptive, TwoConstants };
 
 struct ConditionalTrackingSettings {
     ConditionalMajorantMode majorantMode = ConditionalMajorantMode::Adaptive;
+    double exteriorCutoffSigma = 0; // positive: zero hazard where prior mean exceeds this many sigma
+    const ClassicLocalGrid *classicLocalBand = nullptr; // immutable baked support owned by the medium
     double constantBirthLength = 0.0;  // two_constants: world distance to switch; 0 uses analytic birth split
     bool fixedStepLimit = true;       // false disables step/stepScale caps; age growth still applies
     bool geometryStep = false;       // classic SDF-distance proposals after classicStartScale*ell
@@ -68,9 +71,10 @@ class ConditionalSegment {
     double globalFarMaximum() const;
     const SinglePointNeuralModel *_neuralModel=nullptr;
     std::unique_ptr<SinglePointNeuralFlight> _neuralFlight;
+    double _exteriorCutoff=std::numeric_limits<double>::infinity();
     double _hazardEnvelope=1;
     double baselineMajorant(double begin, double end, double parentMaximum,bool permitMacro=true) const;
-    double correctedHazard(double t, ConditionalTrackingWork *work) const;
+    double correctedHazard(double t, ConditionalTrackingWork *work, bool knownInside=false) const;
 public:
     ConditionalSegment(const GPSSField &field, const FlightState &birth,
                        const Point3 &origin, const Vector3 &direction, double length,
@@ -88,6 +92,8 @@ public:
     FlightState samplePositiveEndpoint(Random &rng) const;
     // Collision tracking returns survival 0/1; ratio tracking returns a weight.
     // hit is the physical distance from this segment's origin.
-    double track(Random &rng, bool collision, double &hit, ConditionalTrackingWork *work=nullptr) const;
+    // begin and hit are world distances from the same origin. The birth is unchanged.
+    double track(Random &rng, bool collision, double &hit, ConditionalTrackingWork *work=nullptr,
+                 double begin=0) const;
 };
 }

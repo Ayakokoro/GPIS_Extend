@@ -41,6 +41,56 @@ inline void nonGpSurfaceChecks()
     check(keepSampler.next1D()==untouchedSampler.next1D(),
         "retain policy does not consume random numbers");
 
+    // A non-unit ray and a retained endpoint distinguish ray parameters from
+    // physical distances, and detect restarting the GP at the clipped point.
+    const Vec3f dir(0.f,0.f,2.f);
+    const Ray ray(position,dir,.0625f,.25f);
+    Medium::DistanceDiagnostic diagnostic;
+    diagnostic.collectFlight=true;
+    auto crossing=std::make_shared<ConditionalPathContext>(*observation);
+    crossing->birth.birthValue=.3;
+    crossing->birth.birthGradient=V(0,0,-1.9);
+    auto surfaceState=keep;
+    surfaceState.pathContext=crossing;
+    cg::ConditionalSegment reference(retained->field(),crossing->birth,crossing->position,
+        V::UnitZ(),.5,retained->trackingSettings());
+    for(bool clipped : {false,true}) for(bool collision : {false,true}) {
+        auto state=surfaceState;
+        state.distanceDiagnostic=&diagnostic;
+        state.startsAtScatteringSurface=clipped;
+        IndependentPathSampler actual(123,false),expected(123,false);
+        actual.startPath(2,4);expected.startPath(2,4);
+        cg::Random rng(expected);
+        double hit;
+        const double begin=clipped ? .125:0;
+        const double weight=reference.track(rng,collision,hit,nullptr,begin);
+        if(collision) {
+            MediumSample sample{};
+            check(retained->sampleDistance(actual,ray,state,sample) &&
+                sample.exited==(weight!=0) && sample.t==float(hit/2),
+                "geometry continuation returns the distance from the original interaction");
+        } else {
+            check(retained->transmittance(actual,ray,true,true,&state)==Vec3f(float(weight)),
+                "geometry shadow uses the same conditional field and tracking interval");
+        }
+        check(diagnostic.flight.at("tracking_start_distance")==begin &&
+            diagnostic.flight.at("birth_value")==.3 && !state.startsAtScatteringSurface,
+            "only the first segment after a scattering surface consumes the physical epsilon");
+    }
+    auto shortState=surfaceState;
+    shortState.startsAtScatteringSurface=true;
+    const Ray shortRay(position,dir,.5f,.25f);
+    IndependentPathSampler shortSampler(5,false),endpointSampler(5,false);
+    shortSampler.startPath(1,0);endpointSampler.startPath(1,0);
+    cg::Random endpointRng(endpointSampler);
+    const auto endpoint=reference.samplePositiveEndpoint(endpointRng);
+    check(retained->transmittance(shortSampler,shortRay,true,true,&shortState)==Vec3f(1),
+        "a segment entirely inside the geometry epsilon transmits");
+    const auto renewed=std::dynamic_pointer_cast<const ConditionalPathContext>(shortState.pathContext);
+    check(renewed->birth.birthPosition==endpoint.birthPosition &&
+        renewed->birth.birthValue==endpoint.birthValue && renewed->birth.birthGradient==endpoint.birthGradient,
+        "empty tracking interval still renews at the actual endpoint from the original birth");
+
     auto oldA=std::make_shared<ConditionalPathContext>(*observation);
     oldA->owner=restarted.get();
     auto oldB=std::make_shared<ConditionalPathContext>(*oldA);

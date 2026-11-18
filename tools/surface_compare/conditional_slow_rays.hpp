@@ -72,7 +72,7 @@ inline void exportSlowRays(const std::filesystem::path &output,const Tungsten::C
                 cg::Profile::Scope root(cg::Profile::Stage::Medium,d==0 ? cg::Profile::Domain::Path : cg::Profile::Domain::Shadow);
                 const auto start=rp::Clock::now();
                 cg::ConditionalSegment segment(field,r->birth,r->origin,r->direction,r->length,settings,nullptr,L,L);
-                const double result=segment.track(rng,r->collision,hit,&work);
+                const double result=segment.track(rng,r->collision,hit,&work,r->trackingStart);
                 replay.times.push_back(rp::elapsed(start));
                 check(hit==r->hit && result==r->result && work.distance==r->visited,"Replay endpoint/weight mismatch");
                 check(work.candidates==r->events.size() && work.intervals==r->leaves.size(),"Replay work mismatch");
@@ -99,7 +99,7 @@ inline void exportSlowRays(const std::filesystem::path &output,const Tungsten::C
             J ray={{"id",id},{"domain",domains[d]},{"selection",selected[index]},{"bounce",r.bounce},
                 {"origin",vec(r.origin)},{"direction",vec(r.direction)},{"effective_direction",vec(r.effectiveDirection)},
                 {"birth_position",vec(r.birth.birthPosition)},{"birth_value",r.birth.birthValue},{"birth_gradient",vec(r.birth.birthGradient)},
-                {"birth_age",r.birth.age},{"age_at_origin",r.age},{"length",r.length},{"visited",r.visited},{"result",r.result},{"hit",r.hit},
+                {"birth_age",r.birth.age},{"age_at_origin",r.age},{"length",r.length},{"tracking_start_distance",r.trackingStart},{"visited",r.visited},{"result",r.result},{"hit",r.hit},
                 {"ell",r.ell},{"sigma",field.kernel.sigma()},{"birth_split",std::max(0.0,r.split-r.age)},{"far_split",r.far},
                 {"setup_us",r.setupUs},{"track_us",r.trackUs},{"replay_us",replay.times},{"replay_median_us",replay.median},
                 {"phases",phaseJson(r.phases)},{"uniforms",r.uniforms},{"leaves",J::array()},{"bound_queries",J::array()},

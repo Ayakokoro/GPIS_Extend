@@ -32,7 +32,7 @@ struct Leaf {
 struct Event { double t,hazard,majorant,weight;int phase,kind; }; // 0 null, 1 accepted, 2 ratio
 struct Record {
     FlightState birth;Point3 origin;Vector3 direction,effectiveDirection;
-    double length=0,age=0,ell=0,split=0,far=0,visited=0,result=0,hit=0;
+    double length=0,trackingStart=0,age=0,ell=0,split=0,far=0,visited=0,result=0,hit=0;
     double setupUs=0,trackUs=0;int bounce=0;bool collision=false;
     std::array<Phase,3> phases{};
     std::vector<Bound> bounds;std::vector<Leaf> leaves;std::vector<Event> events;

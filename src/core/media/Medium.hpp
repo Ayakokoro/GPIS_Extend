@@ -73,6 +73,8 @@ public:
         DistanceDiagnostic *distanceDiagnostic = nullptr;
         GpRayBatchBackend *gpRayBatchBackend = nullptr;
         bool firstScatter;
+        // The next medium query leaves an ordinary non-forward geometry event.
+        bool startsAtScatteringSurface = false;
         int component;
         int bounce;
         int lastGPId;
@@ -86,6 +88,7 @@ public:
         void reset()
         {
             firstScatter = true;
+            startsAtScatteringSurface = false;
             bounce = 0;
             pathContext.reset();
             if (gpContext) {
@@ -98,6 +101,7 @@ public:
         void advance()
         {
             firstScatter = false;
+            startsAtScatteringSurface = false;
             sparseConv1DSamplingScheme = SparseConv1DSamplingScheme::UNI;
             bounce++;
         }

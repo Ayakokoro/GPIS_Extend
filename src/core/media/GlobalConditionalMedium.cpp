@@ -12,6 +12,7 @@
 #include "phasefunctions/ObservedNormalScattering.hpp"
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <algorithm>
 #include <iostream>
 
 namespace Tungsten {
@@ -20,7 +21,10 @@ namespace {
 Eigen::Vector3d eigen(const Vec3f &p) { return {p.x(),p.y(),p.z()}; }
 Eigen::Vector3d eigen(const Vec3d &p) { return {p.x(),p.y(),p.z()}; }
 Vec3f vec(const Eigen::Vector3d &p) { return Vec3f(float(p.x()),float(p.y()),float(p.z())); }
-void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathContext &c,const Ray &ray,bool neural) {
+double trackingBegin(const Ray &ray,const Medium::MediumState &state,double speed) {
+    return state.startsAtScatteringSurface ? std::max(0.f,std::min(ray.nearT(),ray.farT()))*speed : 0.0;
+}
+void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathContext &c,const Ray &ray,bool neural,double begin) {
     if (!diagnostic || !diagnostic->collectFlight) return;
     using J = nlohmann::json;
     auto vector = [](const auto &v) { return J::array({v.x(),v.y(),v.z()}); };
@@ -30,7 +34,7 @@ void observeBirth(Medium::DistanceDiagnostic *diagnostic,const ConditionalPathCo
         {"birth_gradient",vector(c.birth.birthGradient)},{"conditioned_birth",true},
         {"origin",vector(c.position)},{"direction",vector(w)},
         {"age_at_origin",(c.position-c.birth.birthPosition).dot(w)},
-        {"near_t",ray.nearT()},{"max_distance",double(ray.farT())*eigen(ray.dir()).norm()}};
+        {"near_t",ray.nearT()},{"tracking_start_distance",begin},{"max_distance",double(ray.farT())*eigen(ray.dir()).norm()}};
 }
 class LinearSdf final : public cg::MeanField {
     Eigen::Vector3d _ref,_g;
@@ -232,6 +236,12 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_age_scale",_tracking.ageScale);
     value.getField("tracking_max_expected_events",_tracking.maxExpectedEvents);
     value.getField("tracking_tighten_expected_events",_tracking.tightenExpectedEvents);
+    value.getField("tracking_exterior_cutoff_sigma",_tracking.exteriorCutoffSigma);
+    if (auto band=value["tracking_classic_local_band"]) {
+        if (_tracking.exteriorCutoffSigma>0)
+            band.parseError("select either tracking_classic_local_band or tracking_exterior_cutoff_sigma");
+        _bandField.emplace().fromJson(band,scene);
+    }
     value.getField("tracking_macrocell_size",_tracking.macrocellSize);
     value.getField("tracking_macrocell_bounds",_tracking.macrocellBounds);
     value.getField("tracking_macrocell_min_expected_events",_tracking.macrocellMinExpectedEvents);
@@ -281,6 +291,8 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_age_scale",_tracking.ageScale,allocator);
     value.AddMember("tracking_max_expected_events",_tracking.maxExpectedEvents,allocator);
     value.AddMember("tracking_tighten_expected_events",_tracking.tightenExpectedEvents,allocator);
+    value.AddMember("tracking_exterior_cutoff_sigma",_tracking.exteriorCutoffSigma,allocator);
+    if (_bandField) value.AddMember("tracking_classic_local_band",_bandField->toJson(allocator),allocator);
     value.AddMember("tracking_macrocell_size",_tracking.macrocellSize,allocator);
     value.AddMember("tracking_macrocell_bounds",_tracking.macrocellBounds,allocator);
     value.AddMember("tracking_macrocell_min_expected_events",_tracking.macrocellMinExpectedEvents,allocator);
@@ -292,6 +304,10 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
 }
 void GlobalConditionalMedium::loadResources() {
     ClassicGlobalMedium::loadResources();
+    if (_bandField) {
+        _bandGrid=_bandField->load();
+        _tracking.classicLocalBand=_bandGrid.get();
+    }
     if(_singlePointNeural) {
         if(!_singlePointModelFile)
             throw std::runtime_error("global_conditional_neural requires a model resource");
@@ -299,6 +315,8 @@ void GlobalConditionalMedium::loadResources() {
     }
 }
 void GlobalConditionalMedium::prepareForRender() {
+    if (_bandField && !_bandGrid)
+        throw std::runtime_error("global_conditional: baked band must be loaded before rendering");
     _correctedCollisions.store(0,std::memory_order_relaxed);
     _gradientFallbacks.store(0,std::memory_order_relaxed);
     _discardedSurfacePaths.store(0,std::memory_order_relaxed);
@@ -410,11 +428,10 @@ try
     if(!std::isfinite(ray.farT()) || ray.farT()<0)
         throw cg::NumericError(cg::NumericStatus::InvalidInput,"global_conditional needs a finite boundary-enclosed segment");
     const auto c=context(sampler,ray,state);
-    observeBirth(state.distanceDiagnostic,*c,ray,_singlePointNeural);
     const double speed=eigen(ray.dir()).norm();
+    const double begin=trackingBegin(ray,state,speed);
+    observeBirth(state.distanceDiagnostic,*c,ray,_singlePointNeural,begin);
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
-    // Geometry nearT suppresses self-intersections only. It must not cut out
-    // part of the medium next to a collision or a transparent boundary.
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
     cg::RayProfile::Flight rayProfile(c->birth,c->position,w,ray.farT()*speed,true,state.bounce);
 #endif
@@ -426,7 +443,8 @@ try
     cg::Random rng(sampler); double t;
 #endif
     cg::ConditionalTrackingWork neuralWork;
-    const bool escaped=segment.track(rng,true,t,_singlePointNeural ? &neuralWork : nullptr)!=0;
+    const bool escaped=segment.track(rng,true,t,_singlePointNeural ? &neuralWork : nullptr,begin)!=0;
+    state.startsAtScatteringSurface=false;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
     rayProfile.finish(escaped ? 1 : 0,t);
 #endif
@@ -499,8 +517,9 @@ try
     cg::Profile::Scope profile(cg::Profile::Stage::Medium,cg::Profile::Domain::Shadow);
     if(!state) throw cg::NumericError(cg::NumericStatus::InvalidInput,"conditional transmittance requires path state");
     const auto c=context(sampler,ray,*state);
-    observeBirth(state->distanceDiagnostic,*c,ray,_singlePointNeural);
     const double speed=eigen(ray.dir()).norm();
+    const double begin=trackingBegin(ray,*state,speed);
+    observeBirth(state->distanceDiagnostic,*c,ray,_singlePointNeural,begin);
     const Eigen::Vector3d w=eigen(ray.dir())/speed;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
     cg::RayProfile::Flight rayProfile(c->birth,c->position,w,ray.farT()*speed,false,state->bounce);
@@ -513,7 +532,8 @@ try
     cg::Random rng(sampler); double t;
 #endif
     cg::ConditionalTrackingWork neuralWork;
-    const double tr=segment.track(rng,false,t,_singlePointNeural ? &neuralWork : nullptr);
+    const double tr=segment.track(rng,false,t,_singlePointNeural ? &neuralWork : nullptr,begin);
+    state->startsAtScatteringSurface=false;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
     rayProfile.finish(tr,t);
 #endif

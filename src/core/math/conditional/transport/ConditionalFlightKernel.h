@@ -83,6 +83,9 @@ public:
     double nextMeanBoundary(double begin,double end) const;
     bool coarseMajorant(double begin,double &end,double &maximum) const;
     bool clipMacrocellInterval(double begin,double &end) const;
+    bool exteriorMacrocell(double begin,double &end,double cutoff) const {
+        return clipMacrocellInterval(begin,end) && macrocellMean_.minimumValue>cutoff;
+    }
     double meanValue(double age) const { return meanJet(age).value; }
     double scalarMeanValue(double age,bool transition=false) const;
     // Preserve signed conditional cancellation and exact moment bounds even

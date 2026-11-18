@@ -9,6 +9,13 @@ the old observation through ordinary geometry. It is neither a GP conditioned
 on every previous path observation nor one conditioned on survival along the
 complete path.
 
+After an ordinary non-forward surface interaction, direct-light and BSDF
+continuation rays start tracking at `min(nearT, farT) * |direction|` in world
+units. The conditional value, gradient and flight age still refer to the
+original surface observation. This treats the geometry epsilon as a
+transparent prefix. GP collisions, camera rays and forward boundaries start
+tracking at the segment origin.
+
 Surface births with a finite nonpositive forward conditional slope are discarded
 by the renderer. `sampleDistance` returns false, preserving radiance already
 accumulated on the path; `transmittance` returns zero for the corresponding light
@@ -52,6 +59,37 @@ query preserves that nonsmooth branch. Like the knob, it now uses analytic
 gradients through `ProceduralMean` for every medium, so new comparisons should
 rerender all methods together. The [backlight example](../data/example-scenes/two-spheres-backlight/global-conditional.json)
 uses coordinate and value scales of 0.1 to obtain radius 0.95 and gap 0.1.
+
+## Baked classic_local narrow band
+
+Set `tracking_classic_local_band` on the medium to the same field object used
+by `classic_local`. Supply a NanoVDB whose density was baked for this geometry,
+world placement and sigma. The file defines the support. For a 3σ bake, both
+the exterior and the deep interior have zero node density.
+
+```json
+"tracking_classic_local_band": {
+  "file": "fields/shaderball_3sigma.nvdb",
+  "sdf_grid": "sdf",
+  "density_grid": "density",
+  "macrocell_size": 8
+}
+```
+
+The field option `macrocell_size` sets the block width in source voxels and
+defaults to 8. To divide the density interpolation domain into 64 equal parts
+on each axis, replace `"macrocell_size": 8` with `"macrocell_resolution": 64`.
+The field accepts one layout option at a time.
+
+The CPU path and shadow trackers skip empty density blocks and evaluate the
+original conditional extinction wherever the interpolated density is positive.
+This retains the interpolation footprint of boundary nodes. Tracking carries
+its optical-depth clock and its conditioning observation across empty gaps.
+Omit the field object for full-domain tracking, or use the separate
+`tracking_exterior_cutoff_sigma` option for a positive-side SDF cutoff.
+
+For the native knob, `gpis_shaderball_bake source.json field.nvdb 0.005 --classic-local-3sigma`
+bakes the full SDF and the two-sided density band on the same lattice.
 
 ## Experimental first-passage gradient correction
 
