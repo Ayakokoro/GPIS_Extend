@@ -24,8 +24,10 @@ struct GpisSdfGrid : ConditionalGpis::MeanField {
     int macrocellSize=0;
     Vec3i macrocellOrigin=Vec3i(0),macrocellDimensions=Vec3i(0);
     std::vector<Macrocell> macrocells;
+    Vec3i parentDimensions=Vec3i(0);
+    std::vector<Macrocell> parents;
     // Built once before rendering; interpolation still uses the original nodes.
-    void buildMacrocells(int cellSize);
+    void buildMacrocells(int cellSize,bool includeParents=false);
     const Macrocell &macrocell(int x,int y,int z) const {
         return macrocells[(size_t(z)*macrocellDimensions.y()+y)*macrocellDimensions.x()+x];
     }

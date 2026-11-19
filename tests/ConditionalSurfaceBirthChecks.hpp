@@ -1,9 +1,80 @@
 #pragma once
 
+inline void nearFaceBirthChecks()
+{
+#if OPENVDB_AVAILABLE
+    using namespace Tungsten;
+    int covered=0,nonzero=0,tracked=0;
+    for(double change:{-.2,0.,.00005,.2}) {
+        auto grid=std::make_shared<GpisSdfGrid>();
+        grid->data.dimensions=Vec3i(8);grid->data.origin=Vec3i(-3);
+        grid->data.clampMin=Vec3f(-2);grid->data.clampMax=Vec3f(3);
+        grid->worldToIndex=200*M::Identity();grid->translation=V::Zero();
+        grid->scale=1;grid->offset=0;
+        for(int z=-3;z<=4;++z) for(int y=-3;y<=4;++y) for(int x=-3;x<=4;++x) {
+            // A continuous crease at zero. Distant negative slopes make the
+            // coarse certificate inconclusive while the nearby cells are safe.
+            const double value=-.02+.005*x*(x<=0 ? .4:.4+change);
+            grid->data.values.push_back(float(std::abs(x)>=2 ? -1:value));
+        }
+        grid->initializeMagnitudeBounds();
+        for(int width:{0,4}) {
+            grid->buildMacrocells(width);
+            auto f=field();f.mean=grid;f.activeDomain={V::Constant(-1),V::Constant(1)};
+            f.kernel=cg::CovarianceKernel(.02,25*M::Identity());
+            for(bool coupled:{false,true}) for(bool tabulated:{false,true}) for(double sign:{-1.,1.})
+                for(double slope:{.0001,.3}) {
+                    cg::FlightState birth;
+                    birth.birthPosition=V(-sign*1e-11,.001,.001);
+                    birth.direction=sign*V::UnitX();
+                    birth.birthGradient=slope*birth.direction;
+                    cg::ConditionalFlightKernel kernel(f,birth,false,0,0,tabulated),reference(f,birth);
+                    const double suppliedLipschitz=coupled ? grid->gradientBound:INFINITY;
+                    const auto prefix=kernel.birthMajorant(.004,suppliedLipschitz);
+                    const double forwardSlope=reference.scalarStatistics(1e-8).meanK;
+                    if(forwardSlope<=0) {
+                        check(prefix.split<1e-11,"near-face proof stops before a nonpositive outgoing slope");
+                        continue;
+                    }
+                    check(prefix.split>1e-6,"near-face birth spans the face without microscopic transitions");
+                    check(prefix.maximum>=0 && std::isfinite(prefix.maximum),"finite near-face majorant");
+                    std::vector<double> probes{.5e-11,1e-11,std::nextafter(1e-11,INFINITY),1.5e-11};
+                    for(int j=0;j<128;++j)
+                        probes.push_back(prefix.split*std::pow(10.,-8+8*(j+.5)/128));
+                    for(double t:probes) {
+                        const double hazard=reference.evaluate(t).hazard.value;
+                        check(hazard<=prefix.maximum*(1+1e-10)+1e-280,
+                              "near-face prefix covers independent hazard on both sides");
+                        nonzero+=hazard>1e-200;
+                        ++covered;
+                    }
+                    for(bool collision:{false,true}) {
+                        cg::ConditionalTrackingSettings settings;
+                        settings.coupledBounds=coupled;settings.tabulatedBounds=tabulated;
+                        settings.fixedStepLimit=false;settings.macrocellSize=width;
+                        cg::ConditionalSegment flight(f,birth,birth.birthPosition,birth.direction,
+                                                      prefix.split,settings,nullptr,grid->gradientBound);
+                        IndependentPathSampler sampler(712,false);sampler.startPath(0,0);
+                        cg::Random rng(sampler);cg::ConditionalTrackingWork work;double hit;
+                        const double weight=flight.track(rng,collision,hit,&work);
+                        check(std::isfinite(weight) && weight>=0 && weight<=1,"near-face path and shadow weights");
+                        check(work.intervals==1,"near-face tracking uses one certified prefix");
+                        ++tracked;
+                    }
+                }
+        }
+    }
+    check(nonzero>0,"near-face coverage includes numerically nonzero hazards");
+    std::cout<<"near-face births: "<<covered<<" hazard checks ("<<nonzero<<" nonzero) and "
+             <<tracked<<" path/shadow flights passed\n";
+#endif
+}
+
 // The value is continuous at x=0, but the outgoing cell has a different
 // derivative from the point query used by the observed collision gradient.
 inline void surfaceBirthChecks()
 {
+    nearFaceBirthChecks();
 #if OPENVDB_AVAILABLE
     using namespace Tungsten;
     auto grid=std::make_shared<GpisSdfGrid>();

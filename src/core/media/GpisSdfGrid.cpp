@@ -9,12 +9,14 @@ namespace Tungsten {
 #if OPENVDB_AVAILABLE
 namespace cg = ConditionalGpis;
 
-void GpisSdfGrid::buildMacrocells(int cellSize)
+void GpisSdfGrid::buildMacrocells(int cellSize,bool includeParents)
 {
     if(cellSize!=0 && (cellSize<2 || cellSize>64 || (cellSize&(cellSize-1))))
         throw std::invalid_argument("macrocell size must be 0 or a power of two from 2 to 64");
     macrocellSize=0;
     macrocells.clear();
+    parents.clear();
+    parentDimensions=Vec3i(0);
     macrocellDimensions=Vec3i(0);
     if(cellSize==0) return;
     Vec3i last;
@@ -63,6 +65,24 @@ void GpisSdfGrid::buildMacrocells(int cellSize)
             }
     });
     macrocellSize=cellSize;
+    if (!includeParents) return;
+    parentDimensions=(macrocellDimensions+Vec3i(1))/2;
+    parents.resize(size_t(parentDimensions.x())*parentDimensions.y()*parentDimensions.z());
+    for (int z=0;z<macrocellDimensions.z();++z)
+        for (int y=0;y<macrocellDimensions.y();++y)
+            for (int x=0;x<macrocellDimensions.x();++x) {
+                auto &parent=parents[(size_t(z/2)*parentDimensions.y()+y/2)*parentDimensions.x()+x/2];
+                const auto &child=macrocell(x,y,z);
+                if (!(x%2 || y%2 || z%2)) {
+                    parent=child;
+                    continue;
+                }
+                parent.minimumValue=std::min(parent.minimumValue,child.minimumValue);
+                parent.maximumValue=std::max(parent.maximumValue,child.maximumValue);
+                parent.maximumNodeMagnitude=std::max(parent.maximumNodeMagnitude,child.maximumNodeMagnitude);
+                parent.minimumGradient=parent.minimumGradient.cwiseMin(child.minimumGradient);
+                parent.maximumGradient=parent.maximumGradient.cwiseMax(child.maximumGradient);
+            }
 }
 
 namespace {
@@ -298,6 +318,29 @@ public:
         prepare(begin);
         return std::min(end,_end);
     }
+    bool polynomial(double begin,double end,cg::MeanRayPolynomial &result) override {
+        if(!(begin>=0 && end>begin) || !std::isfinite(end)) return false;
+        prepare(.5*begin+.5*end);
+        if(!_usable || begin<_begin || end>_end ||
+           coordinateError(end).maxCoeff()>=1e-5 || !std::isfinite(_grid.magnitudeBound)) return false;
+        const double s=(begin-_anchor)*_rate,h=(end-begin)*_rate;
+        auto &c=result.coefficients;
+        c[0]=_value[0]+s*(_value[1]+s*(_value[2]+s*_value[3]));
+        c[1]=h*(_value[1]+s*(2*_value[2]+3*s*_value[3]));
+        c[2]=h*h*(_value[2]+3*s*_value[3]);
+        c[3]=h*h*h*_value[3];
+        // Use the absolute expansion before cancellation, including the
+        // coordinate transform and possible neighbouring-cell endpoint halo.
+        const double radius=std::abs(s)+std::abs(h);
+        double uncertainty=0,magnitude=0,power=1;
+        for(int k=0;k<4;++k) {
+            uncertainty+=power*std::max(_value[k]-_certificate[k].lower,_certificate[k].upper-_value[k]);
+            magnitude+=power*std::abs(_value[k]);power*=radius;
+        }
+        result.error=rb::up((uncertainty+roundoff*magnitude+valueError(end)+
+            8*_grid.magnitudeBound*coordinateError(end).sum())*(1+roundoff));
+        return std::isfinite(result.error) && std::all_of(c.begin(),c.end(),[](double x){return std::isfinite(x);});
+    }
     bool nextMacroBoundary(double begin,double &end,int width) override {
         if(width<2 || width>64 || (width&(width-1)))
             throw std::invalid_argument("macro candidate width must be a power of two from 2 to 64");
@@ -367,15 +410,22 @@ public:
         return true;
     }
     bool coarseRayBounds(double begin,double &end,cg::MeanRayBounds &result) override {
+        return blockRayBounds(begin,end,result,false);
+    }
+    bool parentRayBounds(double begin,double &end,cg::MeanRayBounds &result) override {
+        return !_grid.parents.empty() && blockRayBounds(begin,end,result,true);
+    }
+    bool blockRayBounds(double begin,double &end,cg::MeanRayBounds &result,bool parent) {
         if(!_grid.macrocellSize || !(begin>=0 && end>begin) || !std::isfinite(end) ||
            coordinateError(end).maxCoeff()>=1e-5) return false;
-        const int width=_grid.macrocellSize;
+        const int width=_grid.macrocellSize*(parent ? 2 : 1);
+        const auto &dimensions=parent ? _grid.parentDimensions : _grid.macrocellDimensions;
         int index[3];
         double clipped=end;
         for(int a=0;a<3;++a) {
             const double low=_grid.data.clampMin[a],high=_grid.data.clampMax[a];
             const double first=_grid.macrocellOrigin[a];
-            const int count=_grid.macrocellDimensions[a];
+            const int count=dimensions[a];
             const double q=_q[a]+begin*_v[a];
             int cell=std::clamp(int(std::floor((std::clamp(q,low,high)-first)/width)),0,count-1);
             if(_v[a]!=0) {
@@ -399,7 +449,8 @@ public:
         }
         const double middle=0.5*begin+0.5*clipped;
         if(!(middle>begin && middle<clipped)) return false;
-        const auto &block=_grid.macrocell(index[0],index[1],index[2]);
+        const auto &blocks=parent ? _grid.parents : _grid.macrocells;
+        const auto &block=blocks[(size_t(index[2])*dimensions.y()+index[1])*dimensions.x()+index[0]];
         const auto error=coordinateError(clipped);
         double derivativeMin=0,derivativeMax=0;
         for(int a=0;a<3;++a) {
@@ -426,8 +477,8 @@ public:
         result.maximumValue=rb::up(block.maximumValue+valueError);
         result.minimumDerivative=rb::down(derivativeMin-slopeError);
         result.maximumDerivative=rb::up(derivativeMax+slopeError);
-        const Eigen::Vector3d point=_origin+middle*_direction;
-        {
+        if (!parent) { // The parent's closed-form majorant uses only interval extrema.
+            const Eigen::Vector3d point=_origin+middle*_direction;
             cg::Profile::Scope detail(cg::Profile::Stage::BoundSdfPoint);
             result.midpointValue=_grid.evaluate(Vec3d(point.x(),point.y(),point.z()),nullptr);
         }

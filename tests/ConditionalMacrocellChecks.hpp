@@ -37,7 +37,124 @@ public:
 inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source)
 {
     using namespace Tungsten;
-    int intervals=0,points=0;
+    {
+        auto grid=std::make_shared<GpisSdfGrid>(*source);
+        grid->buildMacrocells(4);
+        auto f=field();f.mean=grid;f.activeDomain={V::Constant(-1e6),V::Constant(1e6)};
+        M precision=M::Zero();precision.diagonal()=V(225,400,900);
+        f.kernel=cg::CovarianceKernel(.04,precision);
+        int checked=0;
+        for(const V &direction:{V(.2,-.3,1).normalized().eval(),V(-.7,.1,-.2).normalized().eval()})
+            for(double f0:{0.,.03}) for(double slope:{.001,2.}) {
+                cg::FlightState birth;birth.birthPosition=V(.2,.1,-.3);birth.direction=direction;
+                birth.birthValue=f0;birth.birthGradient=slope*direction;
+                cg::ConditionalFlightKernel kernel(f,birth),reference(f,birth);
+                const double ell=1/std::sqrt(direction.dot(precision*direction));
+                for(double q:{4.,.08,.852635,1.,1.73205,32.,64.,.5}) {
+                    const double begin=q*ell;
+                    double end=begin+.8*ell,upper;
+                    check(kernel.chapter2MacrocellMajorant(begin,end,upper),"chapter 2 coarse block available");
+                    for(int i=0;i<=64;++i) {
+                        const double t=i==64 ? end : begin+(end-begin)*(i/64.);
+                        check(reference.evaluate(t).hazard.value<=upper*(1+1e-10)+1e-280,
+                              "chapter 2 single-point bound covers independent point hazard");
+                        ++checked;
+                    }
+                }
+            }
+        std::cout<<"chapter 2: "<<checked<<" coarse-block coverage checks passed\n";
+    }
+    // Compare both sides of the event threshold, including small conditional
+    // variance, signed birth residuals, and parents with positive mean/slope.
+    {
+        const auto f=field();
+        const auto w=V::UnitZ().eval();
+        const double ell=1/std::sqrt(w.dot(f.kernel.metric()*w));
+        int screened=0,kept=0;
+        for(double value:{0.,.03}) for(double slope:{-.4,1.5}) {
+            cg::FlightState birth;birth.direction=w;birth.birthValue=value;birth.birthGradient=slope*w;
+            birth.birthPosition=V::Zero();
+            cg::ConditionalFlightKernel kernel(f,birth);
+            for(double q:{.08,.2,.75,1.,1.5,3.,25.}) for(double width:{.07,1.,2.5})
+                for(double fmin:{-.25,.0,.2}) for(double gmin:{-1.,.25}) {
+                    cg::MeanRayBounds mean;
+                    mean.minimumValue=fmin;mean.maximumValue=fmin+.4;
+                    mean.minimumDerivative=gmin;mean.maximumDerivative=gmin+2.;
+                    const double lo=q*ell,hi=(q+width)*ell;
+                    double upper;
+                    check(kernel.chapter2Majorant(lo,hi,mean,upper),"parent oracle is available");
+                    for(double budget:{1.,4.,16.,std::nextafter(upper*(hi-lo),INFINITY)}) {
+                        if(kernel.rejectChapter2Parent(lo,mean,hi-lo,1.,budget)) {
+                            check(upper*(hi-lo)>budget,"cheap screen only rejects over-budget parents");
+                            ++screened;
+                        } else ++kept;
+                    }
+                }
+        }
+        check(screened>0 && kept>0,"screen exercises both decisions");
+    }
+    // Independent point evaluations check the cached cubic, normalized z and
+    // final extinction bounds, including anisotropy, grazing/positive births,
+    // backward seeks, grid faces and the clamped exterior.
+    int polynomialChecks=0;
+    for(const V &origin:{V(.2,-.1,.8),V(-2,0,0),V(2.1,.1,.4)})
+        for(const V &direction:{V(.2,.1,-1).normalized().eval(),V(-.7,.2,-.1).normalized().eval()})
+        for(double f0:{0.,.02}) for(double slope:{1e-4,.3,8.}) for(bool tabulated:{false,true}) {
+            auto f=field();f.mean=source;f.activeDomain={V::Constant(-1e6),V::Constant(1e6)};
+            M precision=M::Zero();precision.diagonal()=V(400,225,900);
+            f.kernel=cg::CovarianceKernel(.04,precision);
+            cg::FlightState birth;birth.birthPosition=origin;birth.direction=direction;
+            birth.birthValue=f0;birth.birthGradient=slope*direction;
+            cg::ConditionalFlightKernel kernel(f,birth,false,0,0,tabulated),reference(f,birth);
+            auto cursor=source->createRayCursor(origin,direction);
+            for(double lo:{.1,.0000005,.03,.0005,.005}) {
+                const double hi=cursor->nextBoundary(lo,lo+.07);
+                cg::MeanRayPolynomial p;double zlo,zhi;
+                check(cursor->polynomial(lo,hi,p),"single-cell cubic is available");
+                check(kernel.polynomialZBounds(lo,hi,zlo,zhi),"degree-five z certificate is available");
+                const double majorant=kernel.coupledIntervalMajorant(lo,hi,source->gradientBound,true,INFINITY,false,true,true);
+                for(int i=0;i<=32;++i) {
+                    const double x=double(i)/32,t=lo+(hi-lo)*x;
+                    const auto &c=p.coefficients;
+                    const double m=c[0]+x*(c[1]+x*(c[2]+x*c[3]));
+                    check(std::abs(m-source->evaluate(origin+t*direction).value)<=p.error,"cached cubic covers direct grid query");
+                    const auto stats=reference.scalarStatistics(t);
+                    const double z=stats.meanF/std::sqrt(stats.varianceF);
+                    check(z>=zlo && z<=zhi,"degree-five bounds cover exact normalized mean");
+                    check(reference.evaluate(t).hazard.value<=majorant*(1+1e-10)+1e-280,"degree-five majorant covers exact hazard");
+                    ++polynomialChecks;
+                }
+            }
+        }
+    std::cout<<"degree-five polynomial: "<<polynomialChecks<<" independent grid/z/hazard coverage checks passed\n";
+    {
+        // Regression: hi/lo=6500. A global Taylor error divided by lo^2
+        // makes this positive, essentially transparent interval look opaque.
+        auto flat=std::make_shared<GpisSdfGrid>(*source);
+        std::fill(flat->data.values.begin(),flat->data.values.end(),0.f);
+        flat->offset=0;flat->initializeMagnitudeBounds();
+        auto f=field();f.mean=flat;f.kernel=cg::CovarianceKernel(.04,400*M::Identity());
+        f.activeDomain={V::Constant(-1e6),V::Constant(1e6)};
+        cg::FlightState birth;birth.direction=V::UnitZ();birth.birthGradient=.4*V::UnitZ();
+        cg::ConditionalFlightKernel kernel(f,birth);
+        double lo,hi;
+        check(kernel.polynomialZBounds(1e-6,.0065,lo,hi) && lo>5,
+              "degree-five error retains age dependence on a wide near-birth interval");
+        cg::ConditionalTrackingSettings normal;normal.coupledBounds=true;normal.coupledLocalScale=.25;
+        normal.localFarStartScale=4;normal.shadowRouletteThreshold=0;
+        auto polynomial=normal;polynomial.transitionVoxelBound=cg::TransitionVoxelBound::Bernstein5;
+        const V origin=birth.birthPosition+.03*birth.direction;
+        cg::ConditionalSegment a(f,birth,origin,birth.direction,.1,normal,nullptr,0,0);
+        cg::ConditionalSegment b(f,birth,origin,birth.direction,.1,polynomial,nullptr,0,0);
+        cg::Random ra(783),rb(783);
+        for(int i=0;i<64;++i) for(bool collision:{false,true}) {
+            cg::ConditionalTrackingWork wa,wb;double ta,tb;
+            const double va=a.track(ra,collision,ta,&wa),vb=b.track(rb,collision,tb,&wb);
+            check(va==vb && ta==tb && wa.intervals==wb.intervals && wa.candidates==wb.candidates &&
+                  ra.uniform01()==rb.uniform01(),"degree-five prefix preserves ordinary proposals beyond its cutoff");
+        }
+    }
+    int intervals=0,points=0,parentSpans=0;
     for(int width:{2,4,8}) for(bool shifted:{false,true}) {
         auto grid=*source;
         if(shifted) {
@@ -46,7 +163,7 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
             grid.data.clampMin+=Vec3f(-10.0f,7.0f,-3.0f);grid.data.clampMax+=Vec3f(-10.0f,7.0f,-3.0f);
             grid.translation+=V(-10,7,-3);
         }
-        grid.buildMacrocells(width);
+        grid.buildMacrocells(width,true);
         check(!grid.macrocells.empty(),"macrocell certificates are precomputed");
         for(const V &o:{V(-0.4,-0.2,-0.5),V(-3,-1,-2),V(2.1,0.1,0.4),V::Zero().eval()})
             for(const V &w:{V(0.4,0.2,0.3),V(-0.7,0.2,-0.1),V(0,0,-1),V::Zero().eval()}) {
@@ -57,6 +174,19 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
                     cg::MeanRayBounds b;
                     check(cursor->coarseRayBounds(lo,hi,b) && hi>lo && hi<=3,
                         "coarse traversal advances to a block or clamp boundary");
+                    double parentEnd=3;
+                    cg::MeanRayBounds parent;
+                    check(cursor->parentRayBounds(lo,parentEnd,parent) && parent.certified && parentEnd>=hi,
+                          "parent covers the first child up to the same clamp");
+                    if(parentEnd>hi) ++parentSpans;
+                    for(int j=0;j<=32;++j) {
+                        const double t=j==32 ? parentEnd : lo+(parentEnd-lo)*j/32;
+                        const auto jet=grid.evaluate(o+t*w);
+                        const double slope=jet.gradient.dot(w);
+                        check(parent.minimumValue<=jet.value && jet.value<=parent.maximumValue &&
+                              parent.minimumDerivative<=slope && slope<=parent.maximumDerivative,
+                              "parent extrema cover independent SDF samples across child faces");
+                    }
                     check(b.certified && !std::isfinite(b.maximumSecondDerivative),
                         "coarse intervals certify values and slopes, not birth curvature");
                     const double mid=0.5*lo+0.5*hi;
@@ -88,7 +218,9 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
         grid.buildMacrocells(0);
         cursor=grid.createRayCursor(V::Zero(),V::UnitZ());
         check(!cursor->coarseRayBounds(0,end,b),"zero macrocell size disables block queries");
+        check(!cursor->parentRayBounds(0,end,b),"rebuilding without blocks clears parent bounds");
     }
+    check(parentSpans>0,"parent bound tests cover intervals spanning multiple children");
 
     // Observe the actual transport routing, including one rejected coarse
     // window covering several fine cells.
@@ -123,6 +255,19 @@ inline void macrocellChecks(const std::shared_ptr<Tungsten::GpisSdfGrid> &source
     recording->data.values.assign(18*18*18,0.0f);
     recording->buildMacrocells(8);
     birth.birthValue=0;birth.birthGradient=V::UnitZ();
+    {
+        auto surface=birth;
+        surface.direction=V::UnitZ();
+        const cg::ConditionalFlightKernel reference(f,surface), accelerated(f,surface,false,0,0,true);
+        const auto oldPrefix=reference.birthMajorant(.3,0);
+        recording->counts={};
+        const auto prefix=accelerated.birthMajorant(.3,0);
+        check(prefix.split>oldPrefix.split && recording->counts.fine==0,
+              "positive directional slope certifies a prefix across interpolation cells");
+        for(int i=1;i<=2048;++i)
+            check(reference.evaluate(prefix.split*i/2048).hazard.value<=prefix.maximum*(1+1e-10),
+                  "monotone surface prefix covers the unchanged conditional rate");
+    }
     settings.macrocellMaxExpectedEvents=1e-12;
     for(bool collision:{false,true}) {
         const auto rejected=trace(settings,collision);

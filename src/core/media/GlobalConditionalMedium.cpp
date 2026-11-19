@@ -241,11 +241,19 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     value.getField("tracking_local_far_start_scale",_tracking.localFarStartScale);
     value.getField("tracking_transition_point_bounds",_tracking.transitionPointBounds);
     value.getField("tracking_transition_integral_bounds",_tracking.transitionIntegralBounds);
+    value.getField("tracking_tabulated_bounds",_tracking.tabulatedBounds);
     value.getField("tracking_coupled_bounds",_tracking.coupledBounds);
     value.getField("tracking_far_integral_bounds",_tracking.farIntegralBounds);
     value.getField("tracking_coupled_local_scale",_tracking.coupledLocalScale);
     value.getField("tracking_proposal_scale",_tracking.proposalScale);
     value.getField("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents);
+    std::string voxelBound="disabled";
+    value.getField("tracking_transition_voxel_bound",voxelBound);
+    if(voxelBound=="disabled") _tracking.transitionVoxelBound=ConditionalGpis::TransitionVoxelBound::Disabled;
+    else if(voxelBound=="range") _tracking.transitionVoxelBound=ConditionalGpis::TransitionVoxelBound::RangeOnly;
+    else if(voxelBound=="midpoint") _tracking.transitionVoxelBound=ConditionalGpis::TransitionVoxelBound::WithMidpoint;
+    else if(voxelBound=="bernstein5") _tracking.transitionVoxelBound=ConditionalGpis::TransitionVoxelBound::Bernstein5;
+    else value.parseError("tracking_transition_voxel_bound must be disabled, range, midpoint or bernstein5");
     value.getField("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold);
     value.getField("binary_shadow_visibility",_binaryShadowVisibility);
     bool lightOnly=false;
@@ -264,6 +272,10 @@ void GlobalConditionalMedium::fromJson(JsonPtr value,const Scene &scene) {
     }
     value.getField("tracking_macrocell_size",_tracking.macrocellSize);
     value.getField("tracking_macrocell_bounds",_tracking.macrocellBounds);
+    value.getField("tracking_chapter2_start_scale",_tracking.chapter2StartScale);
+    value.getField("tracking_chapter2_fallback_events",_tracking.chapter2FallbackEvents);
+    value.getField("tracking_chapter2_parent_events",_tracking.chapter2ParentEvents);
+    value.getField("tracking_chapter2_parent_screen",_tracking.chapter2ParentScreen);
     value.getField("tracking_macrocell_min_expected_events",_tracking.macrocellMinExpectedEvents);
     value.getField("tracking_macrocell_start_scale",_tracking.macrocellStartScale);
     value.getField("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents);
@@ -305,11 +317,16 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     value.AddMember("tracking_local_far_start_scale",_tracking.localFarStartScale,allocator);
     value.AddMember("tracking_transition_point_bounds",_tracking.transitionPointBounds,allocator);
     value.AddMember("tracking_transition_integral_bounds",_tracking.transitionIntegralBounds,allocator);
+    value.AddMember("tracking_tabulated_bounds",_tracking.tabulatedBounds,allocator);
     value.AddMember("tracking_coupled_bounds",_tracking.coupledBounds,allocator);
     value.AddMember("tracking_far_integral_bounds",_tracking.farIntegralBounds,allocator);
     value.AddMember("tracking_coupled_local_scale",_tracking.coupledLocalScale,allocator);
     value.AddMember("tracking_proposal_scale",_tracking.proposalScale,allocator);
     value.AddMember("tracking_transition_max_expected_events",_tracking.transitionMaxExpectedEvents,allocator);
+    const char *voxelBound=_tracking.transitionVoxelBound==ConditionalGpis::TransitionVoxelBound::Bernstein5 ? "bernstein5" :
+        _tracking.transitionVoxelBound==ConditionalGpis::TransitionVoxelBound::WithMidpoint ? "midpoint" :
+        _tracking.transitionVoxelBound==ConditionalGpis::TransitionVoxelBound::RangeOnly ? "range" : "disabled";
+    value.AddMember("tracking_transition_voxel_bound",JsonUtils::toJson(std::string(voxelBound),allocator),allocator);
     value.AddMember("tracking_shadow_roulette_threshold",_tracking.shadowRouletteThreshold,allocator);
     value.AddMember("binary_shadow_visibility",_binaryShadowVisibility,allocator);
     value.AddMember("direct_phase_sample_period",_directPhaseSamplePeriod,allocator);
@@ -321,6 +338,10 @@ rapidjson::Value GlobalConditionalMedium::toJson(Allocator &allocator) const {
     if (_bandField) value.AddMember("tracking_classic_local_band",_bandField->toJson(allocator),allocator);
     value.AddMember("tracking_macrocell_size",_tracking.macrocellSize,allocator);
     value.AddMember("tracking_macrocell_bounds",_tracking.macrocellBounds,allocator);
+    value.AddMember("tracking_chapter2_start_scale",_tracking.chapter2StartScale,allocator);
+    value.AddMember("tracking_chapter2_fallback_events",_tracking.chapter2FallbackEvents,allocator);
+    value.AddMember("tracking_chapter2_parent_events",_tracking.chapter2ParentEvents,allocator);
+    value.AddMember("tracking_chapter2_parent_screen",_tracking.chapter2ParentScreen,allocator);
     value.AddMember("tracking_macrocell_min_expected_events",_tracking.macrocellMinExpectedEvents,allocator);
     value.AddMember("tracking_macrocell_start_scale",_tracking.macrocellStartScale,allocator);
     value.AddMember("tracking_macrocell_max_expected_events",_tracking.macrocellMaxExpectedEvents,allocator);
@@ -360,7 +381,8 @@ void GlobalConditionalMedium::prepareForRender() {
     if(_sdfGrid) {
 #if OPENVDB_AVAILABLE
         // The base medium owns the immutable SDF for the whole render lifetime.
-        _sdfGrid->buildMacrocells(_tracking.majorantMode==cg::ConditionalMajorantMode::Adaptive ? _tracking.macrocellSize : 0);
+        _sdfGrid->buildMacrocells(_tracking.majorantMode==cg::ConditionalMajorantMode::Adaptive ? _tracking.macrocellSize : 0,
+                                  _tracking.chapter2ParentEvents>0);
         _field.mean=std::shared_ptr<const cg::MeanField>(_sdfGrid.get(),[](const cg::MeanField *){});
 #endif
     } else if(auto sphere=dynamic_cast<SphericalMean *>(_mean.get()))

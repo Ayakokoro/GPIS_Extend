@@ -54,7 +54,8 @@ class ConditionalFlightKernel final : public FlightKernel {
 public:
     ConditionalFlightKernel(const GPSSField& field, const FlightState& state,
                             bool normalizedBoundOnly = false, double farBoundStartScale = 0.0,
-                            double simpleBoundStartScale = 0.0);
+                            double simpleBoundStartScale = 0.0,
+                            bool tabulatedBounds = false);
     HazardEvaluation evaluate(double age) const override;
     HitStatistics hitStatistics(double age) const override;
     // Joint endpoint sample conditioned on birth and F(age)>0. Geometry renews
@@ -83,6 +84,12 @@ public:
     double nextMeanBoundary(double begin,double end) const;
     bool coarseMajorant(double begin,double &end,double &maximum) const;
     bool clipMacrocellInterval(double begin,double &end) const;
+    // Supplement section 2, single-point majorant. Clips end to the cached block.
+    bool chapter2MacrocellMajorant(double begin,double &end,double &maximum) const;
+    bool chapter2ParentRange(double begin,double &end,MeanRayBounds &mean) const;
+    bool rejectChapter2Parent(double begin,const MeanRayBounds &mean,double length,
+                              double envelope,double eventBudget) const;
+    bool chapter2Majorant(double begin,double end,const MeanRayBounds &mean,double &maximum) const;
     bool exteriorMacrocell(double begin,double &end,double cutoff) const {
         return clipMacrocellInterval(begin,end) && macrocellMean_.minimumValue>cutoff;
     }
@@ -96,7 +103,10 @@ public:
     ConditionalIntegralMajorant transitionIntegralMajorant(double begin,double end,
                                                            double meanLipschitz) const;
     double coupledIntervalMajorant(double begin,double end,double meanLipschitz,bool localMean,
-                                   double parentMaximum=std::numeric_limits<double>::infinity(),bool macrocell=false) const;
+                                   double parentMaximum=std::numeric_limits<double>::infinity(),bool macrocell=false,
+                                   bool tightenAtMidpoint=true,bool polynomial5=false) const;
+    // Optional cancellation-preserving degree-five enclosure of mu(t)/sd(t).
+    bool polynomialZBounds(double begin,double end,double &lower,double &upper) const;
     ConditionalIntegralMajorant farIntegralMajorant(double begin,double end,double meanLipschitz,
                                                      double gradientBound) const;
     // Local midpoint/Lipschitz cone and an SE envelope refreshed at begin.
@@ -135,7 +145,7 @@ private:
     double meanValueDifference(double age,double *error=nullptr) const;
     MeanJet meanJet(double age) const;
     Gaussian<3> gradientGivenValueDeviation(double age, double deviation) const;
-    bool normalizedBoundOnly_;
+    bool normalizedBoundOnly_,tabulatedBounds_;
     double farBoundStartScale_, farBoundBegin_ = std::numeric_limits<double>::infinity();
     struct FarBounds {
         bool ready = false;

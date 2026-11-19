@@ -7,6 +7,7 @@ namespace Tungsten::ConditionalGpis {
 class SinglePointNeuralModel;
 class SinglePointNeuralFlight;
 enum class ConditionalMajorantMode { Adaptive, TwoConstants };
+enum class TransitionVoxelBound { Disabled, RangeOnly, WithMidpoint, Bernstein5 };
 
 struct ConditionalTrackingSettings {
     ConditionalMajorantMode majorantMode = ConditionalMajorantMode::Adaptive;
@@ -24,6 +25,7 @@ struct ConditionalTrackingSettings {
     double localFarStartScale = 0.0; // 0 disables; >=2 uses scalar geometric proposals and local Lipschitz/SE bounds
     bool transitionPointBounds = false; // after certified birth: scalar midpoint, full conditional moments, no grid clipping
     bool transitionIntegralBounds = false; // experimental C0+C1*s'/s transition; sample its analytic optical depth
+    bool tabulatedBounds = false; // use conservative endpoint tables for the coupled and far envelopes
     bool coupledBounds = false; // age-scaled local derivative certificates, then midpoint certificates
     bool farIntegralBounds = false; // Gaussian/linear Lipschitz envelope; refresh after each candidate
     double coupledLocalScale = 0.5; // local spatial derivative bounds before this age / ell
@@ -38,10 +40,15 @@ struct ConditionalTrackingSettings {
     int macrocellSize = 0;             // 0 disables; power-of-two cell width, 2..64
     double macrocellMinExpectedEvents = 0; // query blocks only above this baseline optical cost
     bool macrocellBounds = false;      // cached spatial certificates for coupled/far bounds
+    double chapter2StartScale = 0; // zero disables; otherwise distance from the observation in length scales
+    double chapter2FallbackEvents = 0; // zero uses all certified blocks; positive limits expected candidates per block
+    double chapter2ParentEvents = 0; // zero disables the optional level above the coarse blocks
+    bool chapter2ParentScreen = false;
     double macrocellStartScale = 0.25; // keep the analytic birth and optional fine prefix
     double macrocellMaxExpectedEvents = 1.0; // otherwise descend to fine cells
     double macrocellFarStartScale = 4.0; // distance from conditioning birth / directional ell
     double macrocellFarMaxExpectedEvents = 0.0; // 0 disables far-field relaxation
+    TransitionVoxelBound transitionVoxelBound = TransitionVoxelBound::Disabled; // opt-in one-bound-per-cell experiment
     void validate() const;
 };
 

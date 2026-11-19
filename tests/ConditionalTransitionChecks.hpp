@@ -2,6 +2,13 @@
 
 inline void coupledTransitionChecks()
 {
+    const auto polynomialMedium=makeMedium(R"("tracking_coupled_bounds":true,"tracking_transition_max_expected_events":0,"tracking_transition_voxel_bound":"bernstein5")");
+    check(polynomialMedium->trackingSettings().transitionVoxelBound==cg::TransitionVoxelBound::Bernstein5,
+          "degree-five voxel option is parsed");
+    rapidjson::Document polynomialDocument;
+    const auto polynomialJson=polynomialMedium->toJson(polynomialDocument.GetAllocator());
+    check(std::string(polynomialJson["tracking_transition_voxel_bound"].GetString())=="bernstein5",
+          "degree-five voxel option survives serialization");
     class CornerMean final : public cg::MeanField {
     public:
         const char *typeName() const override { return "absolute-value-test"; }
@@ -47,13 +54,13 @@ inline void coupledTransitionChecks()
     for(auto provider:std::vector<std::pair<std::shared_ptr<const cg::MeanField>,double>>{
             {field().mean,2},{std::make_shared<cg::ConstantMean>(-.2),0},
             {std::make_shared<cg::SphereMean>(V::Zero(),1),1}})
-        for(double sigma:{.04,.7}) for(double f0:{0.,.2}) for(double slope:{1e-4,.3,8.}) {
+        for(bool tabulated:{false,true}) for(double sigma:{.04,.7}) for(double f0:{0.,.2}) for(double slope:{1e-4,.3,8.}) {
             auto f=field();f.mean=provider.first;f.kernel=cg::CovarianceKernel(sigma,f.kernel.precision());
             f.activeDomain={V::Constant(-1e6),V::Constant(1e6)};
             cg::FlightState birth;birth.birthPosition=V(.2,-.1,.8);birth.direction=V(.2,.1,-1).normalized();
             const double ell=1/std::sqrt(birth.direction.dot(f.kernel.precision()*birth.direction));
             birth.birthValue=f0*sigma;birth.birthGradient=birth.direction*(slope*sigma/ell);
-            const cg::ConditionalFlightKernel kernel(f,birth),reference(f,birth);
+            const cg::ConditionalFlightKernel kernel(f,birth,false,0,0,tabulated),reference(f,birth);
             if(f0>0) {
                 const auto prefix=kernel.birthMajorant(4*ell,provider.second);
                 for(int j=0;j<256;++j) {

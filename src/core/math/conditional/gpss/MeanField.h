@@ -7,6 +7,7 @@
 #include <limits>
 #include <optional>
 #include <vector>
+#include <array>
 
 namespace Tungsten::ConditionalGpis {
 
@@ -27,6 +28,13 @@ using MeanRayBounds = SdfRayBounds;
 
 struct MeanRaySample {
     double value, derivative;
+};
+
+// Cubic in x=(t-begin)/(end-begin), with a uniform absolute value error.
+// Available only when the complete interval lies in one interpolation cell.
+struct MeanRayPolynomial {
+    std::array<double,4> coefficients{};
+    double error=0;
 };
 
 // Optional finite bounds for the entire mean, including its exterior/clamp.
@@ -57,6 +65,7 @@ public:
     // this query does not require precomputed macrocell value bounds.
     virtual bool nextMacroBoundary(double, double &, int) { return false; }
     virtual MeanRaySample sample(double t) = 0;
+    virtual bool polynomial(double, double, MeanRayPolynomial &) { return false; }
     virtual MeanJet evaluate(double t) = 0;
     // Append every interior stationary position of the represented mean.
     // Returns false when this cursor cannot enumerate all roots. This is a
@@ -69,6 +78,7 @@ public:
     // Optional precomputed block certificate; clips end to the block boundary.
     // It may span nonsmooth interpolation cells and cannot certify birth curvature.
     virtual bool coarseRayBounds(double, double &, MeanRayBounds &) { return false; }
+    virtual bool parentRayBounds(double, double &, MeanRayBounds &) { return false; }
     virtual Statistics statistics() const = 0;
 };
 

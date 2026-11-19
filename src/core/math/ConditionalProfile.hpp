@@ -27,7 +27,13 @@ enum class Stage { Medium, KernelSetup, Track, BirthBound, IntervalBound, Taylor
     PhaseSample, DirectionalSample,
     BoundSdfCoarse, BoundSdfFine, BoundSdfPoint, BoundSdfDifference, BoundAlgebra,
     BoundMomentPrepare, BoundMomentApply, BoundMills, BoundFlux, BoundNormalCdf, BoundFarTail, BoundSimple,
-    BoundTransition, BoundLocalFar, Count };
+    BoundTransition, BoundLocalFar, TransitionSpatial, FarSpatial,
+    TrackSetup, TrackBandCursor, TrackBandTraversal, TrackExterior, TrackProposal, TrackProposalSdf,
+    TrackMacroClip, TrackBoundDispatch, TrackRefinement, TrackLeaf, TrackOpticalClock,
+    TrackCandidateEval, TrackBandPoint, TrackDecision,
+    TransitionMacroMean, TransitionLocalMean, TransitionPointMean,
+    TransitionCorrection, TransitionCenter, TransitionFactors, TransitionCrossing,
+    LocalFarAge, LocalFarParameters, LocalFarRefresh, LocalFarCombine, LocalFarCrossing, Count };
 enum class Counter { ProposedIntervals, ProcessedIntervals, Splits, CandidateEvents,
     AcceptedCollisions, RejectedCandidates, RatioEvents, ZeroHazardCandidates,
     ZeroEventIntervals, ZeroRateIntervals, ZeroBirths, PositiveBirths, SmoothBirthHalvings,
@@ -41,7 +47,9 @@ enum class Counter { ProposedIntervals, ProcessedIntervals, Splits, CandidateEve
     PointStatisticsHits, PointStatisticsMisses, PointGradientReuses, PointGradientLoads,
     SimpleBoundSetups, SimpleBoundQueries, SimpleBoundAccepted, SimpleBoundFallbacks,
     GlobalFarSetups, GlobalFarIntervals, LocalFarProposals, LocalFarBoundQueries, LocalFarScalarQueries,
-    TransitionProposals, TransitionBoundQueries, TransitionScalarQueries, Count };
+    TransitionProposals, TransitionBoundQueries, TransitionScalarQueries,
+    Chapter2ChildBounds, Chapter2ParentBounds, Chapter2ParentAccepted, AdaptiveCoarseProbes,
+    Chapter2ParentScreened, Chapter2ParentFalseReject, Count };
 enum class Histogram { CandidatesPerFlight, IntervalsPerFlight, CandidatesPerInterval, Count };
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
 constexpr size_t DomainCount=size_t(Domain::Count),StageCount=size_t(Stage::Count);
@@ -123,7 +131,14 @@ struct Registry {
             "phase_sample","directional_sample",
             "bound_sdf_coarse","bound_sdf_fine","bound_sdf_point","bound_sdf_difference","bound_algebra",
             "bound_moment_prepare","bound_moment_apply","bound_mills","bound_flux","bound_normal_cdf","bound_far_tail","bound_simple",
-            "bound_transition","bound_local_far"};
+            "bound_transition","bound_local_far","transition_spatial","far_spatial",
+            "track_setup","track_band_cursor","track_band_traversal","track_exterior","track_proposal","track_proposal_sdf",
+            "track_macro_clip","track_bound_dispatch","track_refinement","track_leaf","track_optical_clock",
+            "track_candidate_eval","track_band_point","track_decision",
+            "transition_macro_mean","transition_local_mean","transition_point_mean",
+            "transition_correction","transition_center","transition_factors","transition_crossing",
+            "local_far_age","local_far_parameters","local_far_refresh","local_far_combine","local_far_crossing"};
+        static_assert(sizeof(stages)/sizeof(stages[0])==StageCount,"missing conditional profile stage name");
         const char *counters[]={"proposed_intervals","processed_intervals","splits","candidate_events",
             "accepted_collisions","rejected_candidates","ratio_events","zero_hazard_candidates",
             "zero_event_intervals","zero_rate_intervals","zero_births","positive_births","smooth_birth_halvings",
@@ -137,7 +152,9 @@ struct Registry {
             "point_statistics_hits","point_statistics_misses","point_gradient_reuses","point_gradient_loads",
             "simple_bound_setups","simple_bound_queries","simple_bound_accepted","simple_bound_fallbacks",
             "global_far_setups","global_far_intervals","local_far_proposals","local_far_bound_queries","local_far_scalar_queries",
-            "transition_proposals","transition_bound_queries","transition_scalar_queries"};
+            "transition_proposals","transition_bound_queries","transition_scalar_queries",
+            "chapter2_child_bounds","chapter2_parent_bounds","chapter2_parent_accepted","adaptive_coarse_probes",
+            "chapter2_parent_screened","chapter2_parent_false_reject"};
         const char *histograms[]={"candidates_per_flight","intervals_per_flight","candidates_per_interval"};
         const char *limits[]={"step_cap","age_cap","fine_boundary","macro_boundary","birth",
             "segment_end","event_threshold","two_constants","geometry_proposal","global_far","local_far","transition_midpoint"};
@@ -220,13 +237,17 @@ struct Scope {
     }
     Scope(const Scope &)=delete;
     Scope &operator=(const Scope &)=delete;
-    ~Scope() {
+    ~Scope() { finish(); }
+    // Some phases share interval state with their successor. Stop the timer
+    // without extending the measured phase to the end of the C++ scope.
+    void finish() {
         if(!stats) return;
         const auto ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-start).count());
         auto &t=stats->times[domain][size_t(stage)];
         ++t.calls;t.inclusiveNs+=ns;t.exclusiveNs+=ns-childrenNs;t.maxNs=std::max(t.maxNs,ns);
         if(parent) parent->childrenNs+=ns;
         stats->top=parent;
+        stats=nullptr;
     }
 };
 inline void count(Counter counter) {
@@ -280,6 +301,7 @@ inline void observe(Histogram histogram,uint64_t value) {
 #else
 struct Scope {
     explicit Scope(Stage,Domain=Domain::Count) {}
+    void finish() {}
 };
 inline void count(Counter) {}
 inline void observe(Histogram,uint64_t) {}
