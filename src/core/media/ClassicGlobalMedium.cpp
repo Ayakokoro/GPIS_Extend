@@ -1,4 +1,5 @@
 #include "ClassicGlobalMedium.hpp"
+#include "bsdfs/Fresnel.hpp"
 #include "math/GPFunctions.hpp"
 #include "GpisSdfGrid.hpp"
 #include "io/JsonObject.hpp"
@@ -375,11 +376,28 @@ Vec3f ClassicGlobalMedium::sigmaT(Vec3f) const { throw std::runtime_error("class
 
 Vec3f ClassicGlobalMedium::reflectance(double cosine) const
 {
+    return signedReflectance(std::abs(cosine));
+}
+
+Vec3f ClassicGlobalMedium::signedReflectance(double incidentCosine) const
+{
     // Mirror and Lambert micro-materials return constant albedo. Their angular
     // scattering differs; the conductor retains its angle-dependent Fresnel.
     if (_materialType == "mirror" || _materialType == "lambert") return Vec3f(_mirrorAlbedo);
     if (_forceUnitFresnel) return Vec3f(1.0f);
-    const double c = std::clamp(std::abs(cosine), 0.0, 1.0);
+    const double c = std::clamp(incidentCosine, -1.0, 1.0);
+    // The native conductor BSDF passes the signed incident cosine to Fresnel
+    // even for a reflection sampled on the back of a GP entry event.
+    if (c<0) {
+        Vec3f weight;
+        for (int i=0;i<3;++i) {
+            // Index-matched channels have zero reflection. The signed
+            // formula would divide by zero for that exact material.
+            weight[i]=_eta[i]==1.0 && _k[i]==0.0 ? 0.0f
+                : Fresnel::conductorReflectance(float(_eta[i]),float(_k[i]),float(c));
+        }
+        return weight;
+    }
     if (c == 0.0) return Vec3f(1.0f);
     Vec3f result;
     for (int i = 0; i < 3; ++i) {

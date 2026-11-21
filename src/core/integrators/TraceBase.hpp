@@ -149,7 +149,7 @@ protected:
     bool volumeLensSample(const Camera &camera,
                     PathSampleGenerator &sampler,
                     MediumSample &mediumSample,
-                    Medium::MediumState* mediumState,
+                    const Medium::MediumState &mediumState,
                     const Medium *medium,
                     int bounce,
                     const Ray &parentRay,

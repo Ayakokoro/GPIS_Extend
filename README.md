@@ -54,6 +54,19 @@ to build only the other medium implementations.
 
 # Scene Files
 
+## Fixed-lattice cubic GPIS
+
+`lattice_cubic_gpis` combines seeded Gaussian coefficients with a compact cubic
+kernel on each ray. A fresh flight samples an unconditional field at a jittered
+entry point (width `step_size`, default 0.01 world units). A negative value
+records a hit there. From a positive entry it tests the whole polynomial between
+voxel faces and kernel knots for the first downcrossing. The same medium
+handles continuation and shadow rays. For a locally isotropic `proc_nonstationary`
+SE, the lattice uses half the minimum length scale by default and the kernel
+radius follows the local length scale. See the [stationary scene](data/example-scenes/lattice-cubic-gpis/shaderball.json),
+[nonstationary scene](data/example-scenes/lattice-cubic-gpis/shaderball-nonstationary.json)
+and [model and render instructions](data/example-scenes/lattice-cubic-gpis/README.md).
+
 ## Adaptive function-space GPIS
 
 `adaptive_function_space_gaussian_process` provides an initial CPU reference

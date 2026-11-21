@@ -21,6 +21,9 @@ struct FpGradientEventContext final : MediumEventContext {
     std::optional<ConditionalGpis::FixedSpeedGradientDistribution> gradient;
 };
 
+// Phase sampling and light connections share the observed axial speed.
+std::shared_ptr<PhaseFunction> makeFixedGradientPhase(const ClassicGlobalMedium &medium, bool delta);
+
 // Experimental hybrid: classic distance/visibility, explicit starting jet,
 // single-anchor first-passage gradient. No corrected extinction or hazard.
 class ClassicGlobalFpGradientMedium final : public ClassicGlobalMedium {

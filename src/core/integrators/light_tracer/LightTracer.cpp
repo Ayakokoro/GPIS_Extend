@@ -83,7 +83,7 @@ void LightTracer::traceSample(PathSampleGenerator &sampler)
             if (bounceSinceSurface >= 2 || _settings.lowOrderScattering) {
                 Vec3f weight;
                 Vec2f pixel;
-                if (volumeLensSample(_scene->cam(), sampler, mediumSample, &state, medium, bounce + 1, ray, weight, pixel))
+                if (volumeLensSample(_scene->cam(), sampler, mediumSample, state, medium, bounce + 1, ray, weight, pixel))
                     _splatBuffer->splatFiltered(pixel, weight*throughput);
             }
 

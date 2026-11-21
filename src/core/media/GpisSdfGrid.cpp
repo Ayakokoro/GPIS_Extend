@@ -1,4 +1,5 @@
 #include "GpisSdfGrid.hpp"
+#include "GpisSdfCubicRay.hpp"
 #include "math/conditional/transport/ConditionalMajorantBounds.h"
 #include "math/conditional/mathutility/NumericPolicy.h"
 #include "thread/ThreadPool.hpp"
@@ -88,6 +89,37 @@ void GpisSdfGrid::buildMacrocells(int cellSize,bool includeParents)
 namespace {
 namespace rb = cg::MajorantBounds;
 
+struct AxisSpan {
+    int index;
+    bool active;
+    double previous, next;
+};
+
+// Find the block entered by a forward ray. Ties are resolved with plane
+// crossing times because q+t*v may round to the other side of a face.
+AxisSpan axisSpan(double q,double v,double t,double low,double high,
+                  int first,int width,int count)
+{
+    constexpr double inf=std::numeric_limits<double>::infinity();
+    const double p=q+t*v;
+    int i=std::clamp(int((std::clamp(p,low,high)-first)/width),0,count-1);
+    if (v==0) return {i,p>=low && p<=high,-inf,inf};
+    const auto crossing=[&](double plane) { return (plane-q)/v; };
+    const bool positive=v>0;
+    const double entry=crossing(positive ? low : high),exit=crossing(positive ? high : low);
+    if (t<entry) return {positive ? 0 : count-1,false,-inf,entry};
+    if (t>=exit) return {positive ? count-1 : 0,false,exit,inf};
+    const auto face=[&](int j) { return double(first)+double(j)*width; };
+    if (positive) {
+        while(i+1<count && crossing(face(i+1))<=t) ++i;
+        while(i>0 && crossing(face(i))>t) --i;
+        return {i,true,crossing(std::max(low,face(i))),crossing(std::min(high,face(i+1)))};
+    }
+    while(i>0 && crossing(face(i))<=t) --i;
+    while(i+1<count && crossing(face(i+1))>t) ++i;
+    return {i,true,crossing(std::min(high,face(i+1))),crossing(std::max(low,face(i)))};
+}
+
 // One mutable cursor per conditional flight, never stored in the shared grid.
 // Each axis retains its previous/next crossing. A seek rebuilds the containing
 // cell directly, so delayed refinement does not need a history of visited cells.
@@ -117,47 +149,11 @@ class GridRayCursor final : public cg::MeanRayCursor {
     static constexpr double roundoff=2048*std::numeric_limits<double>::epsilon();
 
     void locateAxis(int a,double t) {
-        auto &axis=_axes[a];
-        axis=Axis{};
         const double low=_grid.data.clampMin[a],high=_grid.data.clampMax[a];
-        const double q=_q[a]+t*_v[a];
-        if(_v[a]==0) {
-            axis.base=std::floor(std::clamp(q,low,high));
-            axis.mask=q<low || q>high ? 0 : 1;
-            return;
-        }
-        const auto crossing=[&](double plane) { return (plane-_q[a])/_v[a]; };
-        const bool positive=_v[a]>0;
-        const double entry=crossing(positive ? low : high);
-        const double exit=crossing(positive ? high : low);
-        if(t<entry) {
-            axis.base=std::floor(positive ? low : high);
-            axis.next=entry;
-            return;
-        }
-        if(t>=exit) {
-            axis.base=std::floor(positive ? high : low);
-            axis.previous=exit;
-            return;
-        }
-        axis.mask=1;
-        double base=std::floor(std::clamp(q,low,high));
-        // Decide ties by crossing times, not by rounded q+t*v. In particular,
-        // a negative ray starting on a face must enter the cell below it.
-        if(positive) {
-            while(base+1<high && crossing(base+1)<=t) ++base;
-            while(base>low && crossing(base)>t) --base;
-            axis.previous=crossing(std::max(base,low));
-            axis.next=crossing(std::min(base+1,high));
-        } else {
-            while(base>low && crossing(base)<=t) --base;
-            while(base+1<high && crossing(base+1)>t) ++base;
-            axis.previous=crossing(std::min(base+1,high));
-            axis.next=crossing(std::max(base,low));
-        }
-        axis.base=base;
+        const int first=int(std::floor(low)),count=int(std::floor(high))-first+1;
+        const auto span=axisSpan(_q[a],_v[a],t,low,high,first,1,count);
+        _axes[a]={double(first+span.index),double(span.active),span.previous,span.next};
     }
-
     Eigen::Vector3d coordinateError(double t) const {
         return (64*std::numeric_limits<double>::epsilon()*
             (Eigen::Vector3d::Ones()+_positionScale+
@@ -348,28 +344,8 @@ public:
         double clipped=end;
         for(int a=0;a<3;++a) {
             const double low=_grid.data.clampMin[a],high=_grid.data.clampMax[a];
-            const double first=std::floor(low);
-            const int count=(int(std::floor(high))-int(first))/width+1;
-            const double q=_q[a]+begin*_v[a];
-            int cell=std::clamp(int(std::floor((std::clamp(q,low,high)-first)/width)),0,count-1);
-            if(_v[a]==0) continue;
-            const auto crossing=[&](double plane) { return (plane-_q[a])/_v[a]; };
-            const bool positive=_v[a]>0;
-            const double entry=crossing(positive ? low : high),exit=crossing(positive ? high : low);
-            if(begin<entry) clipped=std::min(clipped,entry);
-            else if(begin<exit) {
-                // Use crossing times for boundary ties, just as the fine
-                // cursor does. A negative ray at a face enters the block below.
-                if(positive) {
-                    while(cell+1<count && crossing(first+(cell+1)*width)<=begin) ++cell;
-                    while(cell>0 && crossing(first+cell*width)>begin) --cell;
-                    clipped=std::min(clipped,std::min(exit,crossing(first+(cell+1)*width)));
-                } else {
-                    while(cell>0 && crossing(first+cell*width)<=begin) --cell;
-                    while(cell+1<count && crossing(first+(cell+1)*width)>begin) ++cell;
-                    clipped=std::min(clipped,std::min(exit,crossing(first+cell*width)));
-                }
-            }
+            const int first=int(std::floor(low)),count=(int(std::floor(high))-first)/width+1;
+            clipped=std::min(clipped,axisSpan(_q[a],_v[a],begin,low,high,first,width,count).next);
         }
         if(!(clipped>begin)) return false;
         end=clipped;
@@ -424,28 +400,9 @@ public:
         double clipped=end;
         for(int a=0;a<3;++a) {
             const double low=_grid.data.clampMin[a],high=_grid.data.clampMax[a];
-            const double first=_grid.macrocellOrigin[a];
-            const int count=dimensions[a];
-            const double q=_q[a]+begin*_v[a];
-            int cell=std::clamp(int(std::floor((std::clamp(q,low,high)-first)/width)),0,count-1);
-            if(_v[a]!=0) {
-                const auto crossing=[&](double plane) { return (plane-_q[a])/_v[a]; };
-                const bool positive=_v[a]>0;
-                const double entry=crossing(positive ? low : high),exit=crossing(positive ? high : low);
-                if(begin<entry) clipped=std::min(clipped,entry);
-                else if(begin<exit) {
-                    if(positive) {
-                        while(cell+1<count && crossing(first+(cell+1)*width)<=begin) ++cell;
-                        while(cell>0 && crossing(first+cell*width)>begin) --cell;
-                        clipped=std::min(clipped,std::min(exit,crossing(first+(cell+1)*width)));
-                    } else {
-                        while(cell>0 && crossing(first+cell*width)<=begin) --cell;
-                        while(cell+1<count && crossing(first+(cell+1)*width)>begin) ++cell;
-                        clipped=std::min(clipped,std::min(exit,crossing(first+cell*width)));
-                    }
-                }
-            }
-            index[a]=cell;
+            const auto span=axisSpan(_q[a],_v[a],begin,low,high,_grid.macrocellOrigin[a],width,dimensions[a]);
+            clipped=std::min(clipped,span.next);
+            index[a]=span.index;
         }
         const double middle=0.5*begin+0.5*clipped;
         if(!(middle>begin && middle<clipped)) return false;
@@ -627,6 +584,85 @@ public:
         return result;
     }
 };
+}
+
+GpisSdfCubicRay::GpisSdfCubicRay(const GpisSdfGrid &grid,const Eigen::Vector3d &origin,
+                                 const Eigen::Vector3d &direction)
+    : _grid(grid),_q(grid.worldToIndex*origin+grid.translation),_v(grid.worldToIndex*direction)
+{
+    if (!_q.allFinite() || !_v.allFinite()) throw std::invalid_argument("non-finite SDF ray");
+}
+
+double GpisSdfCubicRay::skipPositive(double begin,double end,double noiseBound)
+{
+    if (!_grid.macrocellSize) return begin;
+    for (int level=_grid.parents.empty() ? 0 : 1;level>=0;--level) {
+        auto &block=_blocks[level];
+        if (begin<block.begin || begin>=block.end) {
+            const auto &dims=level ? _grid.parentDimensions : _grid.macrocellDimensions;
+            const auto &nodes=level ? _grid.parents : _grid.macrocells;
+            const int width=_grid.macrocellSize*(1<<level);
+            Vec3i index;
+            block.begin=begin;
+            block.end=std::numeric_limits<double>::infinity();
+            for (int a=0;a<3;++a) {
+                const auto span=axisSpan(_q[a],_v[a],begin,_grid.data.clampMin[a],
+                    _grid.data.clampMax[a],_grid.macrocellOrigin[a],width,dims[a]);
+                index[a]=span.index;
+                block.end=std::min(block.end,span.next);
+            }
+            const auto &node=nodes[(size_t(index.z())*dims.y()+index.y())*dims.x()+index.x()];
+            // The trilinear weights are nonnegative throughout the cell.
+            // Allow for roundoff in expansion to a cubic and shifting the mean.
+            const double pad=256*std::numeric_limits<double>::epsilon()*
+                std::abs(_grid.scale)*(node.maximumNodeMagnitude+std::abs(_grid.offset));
+            block.lower=node.minimumValue-pad;
+        }
+        if (block.lower>noiseBound) return std::min(end,block.end);
+    }
+    return begin;
+}
+
+double GpisSdfCubicRay::polynomial(double begin,double limit,std::array<double,4> &c) const
+{
+    double end=limit;
+    Vec3i cell;
+    Eigen::Vector3d f,step;
+    for (int a=0;a<3;++a) {
+        const double low=_grid.data.clampMin[a],high=_grid.data.clampMax[a];
+        const int first=int(std::floor(low)),count=int(std::floor(high))-first+1;
+        const auto span=axisSpan(_q[a],_v[a],begin,low,high,first,1,count);
+        end=std::min(end,span.next);
+        const int base=first+span.index;
+        cell[a]=base-_grid.data.origin[a];
+        f[a]=std::clamp(std::clamp(_q[a]+begin*_v[a],low,high)-base,0.0,1.0);
+        step[a]=span.active ? _v[a] : 0.0;
+    }
+    if (!(end>begin) || !std::isfinite(end)) throw std::invalid_argument("invalid SDF cubic interval");
+    step*=end-begin;
+
+    // Interpolate in x (linear), then y (quadratic), then z (cubic).
+    // Taking node differences first preserves constant regions exactly.
+    double yz[2][3];
+    for (int z=0;z<2;++z) {
+        double row[2][2];
+        for (int y=0;y<2;++y) {
+            const double left=_grid.at(cell.x(),cell.y()+y,cell.z()+z);
+            const double dx=_grid.at(cell.x()+1,cell.y()+y,cell.z()+z)-left;
+            row[y][0]=left+f.x()*dx;
+            row[y][1]=step.x()*dx;
+        }
+        const double d0=row[1][0]-row[0][0],d1=row[1][1]-row[0][1];
+        yz[z][0]=row[0][0]+f.y()*d0;
+        yz[z][1]=row[0][1]+f.y()*d1+step.y()*d0;
+        yz[z][2]=step.y()*d1;
+    }
+    const double d0=yz[1][0]-yz[0][0],d1=yz[1][1]-yz[0][1],d2=yz[1][2]-yz[0][2];
+    c[0]=_grid.scale*(yz[0][0]+f.z()*d0+_grid.offset);
+    c[1]=_grid.scale*(yz[0][1]+f.z()*d1+step.z()*d0);
+    c[2]=_grid.scale*(yz[0][2]+f.z()*d2+step.z()*d1);
+    c[3]=_grid.scale*step.z()*d2;
+    return end;
 }
 
 std::unique_ptr<cg::MeanRayCursor> GpisSdfGrid::createRayCursor(

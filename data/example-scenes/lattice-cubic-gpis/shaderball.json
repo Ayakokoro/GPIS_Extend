@@ -1,0 +1,196 @@
+{
+  "media": [
+    {
+      "name": "gp",
+      "material": {
+        "albedo": [
+          0.15,
+          0.8,
+          0.5
+        ],
+        "type": "mirror"
+      },
+      "max_bounces": 1024,
+      "type": "lattice_cubic_gpis",
+      "correlation_context": "renewal+",
+      "gaussian_process": {
+        "id": 0,
+        "type": "standard",
+        "covariance_epsilon": 0,
+        "pseudo_inverse": true,
+        "mean": {
+          "type": "tabulated",
+          "volume": false,
+          "scale": 1.0,
+          "offset": 0.0,
+          "grid": {
+            "type": "vdb",
+            "file": "../../../outputs/shaderball_vdb_ray_profiles_20261117/fields/shaderball_sdf.vdb",
+            "density_name": "sdf",
+            "density_scale": 1.0,
+            "emission_name": "",
+            "interpolate": "linear",
+            "normalize_size": false,
+            "request_sdf": false,
+            "integration_method": "raymarching"
+          }
+        },
+        "covariance": {
+          "type": "squared_exponential",
+          "lengthScale": 0.2,
+          "sigma": 0.02
+        }
+      },
+      "lattice_spacing_in_ell": 0.5,
+      "kernel_radius_in_ell": 3,
+      "geometry_pruning": true
+    }
+  ],
+  "bsdfs": [
+    {
+      "name": "backWall",
+      "albedo": 1,
+      "type": "lambert"
+    },
+    {
+      "name": "light",
+      "albedo": 1,
+      "type": "null"
+    },
+    {
+      "name": "floor",
+      "albedo": 1,
+      "type": "null"
+    },
+    {
+      "name": "upper",
+      "albedo": 1,
+      "type": "forward"
+    }
+  ],
+  "primitives": [
+    {
+      "name": "processBox",
+      "transform": {
+        "position": [
+          0,
+          1.001,
+          0
+        ],
+        "scale": 3,
+        "rotation": [
+          0,
+          0,
+          0
+        ]
+      },
+      "type": "cube",
+      "bsdf": "upper",
+      "int_medium": "gp"
+    },
+    {
+      "name": "light",
+      "transform": {
+        "position": [
+          0,
+          5,
+          2.01
+        ],
+        "scale": 5,
+        "rotation": [
+          160,
+          0,
+          0
+        ]
+      },
+      "power": [
+        300,
+        300,
+        200
+      ],
+      "type": "quad",
+      "bsdf": "light"
+    },
+    {
+      "bump_strength": 1,
+      "transform": {
+        "position": [
+          0,
+          0,
+          1.17369
+        ],
+        "rotation": [
+          0,
+          -67.2614,
+          0
+        ]
+      },
+      "power": [
+        2.5,
+        2.5,
+        1.5
+      ],
+      "type": "infinite_sphere",
+      "sample": true,
+      "bsdf": {
+        "albedo": 1,
+        "type": "null"
+      }
+    }
+  ],
+  "camera": {
+    "tonemap": "filmic",
+    "resolution": [
+      256,
+      256
+    ],
+    "reconstruction_filter": "tent",
+    "transform": {
+      "position": [
+        2,
+        3,
+        7
+      ],
+      "look_at": [
+        0,
+        0.6,
+        0
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ]
+    },
+    "type": "pinhole",
+    "fov": 20
+  },
+  "integrator": {
+    "type": "path_tracer",
+    "min_bounces": 0,
+    "max_bounces": 20,
+    "enable_consistency_checks": false,
+    "enable_two_sided_shading": true,
+    "enable_light_sampling": true,
+    "enable_volume_light_sampling": true,
+    "use_cuda_gpis": false,
+    "independent_path_sampling": true,
+    "wavefront_gpis": false
+  },
+  "renderer": {
+    "output_directory": ".",
+    "output_file": "render.png",
+    "hdr_output_file": "render.pfm",
+    "resume_render_file": "",
+    "overwrite_output_files": true,
+    "adaptive_sampling": false,
+    "enable_resume_render": false,
+    "stratified_sampler": false,
+    "scene_bvh": true,
+    "spp": 128,
+    "spp_step": 1,
+    "checkpoint_interval": "0",
+    "timeout": "0",
+    "output_buffers": []
+  }
+}

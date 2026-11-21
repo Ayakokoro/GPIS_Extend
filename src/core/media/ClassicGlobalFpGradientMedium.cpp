@@ -25,8 +25,8 @@ std::shared_ptr<const FpGradientPathContext> successor(const FpGradientEventCont
     // Preserve the sampled double direction and its exact axial observation;
     // recomputing their dot product after ray rounding can reverse its sign.
     next->derivative=reflection ? -event.derivative : next->direction.dot(gradient);
-    if(!(next->derivative>0))
-        throw std::runtime_error("FP gradient outgoing direction lost exterior support");
+    if(!std::isfinite(next->derivative) || (reflection ? next->derivative==0 : next->derivative<=0))
+        throw std::runtime_error("invalid FP gradient outgoing derivative");
     return next;
 }
 
@@ -34,7 +34,7 @@ std::shared_ptr<const FpGradientPathContext> successor(const FpGradientEventCont
 // axial latent once with the collision, then both MIS strategies condition on
 // it. The transverse Gaussian is exact for a stationary anisotropic SE kernel.
 class FpGradientPhase final : public PhaseFunction {
-    const ClassicGlobalFpGradientMedium &_medium;
+    const ClassicGlobalMedium &_medium;
     bool _delta;
     const FpGradientEventContext &event(const Vec3f &wi,const MediumSample &s) const {
         const auto *e=dynamic_cast<const FpGradientEventContext *>(s.eventContext.get());
@@ -44,7 +44,7 @@ class FpGradientPhase final : public PhaseFunction {
         return *e;
     }
 public:
-    explicit FpGradientPhase(const ClassicGlobalFpGradientMedium &m,bool delta=false)
+    explicit FpGradientPhase(const ClassicGlobalMedium &m,bool delta)
         : _medium(m),_delta(delta) {}
     bool isSpecular() const override { return _delta && !_medium.hasDiffuseMicroMaterial(); }
     float pdf(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
@@ -59,15 +59,19 @@ public:
         const float density=pdf(wi,wo,s);
         if(density==0) return Vec3f(0.f);
         if(_medium.hasDiffuseMicroMaterial()) return _medium.reflectance(1)*density;
-        const auto &w=event(wi,s).gradient->incomingDirection();
+        const auto &e=event(wi,s);
+        const auto &w=e.gradient->incomingDirection();
         const Eigen::Vector3d h=(eigen(wo).normalized()-w).normalized();
-        return _medium.reflectance(std::abs(w.dot(h)))*density;
+        return _medium.signedReflectance(std::copysign(std::abs(w.dot(h)),-e.derivative))*density;
     }
     Vec3f evalConnection(PathSampleGenerator &,const Vec3f &wi,const Vec3f &wo,
             const MediumSample &s,std::shared_ptr<const MediumPathContext> &state) const override {
+        const auto &e=event(wi,s);
+        // The oriented half-vector of a light-sampled connection faces the
+        // incident ray. It cannot reconstruct a positive axial derivative.
+        if(e.derivative>0) return Vec3f(0.f);
         const Vec3f value=eval(wi,wo,s);
         if(value==0.f) return value;
-        const auto &e=event(wi,s);
         if(_medium.hasDiffuseMicroMaterial()) state=successor(e,eigen(s.aniso),wo,s.p);
         else {
             const auto g=e.gradient->gradientForDirection(eigen(wo));
@@ -89,7 +93,7 @@ public:
             const Eigen::Vector3d w=e.gradient->incomingDirection();
             const Eigen::Vector3d reflected=w-(2*e.derivative/g.squaredNorm())*g;
             r.w=Vec3f(vec(reflected)).normalized();
-            r.weight=_medium.reflectance(-e.derivative/g.norm());
+            r.weight=_medium.signedReflectance(-e.derivative/g.norm());
             // Evaluate the Jacobian at the actual sampled gradient. Inverting
             // a float-rounded direction can land outside a very narrow lobe.
             r.pdf=_delta ? 1. : e.gradient->phasePdfForGradient(g);
@@ -102,10 +106,14 @@ public:
 };
 } // namespace
 
+std::shared_ptr<PhaseFunction> makeFixedGradientPhase(const ClassicGlobalMedium &medium, bool delta) {
+    return std::make_shared<FpGradientPhase>(medium,delta);
+}
+
 ClassicGlobalFpGradientMedium::ClassicGlobalFpGradientMedium() {
     _classicPhase=_phaseFunction;
-    _correctedPhase=std::make_shared<FpGradientPhase>(*this);
-    _deltaPhase=std::make_shared<FpGradientPhase>(*this,true);
+    _correctedPhase=makeFixedGradientPhase(*this,false);
+    _deltaPhase=makeFixedGradientPhase(*this,true);
     _phaseFunction=_correctedPhase;
 }
 void ClassicGlobalFpGradientMedium::fromJson(JsonPtr value,const Scene &scene) {

@@ -2,6 +2,7 @@
 #include "BounceContributions.hpp"
 #include "primitives/Cube.hpp"
 #include "media/ClassicGlobalMedium.hpp"
+#include "media/LatticeCubicGpisMedium.hpp"
 #include "media/GlobalConditionalMedium.hpp"
 #include "media/ClassicLocalMedium.hpp"
 #include "media/PoissonEllipsoidMedium.hpp"
@@ -35,6 +36,15 @@ void beginEllipsoidSurfaceFlight(const Medium *medium,Medium::MediumState &state
     const auto *ellipsoid=dynamic_cast<const PoissonEllipsoidMedium *>(medium);
     if (ellipsoid && ellipsoid->hasDensityMultiplier())
         ellipsoid->beginFlight(state,PoissonEllipsoidMedium::FlightOrigin::External);
+}
+
+void beginSurfaceShadow(const Medium *medium, Medium::MediumState &branch) {
+    branch.firstScatter = true;
+    // Dragon's ordinary-surface light and BSDF connections start a fresh GP
+    // flight. Only their private copy drops the lattice endpoint observation.
+    if (dynamic_cast<const LatticeCubicGpisMedium *>(medium))
+        branch.pathContext.reset();
+    beginEllipsoidSurfaceFlight(medium,branch);
 }
 }
 
@@ -74,11 +84,12 @@ bool TraceBase::intersectScene(Ray &ray, const Medium *medium,
         IntersectionTemporary &data, IntersectionInfo &info) const
 {
     bool hit = _scene->intersect(ray, data, info);
-    // BVH traversal also ignores exits before nearT. Query the current process
-    // boundary directly so a transparent boundary still updates medium state.
+    // Near a box edge, world-space BVH bounds and local slab intersections can
+    // round to opposite sides of nearT. Recover the current medium's exit.
     if (medium) {
         for (const auto *cube : _gpisBoundaryCubes) {
-            if (cube->intMedium().get() == medium && cube->intersectMediumExit(ray, data)) {
+            if (cube->intMedium().get() == medium && !(hit && info.primitive == cube && cube->hitBackside(data))
+                    && cube->intersectMediumExit(ray, data)) {
                 info.p = ray.hitpoint();
                 info.w = ray.dir();
                 info.epsilon = _scene->rayEpsilon();
@@ -423,8 +434,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                 shadowMedium = event.info->primitive->selectMedium(medium, ls.d.dot(event.info->Ng) < 0.0f);
                 event.requestedLobe = BsdfLobes::AllButSpecular;
                 direct.f = event.info->bsdf->eval(event, false);
-                shadowState.firstScatter = true;
-                beginEllipsoidSurfaceFlight(shadowMedium,shadowState);
+                beginSurfaceShadow(shadowMedium,shadowState);
             } else {
                 direct.f = sample.phase->evalConnection(sampler, parentRay.dir(), ls.d, sample, shadowState.pathContext);
                 if (sample.phase->isSpecular())
@@ -480,8 +490,7 @@ bool TraceBase::advanceDirectLighting(DirectLightingState &direct, PathSampleGen
                     break;
                 p = event.info->p;
                 shadowMedium = event.info->primitive->selectMedium(medium, wo.dot(event.info->Ng) < 0.0f);
-                shadowState.firstScatter = true;
-                beginEllipsoidSurfaceFlight(shadowMedium,shadowState);
+                beginSurfaceShadow(shadowMedium,shadowState);
             } else {
                 if (sample.phase->isSpecular() &&
                     sample.sparseConv1DSamplingScheme == SparseConv1DSamplingScheme::NEE)
@@ -575,7 +584,7 @@ Vec3f TraceBase::attenuatedEmission(PathSampleGenerator &sampler,
 bool TraceBase::volumeLensSample(const Camera &camera,
                                  PathSampleGenerator &sampler,
                                  MediumSample &mediumSample,
-                                 Medium::MediumState* mediumState,
+                                 const Medium::MediumState &mediumState,
                                  const Medium *medium,
                                  int bounce,
                                  const Ray &parentRay,
@@ -586,7 +595,9 @@ bool TraceBase::volumeLensSample(const Camera &camera,
     if (!camera.sampleDirect(mediumSample.p, sampler, lensSample))
         return false;
 
-    Vec3f f = mediumSample.phase->eval(parentRay.dir(), lensSample.d, mediumSample);
+    auto shadowState=mediumState;
+    Vec3f f = mediumSample.phase->evalConnection(sampler, parentRay.dir(), lensSample.d,
+                                                 mediumSample, shadowState.pathContext);
     if (f == 0.0f)
         return false;
 
@@ -595,7 +606,7 @@ bool TraceBase::volumeLensSample(const Camera &camera,
     ray.setFarT(lensSample.dist);
 
 
-    Vec3f transmittance = generalizedShadowRay(sampler, ray, medium, nullptr, false, true, bounce, mediumState);
+    Vec3f transmittance = generalizedShadowRay(sampler, ray, medium, nullptr, false, true, bounce, &shadowState);
     if (transmittance == 0.0f)
         return false;
 
@@ -676,8 +687,7 @@ Vec3f TraceBase::lightSample(const Primitive &light,
     IntersectionInfo info;
     Medium::MediumState mediumStateReplicate;
     mediumStateReplicate = *mediumState;
-    mediumStateReplicate.firstScatter = true;
-    beginEllipsoidSurfaceFlight(medium,mediumStateReplicate);
+    beginSurfaceShadow(medium,mediumStateReplicate);
     Vec3f e = attenuatedEmission(*event.sampler, light, medium, sample.dist, data, info, bounce, true, ray, &mediumStateReplicate, transmittance);
     if (e == 0.0f)
         return Vec3f(0.0f);
@@ -717,8 +727,7 @@ Vec3f TraceBase::bsdfSample(const Primitive &light,
     IntersectionInfo info;
     Medium::MediumState mediumStateReplicate;
     mediumStateReplicate = *mediumState;
-    mediumStateReplicate.firstScatter = true;
-    beginEllipsoidSurfaceFlight(medium,mediumStateReplicate);
+    beginSurfaceShadow(medium,mediumStateReplicate);
     Vec3f e = attenuatedEmission(*event.sampler, light, medium, -1.0f, data, info, bounce, true, ray, &mediumStateReplicate, nullptr);
 
     if (e == Vec3f(0.0f))

@@ -5,6 +5,18 @@
 
 namespace Tungsten::ConditionalGpis {
 
+FixedSpeedGradientDistribution::FixedSpeedGradientDistribution(const Vector3 &direction,
+    double derivative, const Vector3 &gradientMean, double transverseStddev)
+    : _direction(direction), _derivative(derivative), _delta(transverseStddev==0)
+{
+    Vector3 u,v;
+    orthonormalComplement(direction,u,v);
+    _basis << u,v;
+    _mean = _basis.transpose()*gradientMean;
+    _lower = transverseStddev*Matrix2::Identity();
+    if (!_delta) _logNormalization = -std::log(2*kPi)-2*std::log(transverseStddev);
+}
+
 FixedSpeedGradientDistribution::FixedSpeedGradientDistribution(const CovarianceKernel &kernel,
     const Vector3 &direction, double q, double derivative, const Vector3 &meanGradient,
     const Vector3 &birthMeanGradient, const std::optional<Vector3> &birthGradient)
@@ -74,10 +86,10 @@ double FixedSpeedGradientDistribution::phasePdfForGradient(const Vector3 &gradie
     if (!(length>0) || !std::isfinite(length)) throw std::runtime_error("invalid fixed-speed phase gradient");
     const Vector2 residual=_basis.transpose()*gradient-_mean;
     const Vector2 standardized=_lower.triangularView<Eigen::Lower>().solve(residual);
-    // Plane -> normal -> reflection has Jacobian |g|^4/(4*v^2).
-    // The axial speed already includes crossing flux; do not add it again.
+    // Plane -> normal -> reflection has Jacobian |g|^4/(4*v^2) for
+    // either sign of the observed axial derivative v.
     const double logPdf=_logNormalization-0.5*standardized.squaredNorm()+4*std::log(length)-
-        std::log(4.)-2*std::log(-_derivative);
+        std::log(4.)-2*std::log(std::abs(_derivative));
     const double result=std::exp(logPdf);
     if (!(result>=0) || !std::isfinite(result)) throw std::runtime_error("nonfinite fixed-speed phase PDF");
     return result;

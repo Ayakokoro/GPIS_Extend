@@ -6,12 +6,14 @@
 
 namespace Tungsten::ConditionalGpis {
 
-// The inward speed has already been sampled with its crossing-flux weight.
-// Collinear SE value observations leave this transverse Gaussian unchanged.
-// Keeping the speed in the collision state gives continuation and NEE the same
-// conditional directional measure, without approximating the axial law.
+// Condition the transverse Gaussian on the observed axial derivative.
+// A first downcrossing has inward speed. An occupied entry probe can also
+// observe an outward derivative and reflect on the back of the surface.
 class FixedSpeedGradientDistribution {
 public:
+    // Independent transverse components with the same conditional variance.
+    FixedSpeedGradientDistribution(const Vector3 &direction, double derivative,
+        const Vector3 &gradientMean, double transverseStddev);
     FixedSpeedGradientDistribution(const CovarianceKernel &kernel,
         const Vector3 &direction, double normalizedDistance, double derivative,
         const Vector3 &meanGradient, const Vector3 &birthMeanGradient,

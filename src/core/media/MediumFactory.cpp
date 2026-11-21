@@ -13,6 +13,7 @@
 #include "ClassicGlobalFpGradientMedium.hpp"
 #include "FirstHitGpisMedium.hpp"
 #include "ClassicLocalMedium.hpp"
+#include "LatticeCubicGpisMedium.hpp"
 #include "GlobalConditionalMedium.hpp"
 #include "SparseHistoryGpisMedium.hpp"
 #include "SingleHistoryGpisMedium.hpp"
@@ -41,6 +42,7 @@ DEFINE_STRINGABLE_ENUM(MediumFactory, "medium", ({
     {"classic_global_fp_gradient", std::make_shared<ClassicGlobalFpGradientMedium>},
     {"first_hit_gpis", std::make_shared<FirstHitGpisMedium>},
     {"classic_local", std::make_shared<ClassicLocalMedium>},
+    {"lattice_cubic_gpis", std::make_shared<LatticeCubicGpisMedium>},
     {"global_conditional", std::make_shared<GlobalConditionalMedium>},
     {"global_conditional_neural", []() -> std::shared_ptr<Medium> { return std::make_shared<GlobalConditionalMedium>(true); }},
     {"sparse_history_gpis", std::make_shared<SparseHistoryGpisMedium>},

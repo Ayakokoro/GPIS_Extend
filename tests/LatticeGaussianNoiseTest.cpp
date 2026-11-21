@@ -1,0 +1,68 @@
+#include "math/LatticeGaussianNoise.hpp"
+#include <cstdlib>
+#include <iostream>
+
+using namespace Tungsten;
+
+namespace {
+void require(bool ok, const char *message) {
+    if (!ok) {
+        std::cerr << message << '\n';
+        std::exit(1);
+    }
+}
+double eval(const std::array<double,4> &p, double u) {
+    return p[0]+u*(p[1]+u*(p[2]+u*p[3]));
+}
+double derivative(const std::array<double,4> &p, double u) {
+    return p[1]+u*(2*p[2]+3*u*p[3]);
+}
+}
+
+int main() {
+    constexpr float ell = 0.2f, sigma = 0.02f;
+    const LatticeGaussianKernel kernel(sigma,ell);
+    require(std::abs(kernel.originStddev()/sigma-1)<1e-4, "SE variance at birth");
+    for (unsigned seed=0; seed<64; ++seed) {
+        LatticeGaussianRay ray(kernel,seed);
+        const auto near = ray.segment(0), far = ray.segment(1000000);
+        require(near==ray.segment(0) && far==ray.segment(1000000), "out-of-order seeds");
+        ray.condition(-0.05f,-0.13f);
+        require(far==ray.segment(1000000), "conditioning must have compact support");
+        const auto birth = ray.segment(0);
+        require(std::abs(birth[0]+0.05f)<2e-7f &&
+                std::abs(birth[1]/kernel.spacing+0.13f)<2e-6f, "birth constraints");
+        for (int cell=-16; cell<20; ++cell) {
+            const auto a = ray.segment(cell), b = ray.segment(cell+1);
+            require(std::abs(eval(a,1)-b[0])<1e-14 &&
+                    std::abs(derivative(a,1)-b[1])<1e-14, "continuity of value and derivative");
+            for (int k=0; k<=16; ++k)
+                require(std::abs(eval(a,k/16.f))<=ray.absoluteBound(), "ray amplitude bound");
+        }
+    }
+    require(std::abs(kernel.transverseStddev(0)-kernel.originStddev()/ell)<1e-7,
+            "transverse variance at a scalar-conditioned birth");
+    for (double u : {0.,0.25,0.5,0.75,1.})
+        require(std::abs(kernel.transverseStddev(u)/(sigma/ell)-1)<0.005,
+                "transverse variance across one lattice interval");
+
+    // Estimated correlations and conditioned variance against the actual SE
+    // target detect both weight normalization and coefficient reuse mistakes.
+    double xx=0, yy=0, xy=0, conditionedSecond=0;
+    constexpr int samples=65536;
+    for (int seed=0; seed<samples; ++seed) {
+        LatticeGaussianRay ray(kernel,seed);
+        const double x = ray.segment(0)[0]/sigma;
+        const double y = eval(ray.segment(2),0.5f)/sigma; // t = 1.25 ell
+        xx+=x*x; yy+=y*y; xy+=x*y;
+        ray.condition(0,0,true);
+        const double z = eval(ray.segment(2),0.5f)/sigma;
+        conditionedSecond+=z*z;
+    }
+    const double rho=std::exp(-0.5*1.25*1.25);
+    require(std::abs(xx/samples-1)<0.025 && std::abs(yy/samples-1)<0.025 &&
+            std::abs(xy/samples-rho)<0.015, "sampled SE moments");
+    require(std::abs(conditionedSecond/samples-(1-rho*rho*(1+1.25*1.25)))<0.014,
+            "sampled conditioned SE variance");
+    std::cout << "lattice Gaussian noise checks passed\n";
+}

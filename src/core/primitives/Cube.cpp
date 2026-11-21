@@ -160,7 +160,7 @@ bool Cube::intersectMediumExit(Ray &ray, IntersectionTemporary &data) const
             }
         }
     }
-    if (!std::isfinite(exitT) || exitT > ray.nearT() || exitT >= ray.farT())
+    if (!std::isfinite(exitT) || exitT >= ray.farT())
         return false;
     data.primitive = this;
     data.as<CubeIntersection>()->backSide = true;
