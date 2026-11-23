@@ -25,7 +25,7 @@ public:
     void fromJson(JsonPtr, const Scene &) override;
     rapidjson::Value toJson(Allocator &) const override;
     void prepareForRender() override;
-    // Geometric first contact, including a negative entry probe seen from the back.
+    // Geometric first contact in either orientation, including outward crossings.
     std::optional<float> firstHitDistance(PathSampleGenerator &, const Ray &, MediumState *) const;
     bool sampleDistance(PathSampleGenerator &, const Ray &, MediumState &, MediumSample &) const override;
     Vec3f transmittance(PathSampleGenerator &, const Ray &, bool, bool, MediumState *) const override;

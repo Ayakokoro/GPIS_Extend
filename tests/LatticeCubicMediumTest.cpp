@@ -155,8 +155,7 @@ void testOrdinaryDirectLighting(const fs::path &zeroMean) {
         auto retained=freshState();
         auto prefixRng=sampler(i);
         MediumSample prefix;
-        require(medium->sampleDistance(prefixRng,incoming,retained,prefix),"incoming mirror flight");
-        if (!prefix.exited) continue;
+        if (!medium->sampleDistance(prefixRng,incoming,retained,prefix) || !prefix.exited) continue;
         retained.startsAtScatteringSurface=true;
         require(bool(retained.pathContext),"a surviving incoming path has a floor observation");
         const auto endpoint=retained.pathContext;
@@ -214,16 +213,11 @@ void testPruningModes(const fs::path &path) {
             auto oracle=sampler(tailSeed), plain=sampler(tailSeed), pruned=sampler(tailSeed);
             const LatticeGaussianKernel kernel(Sigma,Ell);
             const LatticeGaussianRay noise(kernel,oracle.uniformGenerator().nextI());
-            const float probe=.01f*oracle.next1D();
-            const double u=probe/kernel.spacing;
-            const auto p=noise.segment(0);
-            require(plateau+p[0]+u*(p[1]+u*(p[2]+u*p[3]))<0,
-                    "reference entry probe must lie in the negative tail");
+            require(plateau+noise.segment(0)[0]<0,"entry must lie in the negative tail");
             const auto unprunedHit=disabled->firstHitDistance(plain,ray,nullptr);
             const auto prunedHit=approximate->firstHitDistance(pruned,ray,nullptr);
-            require(unprunedHit && prunedHit,"three-sigma pruning must preserve negative entry probes");
-            close(*unprunedHit,probe,1e-7,"negative entry distance on the positive plateau");
-            close(*prunedHit,*unprunedHit,1e-7,"three-sigma pruning changed the entry hit");
+            require(unprunedHit && prunedHit && *unprunedHit>0,"negative tail must have a later upcrossing");
+            close(*prunedHit,*unprunedHit,1e-7,"three-sigma pruning changed the upcrossing");
         }
         bool testedHit=false;
         for (unsigned i=0; i<4096 && !testedHit; ++i) {
@@ -231,9 +225,7 @@ void testPruningModes(const fs::path &path) {
             auto sa=freshState(), sb=freshState(), sc=freshState();
             MediumSample x,y,z;
             const bool scattered=conservative->sampleDistance(a,ray,sa,x);
-            // The unconditional first probe classifies occupancy before tail-root pruning.
-            if (x.exited || x.t<=.01f) continue;
-            require(scattered,"reference crossing after the entry probe");
+            if (!scattered || x.exited) continue;
             require(approximate->sampleDistance(b,ray,sb,y),"three-sigma flight");
             require(disabled->sampleDistance(c,ray,sc,z) && !z.exited,"disabled pruning lost a tail hit");
             close(z.t,x.t,1e-6,"disabled pruning changed a tail hit");
@@ -258,13 +250,13 @@ double reference(const LatticeGaussianRay &noise,double z,double dz,double spaci
         const auto p=noise.segment(cell);
         return mean(z+dz*t)+p[0]+u*(p[1]+u*(p[2]+u*p[3]));
     };
-    require(value(left)>0,"reference scan must start outside");
+    const bool inside=value(left)<0;
     for (double right=left+1./128; right<=limit; right+=1./128) {
-        if (value(right)<0) {
+        if ((value(right)<0)!=inside) {
             double hi=right;
             for (int i=0; i<32; ++i) {
                 const double mid=(left+hi)/2;
-                if (value(mid)>0) left=mid; else hi=mid;
+                if ((value(mid)<0)==inside) left=mid; else hi=mid;
             }
             return (left+hi)/2;
         }
@@ -281,95 +273,109 @@ void testFreshEntry(const fs::path &path) {
           "custom entry step must survive serialization");
     const LatticeGaussianKernel kernel(Sigma,Ell);
     const Ray ray(Vec3f(0.f,0.f,.0234375f),Vec3f(0.f,0.f,-1.f),.00390625f,.25f);
-    unsigned negative=0,positive=0,negativeBirth=0;
+    unsigned negative=0,positive=0;
     for (unsigned i=0;i<64;++i) {
-        auto oracle=sampler(i), draw=sampler(i);
+        auto oracle=sampler(i), draw=sampler(i), shadow=sampler(i);
         const LatticeGaussianRay noise(kernel,oracle.uniformGenerator().nextI());
-        const double probe=double(ray.nearT())+step*oracle.next1D();
-        // The configured step and nearT keep the first probe in noise cell 0.
         const auto p=noise.segment(0);
-        const double u=probe/kernel.spacing;
-        const double value=ray.pos().z()-probe+p[0]+u*(p[1]+u*(p[2]+u*p[3]));
+        const double u=ray.nearT()/kernel.spacing;
+        const double value=ray.pos().z()-ray.nearT()+p[0]+u*(p[1]+u*(p[2]+u*p[3]));
         auto state=freshState();
-        MediumSample sample;
-        require(medium->sampleDistance(draw,ray,state,sample) && !sample.exited,
-                "fresh ray must collide with the descending plate");
+        MediumSample hit;
+        require(medium->sampleDistance(draw,ray,state,hit),"descending plate ray");
+        const auto geometric=medium->firstHitDistance(shadow,ray,nullptr);
         if (value<0) {
-            close(sample.t,probe,1e-7,"negative first sample must hit at its jittered distance");
             ++negative;
-            if (ray.pos().z()+p[0]<0) ++negativeBirth;
+            require(hit.exited && !geometric,"a ray remaining inside has no crossing");
         } else {
-            const double root=reference(noise,ray.pos().z(),-1,kernel.spacing,ray.farT(),probe);
-            close(sample.t,root,1e-6,"positive first sample must retain the first cubic downcrossing");
             ++positive;
+            const double root=reference(noise,ray.pos().z(),-1,kernel.spacing,ray.farT(),ray.nearT());
+            require(!hit.exited && geometric,"both queries must find the downcrossing");
+            close(hit.t,root,1e-6,"fresh ray downcrossing");
+            close(*geometric,hit.t,1e-7,"shadow downcrossing");
         }
     }
-    require(negative && positive && negativeBirth,"entry test must exercise both signs and a negative birth");
+    require(negative && positive,"exercise both signs at nearT");
 
+    // The whole ray exits the negative plate. Transparent cuts on either side
+    // of nearT must preserve its original sign test, direction and distance.
+    const Ray whole(Vec3f(0.f,0.f,-.25f),Vec3f(0.f,0.f,2.f),.015625f,.25f);
     for (bool varying : {false,true}) {
         const auto bounded=load(path,true,varying,"three_sigma","",step);
-        const Ray whole(Vec3f(0.f,0.f,-.25f),Vec3f(0.f,0.f,-2.f),.00390625f,.125f);
         for (unsigned i=0;i<8;++i) {
-            auto oracle=sampler(i);
-            oracle.uniformGenerator().nextI();
-            const double probe=double(whole.nearT())+step*oracle.next1D()/2;
-            const float cut=float((whole.nearT()+probe)/2);
-            const Ray prefix(whole.pos(),whole.dir(),whole.nearT(),cut);
-            const Ray suffix(prefix.hitpoint(),whole.dir(),.0125f,whole.farT()-cut);
-            auto direct=sampler(i), split=sampler(i), shadow=sampler(i);
-            auto directState=freshState(), splitState=freshState(), shadowState=freshState();
-            MediumSample a,b;
-            require(bounded->sampleDistance(direct,whole,directState,a) && !a.exited,
-                    "negative field must collide on whole ray");
-            close(a.t,probe,1e-7,"entry step is measured in world units");
-            require(bounded->sampleDistance(split,prefix,splitState,b) && b.exited,
-                    "a transparent cut before the entry probe must be clear");
-            auto reflectedState=splitState;
-            require(bounded->sampleDistance(split,suffix,splitState,b) && !b.exited,
-                    "a pending negative probe must collide after the cut");
-            close(cut+b.t,a.t,1e-7,"transparent cut must preserve the original entry probe");
-            // The same endpoint can instead be an ordinary surface. The reflected
-            // ray stays inside the negative plate and must use its own first probe.
-            reflectedState.startsAtScatteringSurface=true;
-            const Ray reflected(prefix.hitpoint(),Vec3f(0.f,0.f,1.f),.04f,.125f);
-            auto reflectDraw=sampler(i+900), reflectOracle=reflectDraw;
-            reflectOracle.uniformGenerator().nextI();
-            const double reflectedProbe=double(reflected.nearT())+step*reflectOracle.next1D();
-            const auto reflectedHit=bounded->firstHitDistance(reflectDraw,reflected,&reflectedState);
-            require(reflectedHit.has_value(),"ordinary reflection inside the negative field must hit");
-            close(*reflectedHit,reflectedProbe,1e-7,
-                  "a reflection before the old probe must renew the probe on the outgoing ray");
-            require(bounded->transmittance(shadow,prefix,false,true,&shadowState)==1.f &&
-                    bounded->transmittance(shadow,suffix,true,false,&shadowState)==0.f,
-                    "shadow must preserve the pending probe across the same transparent cut");
+            auto query=sampler(i), main=sampler(i);
+            const auto root=bounded->firstHitDistance(query,whole,nullptr);
+            require(root && *root>.08f && *root<.18f,"geometric ray must reach the upper side of the plate");
+            if (!varying) {
+                auto oracle=sampler(i);
+                const LatticeGaussianRay noise(kernel,oracle.uniformGenerator().nextI());
+                close(*root,reference(noise,-.25,1,kernel.spacing,.5,2*whole.nearT())/2,1e-6,
+                      "upcrossing on a non-unit ray");
+            }
+            auto state=freshState();
+            Medium::DistanceDiagnostic diagnostic;
+            state.distanceDiagnostic=&diagnostic;
+            MediumSample hit;
+            require(!bounded->sampleDistance(main,whole,state,hit) && !hit.exited &&
+                    std::string(diagnostic.failure)=="outward_crossing_rejected","reject outward main path");
+            close(hit.t,*root,1e-7,"main path and geometry must select the same outward root");
+            for (float cut : {.0078125f,.0625f}) {
+                const Ray prefix(whole.pos(),whole.dir(),whole.nearT(),cut);
+                const Ray suffix(prefix.hitpoint(),whole.dir(),.0125f,whole.farT()-cut);
+                auto shadow=sampler(i), split=sampler(i);
+                auto shadowState=freshState(), splitState=freshState();
+                require(bounded->transmittance(shadow,prefix,false,true,&shadowState)==1.f &&
+                        bounded->transmittance(shadow,suffix,true,false,&shadowState)==0.f,
+                        "only the segment with the outward root occludes");
+                require(bounded->sampleDistance(split,prefix,splitState,hit) && hit.exited,"clear prefix");
+                splitState.distanceDiagnostic=&diagnostic;
+                require(!bounded->sampleDistance(split,suffix,splitState,hit) && !hit.exited,
+                        "transparent cut must retain outward rejection");
+                close(cut+hit.t,*root,1e-6,"transparent cut moved the upcrossing");
+            }
         }
     }
 }
 
 void testBackfaceScattering(const fs::path &path) {
     constexpr float step=.0625f;
-    const Ray incoming(Vec3f(0.f,0.f,-.5f),Vec3f(0.f,0.f,1.f),0,.25f);
+    const Ray incoming(Vec3f(0.f,0.f,.5f),Vec3f(0.f,0.f,1.f),0,.25f);
+    // An inward GPIS birth still uses an occupancy probe. Its field can
+    // already be increasing while the probe is on the negative side.
+    auto inwardState=[&](const LatticeCubicGpisMedium &medium) {
+        auto birth=std::make_shared<FpGradientPathContext>();
+        birth->owner=&medium; birth->rayOrigin=incoming.pos();
+        birth->origin=Eigen::Vector3d(0,0,.5); birth->direction=Eigen::Vector3d::UnitZ();
+        birth->value=0; birth->derivative=-.12; birth->gradient=birth->derivative*birth->direction;
+        auto state=freshState();
+        state.pathContext=birth;
+        return state;
+    };
+    unsigned diffuseSeed=0;
     const std::string mirror=R"({"type":"mirror","albedo":1})";
     const std::string copper=R"({"type":"conductor","eta":[0.200438,0.924033,1.10221],"k":[3.91295,2.45285,2.14219]})";
     for (const auto &material : {mirror,copper}) {
         const auto medium=load(path,true,material==copper,"","",step,material);
-        for (unsigned i=0;i<8;++i) {
+        unsigned backfaces=0;
+        for (unsigned i=0;i<2048 && backfaces<8;++i) {
             auto oracle=sampler(i), query=sampler(i), draw=sampler(i), shadow=sampler(i);
             oracle.uniformGenerator().nextI();
             const double probe=step*oracle.next1D();
-            auto state=freshState(), shadowState=freshState();
-            const auto hit=medium->firstHitDistance(query,incoming,nullptr);
+            auto state=inwardState(*medium), shadowState=state, queryState=state;
+            MediumSample surface;
+            require(medium->sampleDistance(draw,incoming,state,surface),"conditioned specular flight");
+            const auto event=std::dynamic_pointer_cast<const FpGradientEventContext>(surface.eventContext);
+            if (!event || event->derivative<=0) continue;
+            ++backfaces;
+            if (material==mirror) diffuseSeed=i;
+            const auto hit=medium->firstHitDistance(query,incoming,&queryState);
             require(hit.has_value(),"negative back face must give a geometric intersection");
             close(*hit,probe,1e-7,"back-face first-hit distance");
             require(medium->transmittance(shadow,incoming,false,false,&shadowState)==0.f,
                     "back face must still block shadows");
-            MediumSample surface;
-            require(medium->sampleDistance(draw,incoming,state,surface) && !surface.exited,
-                    "mirror and conductor must accept a back-facing entry for scattering");
+            require(!surface.exited,"conditioned specular probe can scatter on the back face");
             close(surface.t,probe,1e-7,"scattering distance at a negative probe");
             close(surface.p.z(),incoming.pos().z()+probe,1e-7,"back-face collision position");
-            const auto event=std::dynamic_pointer_cast<const FpGradientEventContext>(surface.eventContext);
-            require(event && event->derivative>0,"ascending field must preserve its positive incident slope");
 
             PhaseSample reflected;
             require(surface.phase->sample(draw,incoming.dir(),surface,reflected),"sample back-face reflection");
@@ -403,16 +409,16 @@ void testBackfaceScattering(const fs::path &path) {
             state.pathContext=birth;
             shadowState=state;
             MediumSample follow;
-            require(medium->sampleDistance(resume,next,state,follow) && !follow.exited,
-                    "negative-slope surface birth must find the negative field at the next probe");
-            close(follow.t,nextProbe,1e-7,"interior continuation must advance to its scheduled probe");
-            require(medium->transmittance(visibility,next,true,false,&shadowState)==0.f,
+            require(medium->sampleDistance(resume,next,state,follow),"trace conditioned interior continuation");
+            require(follow.exited || follow.t+1e-7>=nextProbe,"conditioned hit precedes its probe");
+            require(medium->transmittance(visibility,next,true,false,&shadowState)==(follow.exited ? 1.f : 0.f),
                     "shadow and sampled flights agree on an interior continuation");
         }
+        require(backfaces==8,"exercise conditioned back-face scattering");
     }
     const auto diffuse=load(path,true,false,"","",step,R"({"type":"lambert","albedo":1})");
-    auto state=freshState();
-    auto draw=sampler(0);
+    auto state=inwardState(*diffuse);
+    auto draw=sampler(diffuseSeed);
     MediumSample surface;
     const bool accepted=diffuse->sampleDistance(draw,incoming,state,surface);
     require(!surface.exited,"a diffuse back face still gives a geometric hit");

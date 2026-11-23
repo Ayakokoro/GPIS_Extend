@@ -100,6 +100,8 @@ template<class Noise> struct Flight {
     // Absolute arclength from birth. A short transparent prefix can end before
     // the first probe, in which case its continuation inherits the same probe.
     std::optional<double> entryProbe;
+    bool unconditioned=false;
+    bool seekUpcrossing=false;
     // Round the two imposed observations only once, at the shared birth
     // knot. A Hermite correction vanishes with its slope at the next knot.
     double valueCorrection=0, slopeCorrection=0;
@@ -234,6 +236,7 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
     Flight<Noise> flight=straight ? end->flight : Flight<Noise>{origin,axis,
         Noise(model,origin,axis,sampler.uniformGenerator().nextI())};
     if (!straight) {
+        flight.unconditioned=!end && !hit;
         bool inwardBirth=false;
         if (end || hit) {
             double observedValue=0, observedDerivative=0;
@@ -274,8 +277,10 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
         // A turn before the old direction's first probe retains its endpoint
         // observations, and schedules the first sign test on the new flight.
         if (inwardBirth || (!hit && (!end || end->flight.entryProbe))) {
-            flight.entryProbe=std::max(0.0,double(ray.nearT())*speed)
-                +double(_entryStepSize)*sampler.next1D();
+            const double nearDistance=std::max(0.0,double(ray.nearT())*speed);
+            // Reserve the same entry-jitter dimension for both birth rules.
+            const double offset=double(_entryStepSize)*sampler.next1D();
+            flight.entryProbe=flight.unconditioned ? nearDistance : nearDistance+offset;
             // An inward reflection starts at an observed zero. For U=0,
             // the next marching point is the first distinct occupancy probe.
             if (inwardBirth && *flight.entryProbe==0) flight.entryProbe=_entryStepSize;
@@ -298,17 +303,25 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
     bool checkEntry=flight.entryProbe && begin<limit;
     if (checkEntry) {
         flight.entryProbe.reset();
-        // A certified block may cover the probe. A three-sigma bound alone
-        // cannot decide its sign.
-        if (_prune) {
+        if (flight.unconditioned) {
+            const auto first=flight.noise.piece(begin);
+            const double u=(begin-first.start)/first.width();
+            const double field=_sdfGrid->evaluate(vec(flight.origin+begin*flight.direction),nullptr)
+                +CubicDowncrossing::value(flight.segment(first),u);
+            flight.seekUpcrossing=field<0;
+            checkEntry=false;
+        } else if (_prune) {
+            // Only a certified bound can decide the occupancy probe's sign.
             const double boundAtEntry=flight.noise.absoluteBound()
                 +std::abs(flight.valueCorrection)+std::abs(flight.slopeCorrection);
             const double skipped=geometry.skipPositive(begin,limit,boundAtEntry);
             if (skipped>begin) { begin=skipped; checkEntry=false; }
         }
     }
+    // Positive-only pruning cannot certify an unbroken negative interval.
+    const bool prunePositive=_prune && !flight.seekUpcrossing;
     while (begin<limit) {
-        if (_prune && !checkEntry) {
+        if (prunePositive && !checkEntry) {
             if (begin>=boundEnd) {
                 bound=flight.noise.boundUntil(begin,limit,boundEnd)
                     +std::abs(flight.valueCorrection)+std::abs(flight.slopeCorrection);
@@ -325,7 +338,7 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
                 (std::abs(noise[0])+std::abs(noise[1])+std::abs(noise[2])+std::abs(noise[3]));
         }
         const double cellEnd=std::min(limit,piece.end);
-        if (_prune && !checkEntry) {
+        if (prunePositive && !checkEntry) {
             const double skipped=geometry.skipPositive(begin,cellEnd,cellBound);
             if (skipped>begin) { begin=skipped; positiveOnLeft=true; continue; }
         }
@@ -344,6 +357,9 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
         }
         checkEntry=false;
         double u=0;
+        if (flight.seekUpcrossing) {
+            for (double &coefficient : c) coefficient=-coefficient;
+        }
         if (negativeEntry || CubicDowncrossing::first(c,positiveOnLeft,u)) {
             const double t=begin+u*(next-begin);
             float hitT=float((t-age)/speed);
@@ -351,7 +367,15 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
             if (!sample) return hitT;
             const Vector position=flight.origin+t*flight.direction;
             sample->p=Vec3f(vec(position));
-            const double axial=CubicDowncrossing::slope(c,u)/(next-begin);
+            const double orientedSlope=CubicDowncrossing::slope(c,u)/(next-begin);
+            const double axial=flight.seekUpcrossing ? -orientedSlope : orientedSlope;
+            if (flight.unconditioned && axial>0) {
+                if (state->distanceDiagnostic)
+                    state->distanceDiagnostic->failure="outward_crossing_rejected";
+                // The shadow query already returned the hit. No scattering event
+                // is created, so sampleDistance ends the main path at this root.
+                return hitT;
+            }
             const bool backface=negativeEntry && axial>0;
             if (backface && hasDiffuseMicroMaterial()) return hitT;
             Vector mean=eigen(meanGradient(vec(position)));
