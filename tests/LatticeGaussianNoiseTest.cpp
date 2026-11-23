@@ -17,9 +17,34 @@ double eval(const std::array<double,4> &p, double u) {
 double derivative(const std::array<double,4> &p, double u) {
     return p[1]+u*(2*p[2]+3*u*p[3]);
 }
+
+void testTransverseConditioning() {
+    // With this coarse stencil, the three nonzero weights at a knot are
+    // proportional to (e^-1, 1, e^-1). Its covariance differs from the SE limit.
+    const LatticeGaussianKernel kernel(1.f,1.f,1.f,2.f);
+    const auto birth=kernel.conditionedTransverse(0,0);
+    require(birth.meanScale==1 && birth.stddev==0,"full gradient reproduced at birth");
+    const double v=std::exp(-1.), norm=1+2*v*v;
+    const double gain=2*v/norm;
+    const double marginal=kernel.transverseStddev(0);
+    const auto next=kernel.conditionedTransverse(1,0);
+    require(std::abs(next.meanScale-gain)<1e-7 &&
+            std::abs(next.stddev-marginal*std::sqrt(1-gain*gain))<1e-7,
+            "full gradient regression must use the finite knot covariance");
+    const double u=1e-10;
+    const auto near=kernel.conditionedTransverse(0,u);
+    // The derivative row has weights proportional to (-2e^-1, 0, 2e^-1)
+    // and is orthogonal to the birth value. Even here the variance is positive.
+    require(std::abs(near.stddev/u-marginal*std::sqrt(8*v*v/norm))<1e-6,
+            "short-flight conditional transverse spread lost to cancellation");
+    const auto far=kernel.conditionedTransverse(1000000,.37);
+    require(far.meanScale==0 && far.stddev==kernel.transverseStddev(.37),
+            "finite support restores the marginal at the current knot phase");
+}
 }
 
 int main() {
+    testTransverseConditioning();
     constexpr float ell = 0.2f, sigma = 0.02f;
     const LatticeGaussianKernel kernel(sigma,ell);
     require(std::abs(kernel.originStddev()/sigma-1)<1e-4, "SE variance at birth");

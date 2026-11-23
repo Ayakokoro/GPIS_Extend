@@ -447,11 +447,14 @@ void imageCheck(const char *file,bool furnace) {
     if(furnace) close(sum/(w*h*3),1.0,0.025,"white furnace energy");
     std::cout<<"image "<<file<<": mean "<<sum/(w*h*3)<<", range ["<<min<<", "<<max<<"]\n";
 }
+void nonstationaryChecks();
+
 int main(int argc,char **argv)
 {
     try {
         std::string stage=argc>1?argv[1]:"all";
         if(stage=="stage1"||stage=="all") stage1();
+        if(stage=="nonstationary"||stage=="all") nonstationaryChecks();
         if(stage=="stage2"||stage=="all") stage2();
         if(stage=="endpoint_precision"||stage=="all") endpointPrecision();
         if(stage=="stage3"||stage=="all") stage3();

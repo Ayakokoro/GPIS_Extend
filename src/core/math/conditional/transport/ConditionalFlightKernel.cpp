@@ -1,5 +1,6 @@
 // Ported from macrofacet; see ../PORT.md for provenance and adaptations.
 #include "math/conditional/transport/ConditionalFlightKernel.h"
+#include "NonstationarySegment.h"
 #include "math/conditional/transport/ConditionalMajorantBounds.h"
 #include "math/ConditionalProfile.hpp"
 #include "math/conditional/mathutility/Gaussian1D.h"
@@ -209,6 +210,8 @@ double momentIntervalMajorant(double fmin, double fmax, double kmin,
 
 FlightState startConditionalExterior(const GPSSField& field, const Point3& entry,
                                      const Vector3& direction, Random& rng) {
+    if (field.nonstationary)
+        return startNonstationaryExterior(*field.nonstationary,*field.mean,entry,direction,rng);
     const PointPrior prior = field.pointPrior(entry);
     const double sigma = std::sqrt(prior.varianceF);
     // At one point the SE value and gradient are independent.
@@ -324,6 +327,8 @@ ConditionalFlightKernel::ConditionalFlightKernel(const GPSSField& field,
     : FlightKernel(field, state), normalizedBoundOnly_(normalizedBoundOnly), tabulatedBounds_(tabulatedBounds),
       farBoundStartScale_(farBoundStartScale), simpleBoundStartScale_(simpleBoundStartScale) {
     Profile::Scope profile(Profile::Stage::KernelSetup);
+    if (field.nonstationary)
+        throw std::invalid_argument("stationary SE majorants require a stationary field; use ConditionalSegment for proc_nonstationary");
     if (!std::isfinite(farBoundStartScale_) || (farBoundStartScale_!=0 && farBoundStartScale_<2))
         throw NumericError(NumericStatus::InvalidInput,"far SE bound requires zero or a cutoff of at least two");
     if (!std::isfinite(simpleBoundStartScale_) || (simpleBoundStartScale_!=0 && simpleBoundStartScale_<2))

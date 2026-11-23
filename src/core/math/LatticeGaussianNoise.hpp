@@ -21,6 +21,7 @@ class LatticeGaussianKernel {
     int _radius;
     float _sigma, _originStddev, _invValueVariance, _invSlopeVariance, _boundPerCoefficient;
     float _transverseScale;
+    double _originWeightNormSq;
     std::vector<Knot> _origin;
     std::vector<Cubic> _weights;
 
@@ -68,6 +69,7 @@ public:
             }
         }
         _originStddev = sigma*float(std::sqrt(originNormSq));
+        _originWeightNormSq = originNormSq;
         _invValueVariance = float(1/originNormSq);
         _invSlopeVariance = 1/slopeVariance;
         if (!std::isfinite(_invValueVariance) || !std::isfinite(_invSlopeVariance))
@@ -90,6 +92,50 @@ public:
             variance += weight*weight;
         }
         return _transverseScale*std::sqrt(variance);
+    }
+
+    struct TransverseCondition {
+        double meanScale;
+        double stddev;
+    };
+
+    // Each transverse residual has covariance K_lattice(t,s)/ell^2.
+    // Condition it on its observed residual at the birth knot (cell 0, u=0).
+    TransverseCondition conditionedTransverse(int cell, double u) const {
+        if (_sigma == 0) return {0,0};
+        const int originCount = int(_origin.size()), width = int(_weights.size());
+        if (cell >= originCount || cell <= -width) return {0,transverseStddev(u)};
+
+        const double v = 1-u;
+        const double h00 = (1+2*u)*v*v, h10 = u*v*v;
+        const double h01 = (1+2*v)*u*u, h11 = -v*u*u;
+        // Both rows use the same source indices. The hit row starts 'cell'
+        // indices later than the birth row, even when a flight was subdivided.
+        double cross = 0;
+        for (int k=std::max(0,-cell); k<std::min(width,originCount-cell); ++k) {
+            const auto &w = _weights[k];
+            const double weight = h00*w[0] + h10*w[1] + h01*w[2] + h11*w[3];
+            cross += weight*_origin[cell+k].value;
+        }
+        const double gain = cross/_originWeightNormSq;
+
+        // Take the norm of the perpendicular row directly. Subtracting the
+        // two marginal variances would lose the small variance near birth.
+        double variance = 0;
+        for (int j=std::min(0,cell); j<std::max(originCount,cell+width); ++j) {
+            const double birth = j>=0 && j<originCount ? _origin[j].value : 0.0;
+            const int k = j-cell;
+            double residual = -gain*birth;
+            if (k>=0 && k<width) {
+                const auto &w = _weights[k];
+                // w(0)-gain*birth is exactly zero at birth. Keep the small
+                // Hermite increment separate so it survives this subtraction.
+                residual = (w[0]-gain*birth) + h10*w[1]
+                         + h01*(double(w[2])-w[0]) + h11*w[3];
+            }
+            variance += residual*residual;
+        }
+        return {gain,_transverseScale*std::sqrt(variance)};
     }
 };
 

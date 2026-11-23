@@ -129,13 +129,22 @@ $$
 
 它的四个 Bernstein 控制值为 $c_0,\ c_0+c_1/3,\ c_0+(2c_1+c_2)/3,\ \sum_{k=0}^3c_k$。全部严格为正即整段为正。其余候选段用导数 $c_1+2c_2u+3c_3u^2=0$ 的内部根分成单调区间，从左到右找最早下穿，以带括区间的 Newton 迭代定位，必要时取中点。共享结点交给右段判定穿越方向。两端都为正也能发现中间的负槽；恰好碰零又返回正侧的切触按当前约定不算下穿。这里的三次式是所渲染场的精确分段表示，数值求根仍有普通浮点误差。[平均场沿线多项式](../src/core/media/GpisSdfGrid.cpp#L628) · [求根实现](../src/core/math/CubicDowncrossing.hpp#L28)
 
-**若该命中继续散射，沿线斜率要与碰撞实现一致。** 令 $P_\perp=I-\boldsymbol\omega\boldsymbol\omega^\top$ 是垂直于光线的投影。在平稳各向同性分支，$G_\Delta(t)=F'_\Delta(t)$ 取自本次碰撞的沿线实现，$k_\Delta(t,t)$ 取自离散先验。取横截面的正交单位基 $\mathbf e_1,\mathbf e_2$ 和两枚独立标准正态 $\xi_1,\xi_2$，用下式补齐横向梯度。
+**若该命中继续散射，沿线斜率要与碰撞实现一致。** 令 $P_\perp=I-\boldsymbol\omega\boldsymbol\omega^\top$ 是垂直于光线的投影。在平稳各向同性分支，$G_\Delta(t)=F'_\Delta(t)$ 取自本次碰撞的沿线实现，$k_\Delta(t,t)$ 取自离散先验。默认 `inherit_full_gradient=false`。取横截面的正交单位基 $\mathbf e_1,\mathbf e_2$ 和两枚独立标准正态 $\xi_1,\xi_2$，用下式补齐横向梯度。
 
 $$
 \mathbf g_1=\boldsymbol\omega G_\Delta(t)+P_\perp\nabla\mu(\mathbf x(t))
 +\frac{\sqrt{k_\Delta(t,t)}}{\ell_{\rm corr}}
 (\xi_1\mathbf e_1+\xi_2\mathbf e_2).
 $$
+
+平稳各向同性 SE 还支持 `inherit_full_gradient=true`。在新自由程的横截面上，令 $U_i(t)=\mathbf e_i^\top[\nabla f(\mathbf x(t))-\nabla\mu(\mathbf x(t))]$。离散模型为两个 $U_i$ 指定相同的协方差 $C(t,s)=k_\Delta(t,s)/\ell_{\rm corr}^2$，它们彼此独立且独立于沿线场值。若出生时已观测完整梯度且 $C(0,0)>0$，在命中距离 $t$ 处分别采样
+
+$$
+U_i(t)=\frac{C(t,0)}{C(0,0)}U_i(0)
++\sqrt{C(t,t)-\frac{C(t,0)^2}{C(0,0)}}\,\xi_i .
+$$
+
+当 $t=0$ 时返回已知分量。两处的格点支撑分离时恢复先验。实现通过格点权重投影后的平方范数计算条件方差，避免短自由程下的消减误差。这个开关只改变已知出生横向梯度时的法线分布，给定同一起点观测和出射方向，本段首碰距离的采样相同。普通表面续射继承端点时也使用这条规则。非平稳核的横向观测还可能影响沿线场值，目前只开放平稳核的完整梯度选项。
 
 程序在近乎平坦的散射事件上给纵向速度设极小的数值下限，并对负探针按背面散射规则处理。非平稳分支的横向均值还计入局部幅值和尺度的空间导数。这是从沿线实现生成散射梯度的额外模型；单凭一维 $k(s,r)$ 无法唯一确定完整三维梯度的联合分布。[平稳横向方差](../src/core/math/LatticeGaussianNoise.hpp#L81) · [非平稳横向梯度](../src/core/media/LatticeNonstationaryParameters.hpp#L177) · [碰撞与散射](../src/core/media/LatticeCubicGpisMedium.cpp#L347)
 

@@ -6,6 +6,7 @@ namespace Tungsten { class ClassicLocalGrid; }
 namespace Tungsten::ConditionalGpis {
 class SinglePointNeuralModel;
 class SinglePointNeuralFlight;
+class NonstationarySegment;
 enum class ConditionalMajorantMode { Adaptive, TwoConstants };
 enum class TransitionVoxelBound { Disabled, RangeOnly, WithMidpoint, Bernstein5 };
 
@@ -71,7 +72,8 @@ class ConditionalSegment {
     double _meanLipschitz, _classicBegin=std::numeric_limits<double>::infinity();
     double _meanGradientBound, _localFarBegin=std::numeric_limits<double>::infinity();
     ConditionalTrackingSettings _tracking;
-    ConditionalFlightKernel _straight;
+    std::optional<ConditionalFlightKernel> _straight;
+    std::unique_ptr<NonstationarySegment> _varying;
     ConditionalBirthMajorant _birthBound;
     double _tailMaximum=0;
     double _globalFarBegin=std::numeric_limits<double>::infinity(); // distance from this segment's origin

@@ -1,4 +1,5 @@
 #include "ConditionalSegment.h"
+#include "NonstationarySegment.h"
 #include "media/ClassicLocalGrid.hpp"
 #include "MajorantOpticalDepth.h"
 #include "SinglePointNeural.h"
@@ -100,13 +101,26 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         const Point3 &o,const Vector3 &w,double length,const ConditionalTrackingSettings &tracking,
         const SinglePointNeuralModel *neuralModel,double meanLipschitz,double meanGradientBound)
     : _field(f),_origin(o),_w(normalizedOrThrow(w)),_length(length),
-      _age((o-s.birthPosition).dot(_w)),_inverseEll(std::sqrt(_w.dot(f.kernel.precision()*_w))),
+      _age((o-s.birthPosition).dot(_w)),_inverseEll(0),
       _meanLipschitz(meanLipschitz),
       _meanGradientBound(std::isnan(meanGradientBound) ? meanLipschitz : meanGradientBound),_tracking(tracking),
-      _straight(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale,tracking.simpleBoundStartScale,tracking.tabulatedBounds),
       _neuralModel(neuralModel)
 {
     _tracking.validate();
+    if (f.nonstationary) {
+        if (neuralModel || tracking.classicLocalBand || tracking.exteriorCutoffSigma>0 ||
+            tracking.majorantMode!=ConditionalMajorantMode::Adaptive)
+            throw NumericError(NumericStatus::InvalidInput,"proc_nonstationary requires full-domain numerical conditional tracking");
+        const auto domain=f.activeDomain.intersect({s.birthPosition,_w});
+        if (!domain.hit || _age+length>domain.exit)
+            throw NumericError(NumericStatus::InvalidInput,"conditional segment exceeds the field domain");
+        const double step=tracking.step>0 ? tracking.step : tracking.stepScale*f.nonstationary->minLength();
+        _varying=std::make_unique<NonstationarySegment>(*f.nonstationary,*f.mean,s,o,_w,length,step);
+        return;
+    }
+    _inverseEll=std::sqrt(_w.dot(f.kernel.precision()*_w));
+    _straight.emplace(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale,
+                      tracking.simpleBoundStartScale,tracking.tabulatedBounds);
     if(_tracking.exteriorCutoffSigma>0)
         _exteriorCutoff=_tracking.exteriorCutoffSigma*_field.kernel.sigma();
     if ((_tracking.geometryStep || _tracking.pointBounds || _tracking.simpleBoundStartScale>0 || _tracking.localFarStartScale>0 || _tracking.transitionPointBounds || _tracking.transitionIntegralBounds || _tracking.coupledBounds) &&
@@ -127,7 +141,7 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         throw NumericError(NumericStatus::InvalidInput,
             "conditional segment requires an updated observation before changing direction");
     _age=std::max(0.0,_age);
-    if(!std::isfinite(_age+length) || _age+length>_straight.maximumAgeInDomain())
+    if(!std::isfinite(_age+length) || _age+length>_straight->maximumAgeInDomain())
         throw NumericError(NumericStatus::InvalidInput,"conditional segment exceeds the field domain");
     if(_tracking.globalFarStartScale>0) {
         if(!_field.mean->globalMagnitudeBounds())
@@ -154,10 +168,10 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
         // before sampling. The maximum of the covering intervals is one valid
         // constant for the entire prefix; a Taylor certificate cannot simply
         // be extrapolated through grid knots. No observation is renewed here.
-        const auto prefix=_straight.twoSegmentMajorants(split);
+        const auto prefix=_straight->twoSegmentMajorants(split);
         _birthBound.split=split;
         _birthBound.maximum=std::max(prefix.nearMaximum,prefix.farMaximum);
-    } else _birthBound=_straight.birthMajorant(_age+length,
+    } else _birthBound=_straight->birthMajorant(_age+length,
         _tracking.coupledBounds ? _meanLipschitz : std::numeric_limits<double>::infinity());
     }
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
@@ -167,24 +181,26 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
     }
 #endif
     if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants && _age+length>_birthBound.split)
-        _tailMaximum=_straight.constantTailMajorant(_birthBound.split);
+        _tailMaximum=_straight->constantTailMajorant(_birthBound.split);
     if(_neuralModel) {
         _hazardEnvelope=_neuralModel->cap();
-        _neuralFlight=std::make_unique<SinglePointNeuralFlight>(*_neuralModel,f,alongDirection(s,_w),_straight);
+        _neuralFlight=std::make_unique<SinglePointNeuralFlight>(*_neuralModel,f,alongDirection(s,_w),*_straight);
     }
 }
 ConditionalSegment::~ConditionalSegment() = default;
 Gaussian<3> ConditionalSegment::gradient(double t) const
 {
-    return _straight.hitStatistics(_age+t).collisionGradient;
+    if (_varying) return _varying->gradient(t);
+    return _straight->hitStatistics(_age+t).collisionGradient;
 }
 ConditionalScalarStatistics ConditionalSegment::statistics(double t) const
 {
-    return _straight.scalarStatistics(_age+t);
+    if (_varying) return _varying->statistics(t);
+    return _straight->scalarStatistics(_age+t);
 }
 double ConditionalSegment::hazard(double t) const
 {
-    return correctedHazard(t,nullptr);
+    return _varying ? _varying->hazard(t) : correctedHazard(t,nullptr);
 }
 double ConditionalSegment::correctedHazard(double t,ConditionalTrackingWork *work,bool knownInside) const
 {
@@ -192,11 +208,11 @@ double ConditionalSegment::correctedHazard(double t,ConditionalTrackingWork *wor
         Profile::Scope point(Profile::Stage::TrackBandPoint);
         if(!_tracking.classicLocalBand->hasDensity(_origin+t*_w)) return 0;
     }
-    if(!knownInside && _tracking.exteriorCutoffSigma>0 && _straight.scalarMeanValue(_age+t)>_exteriorCutoff)
+    if(!knownInside && _tracking.exteriorCutoffSigma>0 && _straight->scalarMeanValue(_age+t)>_exteriorCutoff)
         return 0;
-    double result=_straight.evaluate(_age+t).hazard.value;
+    double result=_straight->evaluate(_age+t).hazard.value;
     if(_neuralFlight && result>0) {
-        const auto correction=_neuralFlight->correction(_age+t,_straight);
+        const auto correction=_neuralFlight->correction(_age+t,*_straight);
         if(!(correction.ratio>=0 && correction.ratio<=_hazardEnvelope) || !std::isfinite(correction.ratio))
             throw NumericError(NumericStatus::InvalidMajorant,"neural correction exceeds its declared cap");
         result*=correction.ratio;
@@ -214,6 +230,7 @@ double ConditionalSegment::correctedHazard(double t,ConditionalTrackingWork *wor
 }
 double ConditionalSegment::majorant(double lo,double hi,double parentMaximum) const
 {
+    if (_varying) throw NumericError(NumericStatus::InvalidInput,"numerical nonstationary tracking does not provide a majorant");
     return _hazardEnvelope*baselineMajorant(lo,hi,parentMaximum/_hazardEnvelope);
 }
 double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMaximum,bool permitMacro) const
@@ -221,9 +238,9 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
     const bool macro=permitMacro && _tracking.macrocellBounds && _age+lo>=_tracking.macrocellStartScale/
         _inverseEll;
     if(lo>=_localFarBegin && _tracking.farIntegralBounds)
-        return std::min(parentMaximum,_straight.farIntegralMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound).value(_age+hi));
+        return std::min(parentMaximum,_straight->farIntegralMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound).value(_age+hi));
     if(lo>=_localFarBegin)
-        return _straight.localFarIntervalMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound,parentMaximum,_tracking.coupledBounds,macro);
+        return _straight->localFarIntervalMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound,parentMaximum,_tracking.coupledBounds,macro);
     if(hi>_localFarBegin)
         return std::max(baselineMajorant(lo,_localFarBegin,parentMaximum,permitMacro),
                         baselineMajorant(_localFarBegin,hi,parentMaximum,permitMacro));
@@ -240,16 +257,16 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
             _tracking.transitionMaxExpectedEvents>0;
         if(_tracking.transitionVoxelBound!=TransitionVoxelBound::Disabled &&
            (!polynomialPrefix || lo<_tracking.coupledLocalScale/_inverseEll-_age))
-            return _straight.coupledIntervalMajorant(a,b,_meanLipschitz,true,parentMaximum,false,
+            return _straight->coupledIntervalMajorant(a,b,_meanLipschitz,true,parentMaximum,false,
                 _tracking.transitionVoxelBound!=TransitionVoxelBound::RangeOnly,
                 _tracking.transitionVoxelBound==TransitionVoxelBound::Bernstein5);
-        return _straight.coupledIntervalMajorant(a,b,_meanLipschitz,
+        return _straight->coupledIntervalMajorant(a,b,_meanLipschitz,
             a<_tracking.coupledLocalScale/_inverseEll,parentMaximum,macro);
     }
     if(_tracking.transitionIntegralBounds && a>=_birthBound.split)
-        return std::min(parentMaximum,_straight.transitionIntegralMajorant(a,b,_meanLipschitz).value(a));
+        return std::min(parentMaximum,_straight->transitionIntegralMajorant(a,b,_meanLipschitz).value(a));
     if(_tracking.transitionPointBounds && a>=_birthBound.split)
-        return _straight.transitionIntervalMajorant(a,b,_meanLipschitz,_tracking.tightenExpectedEvents,parentMaximum);
+        return _straight->transitionIntervalMajorant(a,b,_meanLipschitz,_tracking.tightenExpectedEvents,parentMaximum);
     if(_tracking.majorantMode==ConditionalMajorantMode::TwoConstants) {
         if(b<=_birthBound.split) return _birthBound.maximum;
         if(a>=_birthBound.split) return _tailMaximum;
@@ -257,8 +274,8 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
     }
     if(b<=_birthBound.split*(1+1e-14)) return std::min(parentMaximum,_birthBound.maximum);
     if(b>_birthBound.smoothEnd) {
-        if(a>=_straight.simpleBoundBegin()) {
-            const double bound=_straight.simpleIntervalMajorant(a,b,_meanLipschitz,parentMaximum);
+        if(a>=_straight->simpleBoundBegin()) {
+            const double bound=_straight->simpleIntervalMajorant(a,b,_meanLipschitz,parentMaximum);
             if(std::isfinite(bound) && _tracking.tightenExpectedEvents>0 &&
                 _hazardEnvelope*bound*(hi-lo)<=std::min(_tracking.tightenExpectedEvents,_tracking.maxExpectedEvents)) {
                 Profile::count(Profile::Counter::SimpleBoundAccepted);
@@ -267,10 +284,10 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
             Profile::count(Profile::Counter::SimpleBoundFallbacks);
             // The point cone was already queried. Tighten with the original
             // spatial certificate rather than asking the point path again.
-            return _straight.intervalMajorant(a,b,_tracking.tightenExpectedEvents,std::min(parentMaximum,bound));
+            return _straight->intervalMajorant(a,b,_tracking.tightenExpectedEvents,std::min(parentMaximum,bound));
         }
         if(_tracking.pointBounds && a>=_classicBegin) {
-            const double bound=_straight.pointIntervalMajorant(a,b,_meanLipschitz,parentMaximum);
+            const double bound=_straight->pointIntervalMajorant(a,b,_meanLipschitz,parentMaximum);
             if(std::isfinite(bound) && _tracking.tightenExpectedEvents>0 &&
                 _hazardEnvelope*bound*(hi-lo)<=std::min(_tracking.tightenExpectedEvents,_tracking.maxExpectedEvents)) {
                 Profile::count(Profile::Counter::PointBoundAccepted);
@@ -279,28 +296,29 @@ double ConditionalSegment::baselineMajorant(double lo,double hi,double parentMax
             Profile::count(Profile::Counter::PointBoundFallbacks);
             parentMaximum=std::min(parentMaximum,bound);
         }
-        return _straight.intervalMajorant(a,b,_tracking.tightenExpectedEvents,parentMaximum);
+        return _straight->intervalMajorant(a,b,_tracking.tightenExpectedEvents,parentMaximum);
     }
-    const double bound=std::min(parentMaximum,_straight.birthAdjacentMajorant(a,b,_birthBound));
+    const double bound=std::min(parentMaximum,_straight->birthAdjacentMajorant(a,b,_birthBound));
     // A local interval certificate can be much tighter than the curvature
     // of the entire birth cell, e.g. near a CSG feature.
     if(bound*(hi-lo)>_tracking.maxExpectedEvents) {
         Profile::count(Profile::Counter::LocalBoundFallbacks);
-        return _straight.intervalMajorant(a,b,_tracking.tightenExpectedEvents,bound);
+        return _straight->intervalMajorant(a,b,_tracking.tightenExpectedEvents,bound);
     }
     return bound;
 }
 
 double ConditionalSegment::globalFarMaximum() const {
     if(std::isnan(_globalFarMaximum))
-        _globalFarMaximum=_straight.globalFarMajorant(_tracking.globalFarStartScale);
+        _globalFarMaximum=_straight->globalFarMajorant(_tracking.globalFarStartScale);
     return _globalFarMaximum;
 }
 FlightState ConditionalSegment::samplePositiveEndpoint(Random &rng) const
 {
+    if (_varying) return _varying->samplePositiveEndpoint(rng);
     // At the birth point there is no new observation to sample.
-    auto endpoint=_age+_length==0 ? _straight.state() :
-        _straight.samplePositiveEndpoint(_age+_length,rng);
+    auto endpoint=_age+_length==0 ? _straight->state() :
+        _straight->samplePositiveEndpoint(_age+_length,rng);
     // Use the same double-precision position as the renderer's path context.
     endpoint.birthPosition=_origin+_length*_w;
     return endpoint;
@@ -326,6 +344,11 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             neural.networkQueries,neural.correctionCapHits,neural.neuralOutsideDomain,neural.neuralBaselineFallbacks,
             neural.neuralOutsideFeatureRange}; }
     } capture{diagnostics,work,traversed,neuralWork};
+    if (_varying) {
+        const double tr=_varying->track(rng,collision,hit,begin);
+        traversed=hit;
+        return tr;
+    }
     const bool twoConstants=_tracking.majorantMode==ConditionalMajorantMode::TwoConstants;
     hit=_length;
     const double ell=1/_inverseEll;
@@ -356,7 +379,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
     boost::container::small_vector<PendingInterval,4> pending;
     const auto proposalMean=[&](double age,bool transition) {
         Profile::Scope point(Profile::Stage::TrackProposalSdf);
-        return _straight.scalarMeanValue(age,transition);
+        return _straight->scalarMeanValue(age,transition);
     };
     const auto constantBound=[&](double begin,double end,double parent,bool permitMacro=true) {
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
@@ -370,13 +393,13 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         RayProfile::BoundScope scope(begin,end);
 #endif
         Profile::Scope bound(Profile::Stage::TrackBoundDispatch);
-        return _straight.transitionIntegralMajorant(_age+begin,_age+end,_meanLipschitz);
+        return _straight->transitionIntegralMajorant(_age+begin,_age+end,_meanLipschitz);
     };
     const auto clipMacro=[&](double lo,double &hi) {
         Profile::Scope clip(Profile::Stage::TrackMacroClip);
         if(_tracking.macrocellBounds && _age+lo>=_tracking.macrocellStartScale*ell) {
             double end=_age+hi;
-            if(_straight.clipMacrocellInterval(_age+lo,end) && end<_age+hi) {
+            if(_straight->clipMacrocellInterval(_age+lo,end) && end<_age+hi) {
                 const double clipped=end-_age;
                 if(clipped>lo) hi=clipped;
             }
@@ -412,7 +435,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         if(_tracking.exteriorCutoffSigma>0 && pending.empty() && lo>insideUntil) {
             Profile::Scope exterior(Profile::Stage::TrackExterior);
             const double age=_age+lo;
-            const double mean=_straight.scalarMeanValue(age);
+            const double mean=_straight->scalarMeanValue(age);
             const double difference=mean-_exteriorCutoff;
             // Protect the spatial certificate at both endpoints, including
             // the world-space ray and its conversion to absolute flight age.
@@ -428,7 +451,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                 // a whole macrocell can still be certified exterior.
                 if(_tracking.macrocellSize && certifiedEnd-lo<.25*ell) {
                     double end=_age+_length;
-                    if(_straight.exteriorMacrocell(age,end,_exteriorCutoff))
+                    if(_straight->exteriorMacrocell(age,end,_exteriorCutoff))
                         certifiedEnd=std::max(certifiedEnd,std::min(_length,MajorantBounds::down(end-_age)));
                 }
                 // Short unclassified remainders use the usual majorant plus a
@@ -449,22 +472,22 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             const auto tryBlock=[&](bool parent) {
                 double endAge=_age+proposalEnd,maximum;
                 MeanRayBounds parentMean;
-                const bool available=parent ? _straight.chapter2ParentRange(_age+lo,endAge,parentMean)
-                                            : _straight.chapter2MacrocellMajorant(_age+lo,endAge,maximum);
+                const bool available=parent ? _straight->chapter2ParentRange(_age+lo,endAge,parentMean)
+                                            : _straight->chapter2MacrocellMajorant(_age+lo,endAge,maximum);
                 if (!available) return;
                 double end=endAge<_age+proposalEnd ? endAge-_age : proposalEnd;
                 if(_age+end>endAge)end=std::nextafter(end,lo);
                 if(end>lo) {
                     const double budget=parent ? _tracking.chapter2ParentEvents : _tracking.chapter2FallbackEvents;
                     if(parent) {
-                        if(_tracking.chapter2ParentScreen && _straight.rejectChapter2Parent(
+                        if(_tracking.chapter2ParentScreen && _straight->rejectChapter2Parent(
                                 _age+lo,parentMean,end-lo,_hazardEnvelope,budget)) {
                             Profile::count(Profile::Counter::Chapter2ParentScreened);
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
                             // Audit the counterfactual decision. This extra oracle query is
                             // excluded from production work counts and from uninstrumented timings.
                             if(Profile::registry().enabled &&
-                               _straight.chapter2Majorant(_age+lo,endAge,parentMean,maximum) &&
+                               _straight->chapter2Majorant(_age+lo,endAge,parentMean,maximum) &&
                                maximum*_hazardEnvelope*(end-lo)<=budget)
                                 Profile::count(Profile::Counter::Chapter2ParentFalseReject);
 #endif
@@ -472,7 +495,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                             return;
                         }
                         Profile::count(Profile::Counter::Chapter2ParentBounds);
-                        if(!_straight.chapter2Majorant(_age+lo,endAge,parentMean,maximum)) return;
+                        if(!_straight->chapter2Majorant(_age+lo,endAge,parentMean,maximum)) return;
                     }
                     (parent ? parentRetryAt : chapter2RetryAt)=end;
                     if(budget==0 || maximum*_hazardEnvelope*(end-lo)<=budget) {
@@ -499,7 +522,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
                 RayProfile::BoundScope scope(lo,hi);
 #endif
-                interval.curve=_straight.farIntegralMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound);
+                interval.curve=_straight->farIntegralMajorant(_age+lo,_age+hi,_meanLipschitz,_meanGradientBound);
             }
             interval.maximum=interval.curve.value(_age+hi);
             pending.push_back(interval);
@@ -549,7 +572,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             if(voxel) {
                 hi=std::min({proposalEnd,_localFarBegin,_globalFarBegin});
                 if(polynomialPrefix)hi=std::min(hi,polynomialEnd);
-                const double face=_straight.nextMeanBoundary(_age+lo,_age+hi);
+                const double face=_straight->nextMeanBoundary(_age+lo,_age+hi);
                 if(face<_age+hi) hi=face-_age;
             } else {
                 double proposal=_length-lo;
@@ -608,7 +631,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                 if(_meanLipschitz>0) {
                     const double base=_field.kernel.sigma()/_meanLipschitz;
                     Profile::Scope point(Profile::Stage::TrackProposalSdf);
-                    const double value=_straight.meanValue(_age+lo);
+                    const double value=_straight->meanValue(_age+lo);
                     if(!std::isfinite(value))
                         throw NumericError(NumericStatus::InvalidMajorant,"nonfinite geometric proposal mean");
                     proposal=std::max(base,0.5*std::max(0.0,value)/_meanLipschitz);
@@ -638,7 +661,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
                 coarseRetryAt=hi;
                 coarseMaximum=std::numeric_limits<double>::infinity();
                 Profile::count(Profile::Counter::AdaptiveCoarseProbes);
-                if(_straight.coarseMajorant(_age+lo,end,maximum)) {
+                if(_straight->coarseMajorant(_age+lo,end,maximum)) {
                     const double clipped=end<_age+hi ? end-_age : hi;
                     if(clipped>lo) {
                         coarseRetryAt=clipped;
@@ -665,7 +688,7 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             // including grid faces for the positive-value Lipschitz proof.
             // Only ordinary adaptive proposals need interpolation-cell clips.
             if(!coarse && _age+lo>=_birthBound.split) {
-                const double boundary=_straight.nextMeanBoundary(_age+lo,_age+hi);
+                const double boundary=_straight->nextMeanBoundary(_age+lo,_age+hi);
                 if(boundary<_age+hi) {
                     hi=boundary-_age;
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_PROFILE
@@ -753,11 +776,11 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         if(dumpExpensive && b.maximum*_hazardEnvelope*(hi-lo)>1e5 && !dumped.exchange(true)) {
             if(const auto *r=RayProfile::active()) {
                 double zlo=0,zhi=0;
-                const bool polynomial=_straight.polynomialZBounds(_age+lo,_age+hi,zlo,zhi);
+                const bool polynomial=_straight->polynomialZBounds(_age+lo,_age+hi,zlo,zhi);
                 double sampledZlo=INFINITY,sampledZhi=-INFINITY,sampledDlo=INFINITY,peak=0,peakAt=lo;
                 for(int i=0;i<=2048;++i) {
                     const double t=lo+(hi-lo)*i/2048;
-                    const auto p=_straight.scalarStatistics(_age+t);
+                    const auto p=_straight->scalarStatistics(_age+t);
                     const double sd=std::sqrt(p.varianceF),h=hazard(t);
                     sampledZlo=std::min(sampledZlo,p.meanF/sd);sampledZhi=std::max(sampledZhi,p.meanF/sd);
                     sampledDlo=std::min(sampledDlo,p.meanAtZero/sd);

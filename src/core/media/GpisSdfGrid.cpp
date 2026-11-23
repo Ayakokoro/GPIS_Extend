@@ -705,15 +705,54 @@ void GpisSdfGrid::appendRayBreakpoints(const Eigen::Vector3d &o, const Eigen::Ve
 double GpisSdfGrid::valueDifference(const Eigen::Vector3d &p, const Eigen::Vector3d &d) const
 {
     Eigen::Vector3d q = worldToIndex*p + translation, dq = worldToIndex*d;
-    Eigen::Vector3d f, df;
-    int cell[3];
+    Eigen::Vector3d f, df, start, end, endError;
+    Vec3i cell, endCell;
     for (int a = 0; a < 3; ++a) {
-        const double x = std::clamp(q[a], double(data.clampMin[a]), double(data.clampMax[a]));
-        const double y = std::clamp(q[a]+dq[a], double(data.clampMin[a]), double(data.clampMax[a]));
-        if (std::floor(x) != std::floor(y)) return evaluate(p+d).value-evaluate(p).value;
-        cell[a] = int(std::floor(x))-data.origin[a];
-        f[a] = x-std::floor(x);
-        df[a] = (q[a] == x && q[a]+dq[a] == y) ? dq[a] : y-x;
+        const double lo = data.clampMin[a], hi = data.clampMax[a];
+        start[a] = std::clamp(q[a], lo, hi);
+        const double sum = q[a] + dq[a];
+        // TwoSum retains the distance past a face when the endpoint rounds onto it.
+        const double b = sum - q[a];
+        const double error = std::isfinite(sum) ? (q[a] - (sum-b)) + (dq[a]-b) : 0.0;
+        const bool clipped = sum < lo || sum > hi || (sum == lo && error < 0) || (sum == hi && error > 0);
+        end[a] = std::clamp(sum, lo, hi);
+        endError[a] = clipped ? 0.0 : error;
+        const double first = std::floor(start[a]), last = std::floor(end[a]);
+        cell[a] = int(first)-data.origin[a];
+        endCell[a] = int(last)-data.origin[a] - (end[a] == last && endError[a] < 0);
+        f[a] = start[a]-first;
+        df[a] = q[a] == start[a] && !clipped ? dq[a] : (end[a]-start[a])+endError[a];
+    }
+    if (cell != endCell) {
+        // Telescope over the three coordinate lines between the clamped endpoints.
+        // On each line, the changes over complete linear cells telescope to one
+        // nodal difference; only the first and last cell need their partial slopes.
+        double result = 0.0;
+        for (int a = 0; a < 3; ++a) {
+            if (df[a] == 0.0) continue;
+            const int b = (a+1)%3, c = (a+2)%3;
+            const int first = cell[a], last = endCell[a];
+            const int firstFace = first + (last > first);
+            const int lastFace = last + (last < first);
+            const double firstStep = double(firstFace + data.origin[a])-start[a];
+            const double lastStep = (end[a]-double(lastFace + data.origin[a]))+endError[a];
+            for (int ib = 0; ib < 2; ++ib) for (int ic = 0; ic < 2; ++ic) {
+                const auto node = [&](int index) {
+                    Vec3i corner = cell;
+                    corner[a] = index;
+                    corner[b] += ib;
+                    corner[c] += ic;
+                    return at(corner.x(),corner.y(),corner.z());
+                };
+                const double change = first == last ? df[a]*(node(first+1)-node(first)) :
+                    firstStep*(node(first+1)-node(first)) + (node(lastFace)-node(firstFace)) +
+                    lastStep*(node(last+1)-node(last));
+                result += (ib ? f[b] : 1-f[b])*(ic ? f[c] : 1-f[c])*change;
+            }
+            cell[a] = last;
+            f[a] = (end[a]-double(last + data.origin[a]))+endError[a];
+        }
+        return scale*result;
     }
     double result = 0.0;
     for (int z = 0; z < 2; ++z) for (int y = 0; y < 2; ++y) for (int x = 0; x < 2; ++x) {

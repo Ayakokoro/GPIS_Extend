@@ -28,10 +28,9 @@ creases), not an unbiased solution of sharp-edge scattering.
 The input is a directly evaluated procedural/analytic SDF or an existing SDF
 grid. Extinction, conditional covariance and tracking bounds are evaluated
 online. Supported means are homogeneous, linear (including its clamp),
-spherical, procedural `func: "knob"`, `"rounded_u_groove"` or `"two_spheres"`, and linearly interpolated VDB SDFs. Covariance must be a
-stationary squared exponential; its full positive definite world-space metric is
-obtained from the covariance derivatives. Procedural means without certified
-SDF queries and nonstationary kernels are rejected. Materials reuse
+spherical, procedural `func: "knob"`, `"rounded_u_groove"` or `"two_spheres"`, and linearly interpolated VDB SDFs. The stationary squared exponential
+supports a full positive definite world-space metric. A `proc_nonstationary`
+covariance uses the space-varying SE transport described below. Materials reuse
 classic_global's tinted mirror, conductor Fresnel, and Lambert micro-reflection implementations.
 For Lambert reflection, the full flux-weighted gradient is drawn with the collision.
 NEE and cosine-hemisphere continuation keep that same gradient observation and
@@ -59,6 +58,45 @@ query preserves that nonsmooth branch. Like the knob, it now uses analytic
 gradients through `ProceduralMean` for every medium, so new comparisons should
 rerender all methods together. The [backlight example](../data/example-scenes/two-spheres-backlight/global-conditional.json)
 uses coordinate and value scales of 0.1 to obtain radius 0.95 and gap 0.1.
+
+## Nonstationary SE and the Dragon scene
+
+Run these commands from the repository root with the Dragon scene pack under
+`gpis-scenes/dragon/`. The first command prepares the mean once. It samples
+the original transformed OpenVDB mean, including its detail grid and quadratic
+interpolation, at a world-space spacing of 1/128. The renderer reloads that
+grid with trilinear interpolation. The preset uses the original camera, lights,
+copper optical constants, and both covariance ramps.
+
+```powershell
+.\build\Release\bake_sdf_mean.exe gpis-scenes/dragon/dragon-function-space.json gpis-scenes/dragon/dragon-conditional-mean.vdb 0.0078125
+.\build\Release\tungsten.exe -t 8 -d outputs/dragon-global-conditional data/example-scenes/global-conditional/dragon.json
+```
+
+Use the original `gaussian_process.covariance` object with a
+`global_conditional` medium. Its `cov` is an isotropic squared exponential.
+`var` multiplies the field standard deviation and `ls` multiplies the
+correlation length. Both accept positive constants and the single-axis
+`bottom_top`, `left_right`, and `front_back` ramps. For Dragon's isotropic
+local lengths the two-point covariance is
+
+$$
+k(x,y)=\sigma_x\sigma_y
+\left(\frac{2\ell_x\ell_y}{\ell_x^2+\ell_y^2}\right)^{3/2}
+\exp\!\left(-\frac{\|x-y\|^2}{\ell_x^2+\ell_y^2}\right).
+$$
+
+The value and spatial derivatives at both points determine the Gaussian law
+of the field and gradient given the latest observed value and full gradient.
+The same law supplies the collision normal, the positive endpoint observation
+and the directional downcrossing rate. Nonstationary transport integrates that
+rate numerically, splitting at parameter clamps and VDB voxel faces. Distance
+sampling inverts the cumulative optical depth. The default shadow estimate is
+its exponential transmittance. `tracking_step` can tighten the integration
+step in world units. Stationary majorant tuning only affects stationary kernels.
+The nonstationary path uses full-domain integration and the baseline collision
+gradient. The baked support band, exterior cutoff, `two_constants`,
+`fp_gradient`, and neural correction require the stationary path.
 
 ## Baked classic_local narrow band
 

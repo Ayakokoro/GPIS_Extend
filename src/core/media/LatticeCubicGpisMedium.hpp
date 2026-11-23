@@ -12,6 +12,7 @@ class LatticeCubicGpisMedium final : public ClassicGlobalMedium {
     float _spacingInEll=0.5f, _radiusInEll=3.0f;
     float _entryStepSize=0.01f;
     bool _prune=true, _threeSigmaPruning=false;
+    bool _inheritFullGradient=false;
     std::unique_ptr<LatticeGaussianKernel> _kernel;
     std::unique_ptr<VaryingLatticeModel> _varying;
     std::shared_ptr<PhaseFunction> _deltaPhase;

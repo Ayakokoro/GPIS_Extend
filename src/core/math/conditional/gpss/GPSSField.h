@@ -7,6 +7,8 @@
 
 namespace Tungsten::ConditionalGpis {
 
+class NonstationaryConditioning;
+
 // value-gradient joint distribution at a single point, with optional prior information
 struct PointPrior {
     double meanF = 0.0;
@@ -20,6 +22,7 @@ struct GPSSField {
     MeanFieldPtr mean;
     CovarianceKernel kernel;
     Bounds3 activeDomain;
+    std::shared_ptr<const NonstationaryConditioning> nonstationary;
     PointPrior pointPrior(const Point3& x) const;
     void validate() const;
 };

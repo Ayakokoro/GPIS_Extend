@@ -1,5 +1,6 @@
 // Ported from macrofacet; see ../PORT.md for provenance and adaptations.
 #include "math/conditional/gpss/GPSSField.h"
+#include "NonstationaryConditioning.h"
 #include <stdexcept>
 
 namespace Tungsten::ConditionalGpis {
@@ -7,6 +8,7 @@ namespace Tungsten::ConditionalGpis {
 PointPrior GPSSField::pointPrior(const Point3& x) const {
     if (!mean) throw std::invalid_argument("GPSS field has no mean field");
     const MeanJet jet = mean->evaluate(x);
+    if (nonstationary) return nonstationary->pointPrior(x,jet);
     const double variance = kernel.sigma() * kernel.sigma();
     return {jet.value, variance, jet.gradient,
             kernel.gradientCovarianceAtZero(), Vector3::Zero()};

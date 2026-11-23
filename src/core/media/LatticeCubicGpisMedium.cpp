@@ -6,6 +6,7 @@
 #include "io/JsonObject.hpp"
 #include "math/CubicDowncrossing.hpp"
 #include "math/NonstationaryLatticeGaussianNoise.hpp"
+#include <type_traits>
 
 namespace Tungsten {
 namespace cg = ConditionalGpis;
@@ -35,6 +36,7 @@ struct NoisePiece {
 struct StationaryRayNoise {
     const LatticeGaussianKernel &kernel;
     LatticeGaussianRay realization;
+    std::optional<Vector> birthTransverseResidual;
     StationaryRayNoise(const LatticeGaussianKernel &k, const Vector &, const Vector &, uint32 seed)
     : kernel(k), realization(k,seed) {}
     double kernelSpacing() const { return kernel.spacing; }
@@ -49,8 +51,15 @@ struct StationaryRayNoise {
     void condition(double value,std::optional<double> derivative) {
         realization.condition(float(value),float(derivative.value_or(0)),derivative.has_value());
     }
-    void transverse(const NoisePiece &p,double t,Vector &,double &sd) const {
-        sd=kernel.transverseStddev((t-p.start)/p.width());
+    void transverse(const NoisePiece &p,double t,Vector &mean,double &sd) const {
+        const double u=(t-p.start)/p.width();
+        if (birthTransverseResidual) {
+            const auto law=kernel.conditionedTransverse(p.cell,u);
+            mean+=law.meanScale * *birthTransverseResidual;
+            sd=law.stddev;
+        } else {
+            sd=kernel.transverseStddev(u);
+        }
     }
 };
 
@@ -123,7 +132,7 @@ template<class Noise> struct Flight {
 };
 
 // A forward subdivision continues this flight. An ordinary scattering
-// surface observes its endpoint value and projected gradient for renewal+.
+// surface can observe the endpoint gradient before starting a new flight.
 template<class Noise> struct Endpoint : MediumPathContext {
     const Medium *owner;
     Flight<Noise> flight;
@@ -159,6 +168,7 @@ void LatticeCubicGpisMedium::fromJson(JsonPtr value, const Scene &scene) {
     value.getField("correlation_context",correlationContext);
     if (correlationContext!="renewal+")
         value.parseError("lattice_cubic_gpis supports only correlation_context renewal+");
+    value.getField("inherit_full_gradient",_inheritFullGradient);
     value.getField("lattice_spacing_in_ell",_spacingInEll);
     value.getField("kernel_radius_in_ell",_radiusInEll);
     value.getField("step_size",_entryStepSize);
@@ -176,6 +186,7 @@ rapidjson::Value LatticeCubicGpisMedium::toJson(Allocator &allocator) const {
     value["type"].SetString("lattice_cubic_gpis",allocator);
     value.RemoveMember("tracking_step");
     value.AddMember("correlation_context","renewal+",allocator);
+    value.AddMember("inherit_full_gradient",_inheritFullGradient,allocator);
     value.AddMember("lattice_spacing_in_ell",_spacingInEll,allocator);
     value.AddMember("kernel_radius_in_ell",_radiusInEll,allocator);
     value.AddMember("step_size",_entryStepSize,allocator);
@@ -189,6 +200,8 @@ void LatticeCubicGpisMedium::prepareForRender() {
     const auto *varying=dynamic_cast<const ProceduralNonstationaryCovariance *>(_covariance.get());
     if (!varying && (!se || !se->isIsotropic() || !se->isStationaryKernel()))
         throw std::invalid_argument("lattice_cubic_gpis requires isotropic squared_exponential or proc_nonstationary SE covariance");
+    if (_inheritFullGradient && varying)
+        throw std::invalid_argument("lattice_cubic_gpis: inherit_full_gradient requires stationary isotropic squared_exponential covariance");
     ClassicGlobalMedium::prepareForRender();
     if (!_sdfGrid) throw std::invalid_argument("lattice_cubic_gpis requires a trilinear OpenVDB SDF");
     _kernel.reset();
@@ -237,6 +250,9 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
         bool inwardBirth=false;
         if (end || hit) {
             double observedValue=0, observedDerivative=0;
+            Vector observedGradient;
+            Vec3d birthMeanGradient;
+            const double m=_sdfGrid->evaluate(vec(flight.origin),(end || _inheritFullGradient) ? &birthMeanGradient : nullptr);
             if (end) {
                 // A seed lookup may fill a cache. Keep those writes local
                 // when several branches turn at the same immutable endpoint.
@@ -244,28 +260,33 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
                 const auto piece=prev.noise.piece(end->age);
                 const double u=(end->age-piece.start)/piece.width();
                 const Cubic p=prev.segment(piece);
-                Vec3d g;
-                observedValue=_sdfGrid->evaluate(vec(flight.origin),&g)+CubicDowncrossing::value(p,u);
-                const double axial=eigen(g).dot(prev.direction)+CubicDowncrossing::slope(p,u)/piece.width();
-                Vector mean=eigen(g), axis1, axis2;
+                observedValue=m+CubicDowncrossing::value(p,u);
+                const double axial=eigen(birthMeanGradient).dot(prev.direction)+CubicDowncrossing::slope(p,u)/piece.width();
+                Vector mean=eigen(birthMeanGradient), axis1, axis2;
                 double sd;
                 prev.noise.transverse(piece,end->age,mean,sd);
                 cg::orthonormalComplement(prev.direction,axis1,axis2);
                 UniformSampler gen(end->transverseSeed);
                 const double r=sd*std::sqrt(-2*std::log((double(gen.nextI())+1)/4294967296.0));
                 const double angle=2*cg::kPi*(double(gen.nextI())/4294967296.0);
-                const Vector gradient=mean+(axial-mean.dot(prev.direction))*prev.direction
+                observedGradient=mean+(axial-mean.dot(prev.direction))*prev.direction
                     +r*(std::cos(angle)*axis1+std::sin(angle)*axis2);
-                observedDerivative=gradient.dot(direction);
+                observedDerivative=observedGradient.dot(direction);
             } else {
                 // The phase retains its unrounded reflection at grazing hits.
                 observedValue=hit->value;
-                observedDerivative=retainedDirection ? hit->derivative : hit->gradient.dot(direction);
+                observedGradient=hit->gradient;
+                observedDerivative=retainedDirection ? hit->derivative : observedGradient.dot(direction);
                 inwardBirth=observedDerivative<0;
             }
-            // Renewal+ retains these two scalar observations. Transverse
-            // gradient components at the next hit come from the new flight.
-            const double m=_sdfGrid->evaluate(vec(flight.origin),nullptr);
+            if constexpr (std::is_same_v<Noise,StationaryRayNoise>) {
+                if (_inheritFullGradient) {
+                    const Vector residual=observedGradient-eigen(birthMeanGradient);
+                    flight.noise.birthTransverseResidual=residual-axis*axis.dot(residual);
+                }
+            }
+            // The two along-ray observations are the same in both modes. At a
+            // voxel face, take the axial mean slope from the outgoing piece.
             GpisSdfCubicRay birthGeometry(*_sdfGrid,flight.origin,flight.direction);
             Cubic birthMean;
             const double width=birthGeometry.polynomial(0,flight.noise.piece(0).end,birthMean);

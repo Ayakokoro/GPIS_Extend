@@ -94,13 +94,24 @@ int main(int argc, char **argv)
         }
         if (!selected) throw std::runtime_error("Requested medium was not found");
         const auto meanJson = selected.getRequiredMember("gaussian_process").getRequiredMember("mean");
-        if (meanJson.castField<std::string>("type") != "procedural")
-            throw std::runtime_error("This baker expects a procedural SDF mean");
+        DirectoryChange context(Path(input.parent_path().generic_string()));
+        openvdb::initialize();
         Scene scene;
         const auto mean = scene.fetchMeanFunction(meanJson);
-        mean->loadResources();
         const auto *queries = mean->sdfQueries();
-        if (!queries) throw std::runtime_error("Mean does not expose SDF queries");
+        const auto *tabulated = dynamic_cast<const TabulatedMean *>(mean.get());
+        if (!queries && (!tabulated || tabulated->isVolume()))
+            throw std::runtime_error("Expected a procedural SDF or a tabulated SDF mean");
+        mean->loadResources();
+        const auto valueAt = [&](const V &p) {
+            return queries ? queries->evaluateJet(p).value :
+                (*mean)(Derivative::None,Vec3d(p.x(),p.y(),p.z()),Vec3d(0.0));
+        };
+        const auto jetAt = [&](const V &p) {
+            if (queries) return queries->evaluateJet(p);
+            const auto g = mean->dmean_da(Vec3d(p.x(),p.y(),p.z()));
+            return SdfJet{valueAt(p), V(g.x(),g.y(),g.z())};
+        };
 
         // Cover all cube boundaries carrying this medium, in world coordinates.
         // Use the renderer's JSON transform parser, including rotation/scale.
@@ -147,7 +158,6 @@ int main(int argc, char **argv)
                   << ", dense float storage: " << count*sizeof(float)/(1024.0*1024.0)
                   << " MiB\nSampling the original SDF mean..." << std::endl;
 
-        openvdb::initialize();
         const openvdb::Coord last(dimensions.x()-1, dimensions.y()-1, dimensions.z()-1);
         const openvdb::CoordBBox box(openvdb::Coord(0), last);
         openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> dense(box);
@@ -155,7 +165,7 @@ int main(int argc, char **argv)
             for (int y = 0; y < dimensions.y(); ++y)
                 for (int x = 0; x < dimensions.x(); ++x) {
                     const V p = origin + spacing*V(x,y,z);
-                    const float value = float(queries->evaluateJet(p).value);
+                    const float value = float(valueAt(p));
                     if (!std::isfinite(value)) throw std::runtime_error("Non-finite baked voxel");
                     dense.setValue(openvdb::Coord(x,y,z), value);
                 }
@@ -213,14 +223,14 @@ int main(int argc, char **argv)
         for (int i = 0; i < 100000; ++i) {
             V p;
             for (int a = 0; a < 3; ++a) p[a] = minimum[a]+random()*(maximum[a]-minimum[a]);
-            const auto reference = queries->evaluateJet(p);
+            const auto reference = jetAt(p);
             const auto q = baked.evaluate(p);
             uniform.add(reference, q);
             if (std::abs(reference.value) <= band) nearSurface.add(reference, q);
             if (i < 10000) {
                 for (int a = 0; a < 3; ++a)
                     p[a] = origin[a]+spacing*(padding+int(random()*(dimensions[a]-2*padding)));
-                const auto ref = queries->evaluateJet(p);
+                const auto ref = jetAt(p);
                 const auto v = baked.evaluate(p);
                 nodes.add(ref,v);
                 if (std::abs(ref.value-v.value) > 2e-5*std::max(1.0,std::abs(ref.value)))

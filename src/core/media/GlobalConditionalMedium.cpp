@@ -1,6 +1,7 @@
 #include "GlobalConditionalMedium.hpp"
 #include "GpisSdfGrid.hpp"
 #include "math/conditional/gpss/SdfMeanField.hpp"
+#include "math/conditional/gpss/NonstationaryConditioning.h"
 #include "math/conditional/transport/CollisionGradientSampler.h"
 #include "math/conditional/transport/DirectionalGradient.h"
 #include "math/conditional/transport/SinglePointNeural.h"
@@ -373,15 +374,23 @@ void GlobalConditionalMedium::prepareForRender() {
     _neuralOutsideDomain.store(0,std::memory_order_relaxed);
     _neuralBaselineFallbacks.store(0,std::memory_order_relaxed);
     _neuralOutsideFeatureRange.store(0,std::memory_order_relaxed);
-    if(!dynamic_cast<SquaredExponentialCovariance *>(_covariance.get()))
-        throw std::runtime_error("global_conditional requires a stationary squared_exponential covariance");
+    const auto *varying=dynamic_cast<const ProceduralNonstationaryCovariance *>(_covariance.get());
+    if (!varying && !dynamic_cast<const SquaredExponentialCovariance *>(_covariance.get()))
+        throw std::runtime_error("global_conditional requires squared_exponential or proc_nonstationary SE covariance");
+    if (varying && (_fpGradient || _singlePointNeural))
+        throw std::runtime_error("fp_gradient and single_point_neural corrections require stationary squared_exponential covariance");
+    if (varying && (_bandField || _tracking.exteriorCutoffSigma>0 ||
+                    _tracking.majorantMode!=cg::ConditionalMajorantMode::Adaptive))
+        throw std::runtime_error("proc_nonstationary uses full-domain numerical tracking; remove the support cutoff, band or two_constants majorant");
     ClassicGlobalMedium::prepareForRender();
-    _field.kernel=cg::CovarianceKernel(_sigma,_ndf->covariance()/(_sigma*_sigma));
+    _field.nonstationary.reset();
+    if (varying) _field.nonstationary=std::make_shared<cg::NonstationaryConditioning>(*varying);
+    else _field.kernel=cg::CovarianceKernel(_sigma,_ndf->covariance()/(_sigma*_sigma));
     _field.activeDomain={Eigen::Vector3d::Constant(-1e30),Eigen::Vector3d::Constant(1e30)};
     if(_sdfGrid) {
 #if OPENVDB_AVAILABLE
         // The base medium owns the immutable SDF for the whole render lifetime.
-        _sdfGrid->buildMacrocells(_tracking.majorantMode==cg::ConditionalMajorantMode::Adaptive ? _tracking.macrocellSize : 0,
+        _sdfGrid->buildMacrocells(!varying && _tracking.majorantMode==cg::ConditionalMajorantMode::Adaptive ? _tracking.macrocellSize : 0,
                                   _tracking.chapter2ParentEvents>0);
         _field.mean=std::shared_ptr<const cg::MeanField>(_sdfGrid.get(),[](const cg::MeanField *){});
 #endif

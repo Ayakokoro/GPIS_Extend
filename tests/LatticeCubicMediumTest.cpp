@@ -20,6 +20,7 @@ using namespace Tungsten;
 namespace fs = std::filesystem;
 namespace {
 constexpr float Ell=0.25f, Sigma=0.02f;
+const std::string Mirror=R"({"type":"mirror","albedo":1})";
 void require(bool ok,const char *message) {
     if (!ok) throw std::runtime_error(message);
 }
@@ -77,7 +78,8 @@ std::shared_ptr<LatticeCubicGpisMedium> load(const fs::path &path,bool prune,boo
                                              const std::string &pruningMode="",
                                              const std::string &correlation="",
                                              std::optional<float> stepSize=std::nullopt,
-                                             const std::string &material=R"({"type":"mirror","albedo":1})") {
+                                             const std::string &material=Mirror,
+                                             bool inheritFullGradient=false) {
     const std::string covariance=varying
         ? R"({"type":"proc_nonstationary","cov":{"type":"squared_exponential","sigma":1,"lengthScale":1},"var":{"type":"noise","noise":"left_right","min":0.012,"max":0.035,"start":-0.25,"end":0.23},"ls":{"type":"noise","noise":"front_back","min":0.09,"max":0.25,"start":0.018,"end":1.38}})"
         : R"({"type":"squared_exponential","sigma":0.02,"lengthScale":0.25})";
@@ -85,6 +87,7 @@ std::shared_ptr<LatticeCubicGpisMedium> load(const fs::path &path,bool prune,boo
         std::string(prune ? "true" : "false")+
         (pruningMode.empty() ? "" : ",\"geometry_pruning_mode\":\""+pruningMode+"\"")+
         (correlation.empty() ? "" : ",\"correlation_context\":\""+correlation+"\"")+
+        (inheritFullGradient ? ",\"inherit_full_gradient\":true" : "")+
         (stepSize ? ",\"step_size\":"+std::to_string(*stepSize) : "")+
         ",\"material\":"+material+R"(,"gaussian_process":{"type":"standard",
             "covariance":)"+covariance+R"(,"mean":{"type":"tabulated","scale":1,"grid":{"type":"vdb","file":")"+
@@ -497,15 +500,55 @@ void testOrdinarySurfaceRenewal(const LatticeCubicGpisMedium &medium) {
     require(distinct,"ordinary and transparent continuations must exercise distinct realizations");
 }
 
+void testInheritedOrdinaryTurn(const LatticeCubicGpisMedium &medium,const LatticeGaussianKernel &kernel,
+        const Ray &prefix,Medium::MediumState plus,Medium::MediumState minus) {
+    // The birth gradients differ by 2 along X. Both the incident Z ray and the
+    // scattered Y ray are perpendicular to X, so their axial fields match.
+    plus.startsAtScatteringSurface=minus.startsAtScatteringSurface=true;
+    const Ray turn(prefix.hitpoint(),Vec3f(0.f,1.f,0.f),0,.25f);
+    auto gain=[&](double t) {
+        const int cell=int(t/kernel.spacing);
+        return kernel.conditionedTransverse(cell,t/kernel.spacing-cell).meanScale;
+    };
+    for (unsigned i=0;i<64;++i) {
+        auto a=plus,b=minus;
+        auto ra=sampler(i+9000),rb=ra;
+        MediumSample x,y;
+        require(medium.sampleDistance(ra,turn,a,x) && medium.sampleDistance(rb,turn,b,y) &&
+                x.exited==y.exited && x.t==y.t,"ordinary turn must retain the same new axial observations");
+        if (x.exited) continue;
+        PhaseSample hx,hy;
+        require(x.phase->sample(ra,turn.dir(),x,hx) && y.phase->sample(rb,turn.dir(),y,hy),
+                "sample reflected gradients after the ordinary turn");
+        const auto gx=std::dynamic_pointer_cast<const FpGradientPathContext>(hx.pathContext);
+        const auto gy=std::dynamic_pointer_cast<const FpGradientPathContext>(hy.pathContext);
+        require(gx && gy,"collision after ordinary turn has full gradients");
+        const Eigen::Vector3d expected(2*gain(prefix.farT())*gain(gx->origin.y()),0,0);
+        require((gx->gradient-gy->gradient-expected).norm()<1e-8,
+                "ordinary endpoint and next GPIS hit must both propagate transverse memory");
+        return;
+    }
+    require(false,"ordinary turn must reach a new GPIS hit");
+}
+
 void testTransverseMemory(const fs::path &path) {
     writeMeanGrid(path,0.f);
+    const LatticeGaussianKernel kernel(Sigma,Ell);
     for (bool varying : {false,true}) {
         const auto medium=load(path,true,varying,"","renewal+");
+        const auto inherited=varying ? nullptr : load(path,true,false,"","renewal+",std::nullopt,Mirror,true);
+        const auto inheritedThreeSigma=varying ? nullptr : load(path,true,false,"three_sigma","renewal+",std::nullopt,Mirror,true);
+        rapidjson::Document doc;
+        require(!medium->toJson(doc.GetAllocator())["inherit_full_gradient"].GetBool(),
+                "projected birth gradient must be the default");
+        if (inherited)
+            require(inherited->toJson(doc.GetAllocator())["inherit_full_gradient"].GetBool(),
+                    "full gradient selection must survive serialization");
         const Vec3f dir(0.f,0.f,1.f);
         const Ray ray(Vec3f(0.f),dir,0,.12f);
-        auto birth=[&](double tangent) {
+        auto birth=[&](const LatticeCubicGpisMedium &owner,double tangent) {
             auto contact=std::make_shared<FpGradientPathContext>();
-            contact->owner=medium.get();
+            contact->owner=&owner;
             contact->rayOrigin=ray.pos();
             contact->origin.setZero();
             contact->value=0;
@@ -520,7 +563,7 @@ void testTransverseMemory(const fs::path &path) {
         };
         unsigned collisions=0, visible=0;
         for (unsigned i=0;i<256 && (collisions<4 || !visible);++i) {
-            auto a=birth(1), b=birth(-1), shadow=b;
+            auto a=birth(*medium,1), b=birth(*medium,-1), shadow=b;
             auto da=sampler(i), db=sampler(i), ds=sampler(i);
             MediumSample x,y;
             require(medium->sampleDistance(da,ray,a,x) && medium->sampleDistance(db,ray,b,y),
@@ -528,18 +571,80 @@ void testTransverseMemory(const fs::path &path) {
             require(x.exited==y.exited && x.t==y.t,"equal projected observations must give the same free flight");
             require(medium->transmittance(ds,ray,true,true,&shadow)==(x.exited ? 1.f : 0.f),
                     "GPIS shadow samples the surface-conditioned flight");
+            MediumSample conditioned;
+            if (inherited) {
+                auto state=birth(*inherited,1);
+                auto draw=sampler(i);
+                require(inherited->sampleDistance(draw,ray,state,conditioned) &&
+                        conditioned.exited==x.exited && conditioned.t==x.t,
+                        "full gradient inheritance must preserve the matched first hit");
+            }
             if (x.exited) { ++visible; continue; }
             require(x.t>0,"the first root after the observed GPIS surface must be distinct");
             PhaseSample px,py;
+            da=sampler(i+8000); db=da;
             require(x.phase->sample(da,dir,x,px) && y.phase->sample(db,dir,y,py),"sample renewed mirror gradients");
             const auto gx=std::dynamic_pointer_cast<const FpGradientPathContext>(px.pathContext);
             const auto gy=std::dynamic_pointer_cast<const FpGradientPathContext>(py.pathContext);
             require(gx && gy && px.w==py.w && (gx->gradient-gy->gradient).squaredNorm()<1e-22,
                     "short-flight collision gradient must forget the transverse birth gradient");
+            if (inherited) {
+                auto normalAtHit=[&](const MediumSample &hit) -> Eigen::Vector3d {
+                    auto draw=sampler(i+8000);
+                    PhaseSample reflected;
+                    require(hit.phase->sample(draw,dir,hit,reflected),"sample inherited collision gradient");
+                    const auto context=std::dynamic_pointer_cast<const FpGradientPathContext>(reflected.pathContext);
+                    require(bool(context),"full gradient must survive the reflection");
+                    return context->gradient;
+                };
+                const auto actual=normalAtHit(conditioned);
+                if (collisions==0) {
+                    // The zero mean fixture is inside the coarse three-sigma bound.
+                    auto selected=birth(*inheritedThreeSigma,1);
+                    auto paired=sampler(i);
+                    MediumSample threeSigma;
+                    require(inheritedThreeSigma->sampleDistance(paired,ray,selected,threeSigma) &&
+                            !threeSigma.exited && threeSigma.t==conditioned.t &&
+                            (normalAtHit(threeSigma)-actual).norm()<1e-12,
+                            "three-sigma pruning must use the same conditional hit gradient");
+                }
+                const double index=gx->origin.z()/kernel.spacing;
+                const int cell=int(std::floor(index));
+                const double u=index-cell;
+                const auto law=kernel.conditionedTransverse(cell,u);
+                const double scale=law.stddev/kernel.transverseStddev(u);
+                close(actual.x(),law.meanScale+scale*gx->gradient.x(),1e-9,"inherited transverse mean and spread");
+                close(actual.y(),scale*gx->gradient.y(),1e-9,"independent transverse noise with conditional spread");
+                close(actual.z(),gx->gradient.z(),1e-12,"axial derivative belongs to the traced flight");
+
+                const float cut=.5f*conditioned.t;
+                const Ray prefix(ray.pos(),dir,0,cut), suffix(prefix.hitpoint(),dir,0,ray.farT()-cut);
+                auto state=birth(*inherited,1);
+                auto draw=sampler(i);
+                MediumSample part;
+                require(inherited->sampleDistance(draw,prefix,state,part) && part.exited,
+                        "prefix before the first crossing must reach an ordinary endpoint");
+                if (collisions==0) {
+                    auto other=birth(*inherited,-1);
+                    auto paired=sampler(i);
+                    require(inherited->sampleDistance(paired,prefix,other,part) && part.exited,
+                            "opposite transverse birth must reach the same ordinary endpoint");
+                    testInheritedOrdinaryTurn(*inherited,kernel,prefix,state,other);
+                }
+                require(inherited->sampleDistance(draw,suffix,state,part) && !part.exited,
+                        "a cut before the collision must continue the inherited flight");
+                close(cut+part.t,conditioned.t,1e-6,"split full-gradient flight collision distance");
+                require((normalAtHit(part)-actual).norm()<1e-7,
+                        "splitting a flight must retain its original transverse birth and age");
+            }
             ++collisions;
         }
         require(collisions>=4 && visible,"exercise both visibility outcomes next to the GPIS birth");
     }
+    bool rejected=false;
+    try { load(path,true,true,"","renewal+",std::nullopt,Mirror,true); }
+    catch (const std::exception &) { rejected=true; }
+    require(rejected,"full gradient inheritance must reject the unsupported nonstationary kernel");
 }
 
 void test(const LatticeCubicGpisMedium &plain,const LatticeCubicGpisMedium &pruned) {

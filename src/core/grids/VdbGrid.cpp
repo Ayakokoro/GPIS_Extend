@@ -187,6 +187,8 @@ rapidjson::Value VdbGrid::toJson(Allocator &allocator) const
     if (_integrationMethod == IntegrationMethod::Raymarching || _sampleMethod == SampleMethod::Raymarching)
         result.add("step_size", _stepSize);
 
+    if (_requestSDF)
+        result.add("request_sdf", true);
     if (std::isfinite(_backgroundValue)) {
         result.add("background_value", _backgroundValue);
     }

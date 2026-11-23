@@ -33,6 +33,7 @@ build/Release/tungsten.exe -t 8 -s 20261024 -d outputs/lattice-shaderball-nonsta
 | 场景参数 | 默认值 | 含义 |
 | --- | --- | --- |
 | `correlation_context` | `"renewal+"` | 使用原始 Dragon 的两项端点观测和普通表面分支规则。 |
+| `inherit_full_gradient` | `false` | 在平稳各向同性 SE 下设为 `true`，下一自由程还继承最近端点的两个横向梯度分量。可与两档剪枝配合使用。 |
 | `step_size` | 0.01 | 入口首次采样的抖动宽度，单位为世界空间距离。后续首根仍在三次段内求解。 |
 | `lattice_spacing_in_ell` | 0.5 | Δ / ℓ。减小后细化基函数，每个格段要合并更多系数。 |
 | `kernel_radius_in_ell` | 3 | 截断半径 / ℓ。增大后保留更多核尾部。 |
@@ -41,7 +42,7 @@ build/Release/tungsten.exe -t 8 -s 20261024 -d outputs/lattice-shaderball-nonsta
 
 在理想独立高斯系数模型中，有限维协方差直接等于基函数权重的内积。碰撞后，按起点场值和出射方向导数对起点附近的系数做线性投影。平稳核的两行权重分别为偶函数和奇函数，内积为零，只需两个预先计算的标量归一化因子。
 
-命中点的轴向导数取自实际求根的三次式。平稳核的两个横向梯度分量各自具有方差 K(t,t)/ℓ²，只在需要法线时抽样。
+命中点的轴向导数取自实际求根的三次式。平稳核的两个横向梯度分量默认各自具有方差 K(t,t)/ℓ²。要继承完整梯度，在场景的 `lattice_cubic_gpis` 介质对象中设置 `"inherit_full_gradient": true`，与 `correlation_context` 同级。已知起点梯度时，着色与直接光采样都会使用条件化后的梯度分布。首次从外部进入时使用先验。自由程中途直穿透明边界时，相关距离从原出生点量起。[离散条件分布](../../../docs/lattice-cubic-renewal-plus.md#3-保守档如何求首次命中)
 
 ## 路径记忆
 
