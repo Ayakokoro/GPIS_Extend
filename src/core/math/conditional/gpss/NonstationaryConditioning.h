@@ -8,6 +8,7 @@ class ProceduralNonstationaryCovariance;
 namespace ConditionalGpis {
 
 struct NonstationaryParameters;
+struct NonstationaryBoundData;
 
 // Paciorek-Schervish covariance with a squared-exponential base and diagonal
 // local length tensor. The amplitude and widths are measured in world space.
@@ -38,10 +39,18 @@ class NonstationaryFlight {
     FlightState _birth;
     MeanJet _birthMean;
     std::unique_ptr<MeanRayCursor> _cursor;
+    mutable std::unique_ptr<NonstationaryBoundData> _boundData;
     double _nearDistance;
 public:
     NonstationaryFlight(const NonstationaryConditioning &kernel, const MeanField &mean,
                         const FlightState &birth);
+    NonstationaryFlight(NonstationaryFlight &&) noexcept;
+    ~NonstationaryFlight();
+    // Return +infinity when the interval needs direct integration.
+    double hazardMajorant(double beginAge, double endAge, const MeanRayBounds &meanBounds) const;
+    bool coarseMeanBounds(double beginAge, double &endAge, MeanRayBounds &range) const {
+        return _cursor && _cursor->coarseRayBounds(beginAge,endAge,range);
+    }
     NonstationaryMoments moments(double age) const;
     PointPrior at(double age) const;
 };

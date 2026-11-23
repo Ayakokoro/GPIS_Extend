@@ -1,11 +1,13 @@
 #include "ClassicLocalGrid.hpp"
 #include "io/JsonObject.hpp"
 #include "io/Scene.hpp"
+#include "math/ClassicGlobalMath.hpp"
 #include "thread/ThreadPool.hpp"
 #include "thread/ThreadUtils.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 #if TUNGSTEN_NANOVDB_AVAILABLE
@@ -16,7 +18,7 @@
 #endif
 
 namespace Tungsten {
-void ClassicLocalField::fromJson(JsonPtr field,const Scene &scene) {
+void ClassicLocalField::fromJson(JsonPtr field,const Scene &scene,bool allowAlphaGrid) {
     file=scene.fetchResource(field.getRequiredMember("file"));
     field.getField("sdf_grid",sdfName); field.getField("density_grid",densityName);
     field.getField("transform",transform); field.getField("macrocell_size",macrocellSize);
@@ -24,25 +26,48 @@ void ClassicLocalField::fromJson(JsonPtr field,const Scene &scene) {
         if (field["macrocell_size"] || macrocellResolution<=0)
             field.parseError("classic_local: macrocell_resolution must be positive and excludes macrocell_size");
     }
-    if (field["alpha_grid"] || field["use_alpha_grid"])
-        field.parseError("classic_local stationary mode takes gradient covariance from the kernel, not an alpha grid");
+    alphaName.clear();
+    if (field["use_alpha_grid"])
+        field.parseError("classic_local: select a spatial alpha field with alpha_grid");
+    if (field.getField("alpha_grid",alphaName) && (!allowAlphaGrid || alphaName.empty()))
+        field.parseError("classic_local: alpha_grid requires a spatial alpha field and a nonempty grid name");
     if (sdfName.empty() || densityName.empty() || macrocellSize<1 || macrocellSize>64)
         field.parseError("classic_local: nonempty grid names and macrocell_size in [1,64] are required");
 }
 rapidjson::Value ClassicLocalField::toJson(rapidjson::Document::AllocatorType &allocator) const {
     JsonObject result{allocator,"file",*file,"sdf_grid",sdfName,"density_grid",densityName,"transform",transform};
+    if (!alphaName.empty()) result.add("alpha_grid",alphaName);
     if (macrocellResolution) result.add("macrocell_resolution",macrocellResolution);
     else result.add("macrocell_size",macrocellSize);
     return result;
 }
 std::unique_ptr<ClassicLocalGrid> ClassicLocalField::load() const {
-    return std::make_unique<ClassicLocalGrid>(file->absolute().asString(),sdfName,densityName,transform,macrocellSize,macrocellResolution);
+    return std::make_unique<ClassicLocalGrid>(file->absolute().asString(),sdfName,densityName,transform,
+                                              macrocellSize,macrocellResolution,alphaName);
 }
 #if TUNGSTEN_NANOVDB_AVAILABLE
 namespace {
 using V = Eigen::Vector3d;
 using M = Eigen::Matrix3d;
 constexpr double guard = 2048*std::numeric_limits<double>::epsilon();
+
+double paddedMaximum(double value) {
+    return value==0 ? 0 : std::nextafter(value*(1+guard),std::numeric_limits<double>::infinity());
+}
+
+template<typename Accessor>
+double nodeMaximum(Accessor &accessor,const Eigen::Vector3i &lo,const Eigen::Vector3i &hi,
+                   double background,const char *name) {
+    double maximum=background;
+    for (int k=lo.z(); k<=hi.z(); ++k) for (int j=lo.y(); j<=hi.y(); ++j)
+        for (int i=lo.x(); i<=hi.x(); ++i) {
+            const double value=accessor.getValue(nanovdb::Coord(i,j,k));
+            if (!(value>=0) || !std::isfinite(value))
+                throw std::runtime_error(std::string("classic_local: ")+name+" must be finite and nonnegative");
+            maximum=std::max(maximum,value);
+        }
+    return paddedMaximum(maximum);
+}
 
 struct GridView {
     nanovdb::GridHandle<nanovdb::HostBuffer> handle;
@@ -52,7 +77,8 @@ struct GridView {
     Eigen::Vector3i minimum, maximum;
     double background;
 
-    GridView(const std::string &file, const std::string &name, const M &worldToField, const V &fieldOffset)
+    GridView(const std::string &file, const std::string &name, const M &worldToField, const V &fieldOffset,
+             bool allowEmpty=false)
         : handle(nanovdb::io::readGrid<nanovdb::HostBuffer>(file, name)) {
         grid = handle.grid<float>();
         if (!grid) throw std::runtime_error("classic_local: missing or non-float NVDB grid '"+name+"'");
@@ -72,6 +98,10 @@ struct GridView {
         if (!worldToIndex.allFinite() || !translation.allFinite() || !std::isfinite(background))
             throw std::runtime_error("classic_local: nonfinite grid transform/background");
         const auto box=grid->indexBBox();
+        if (allowEmpty && box.empty()) {
+            minimum.setZero(); maximum.setConstant(-1);
+            return;
+        }
         for (int a=0; a<3; ++a) {
             minimum[a]=box.min()[a]; maximum[a]=box.max()[a];
             if (minimum[a]>maximum[a] || minimum[a]<=std::numeric_limits<int>::min()+2 ||
@@ -128,9 +158,10 @@ struct GridView {
 
 struct ClassicLocalGrid::Impl {
     GridView sdf, density;
+    std::unique_ptr<GridView> alpha;
     V width;
     Eigen::Vector3i first, last, dimensions;
-    std::vector<double> maxima;
+    std::vector<double> maxima, spatialMaxima;
     double densityAt(const V &world,bool supportOnly) const {
         // Match macrofacet's NanoVdbMean active domain: [minNode,maxNode+1].
         const V q=sdf.worldToIndex*world+sdf.translation;
@@ -142,9 +173,15 @@ struct ClassicLocalGrid::Impl {
         return index==dimensions[axis] ? double(last[axis]) : first[axis]+index*width[axis];
     }
     Impl(const std::string &file, const std::string &sdfName, const std::string &densityName,
-         const M &worldToField, const V &offset, int size, int resolution)
+         const M &worldToField, const V &offset, int size, int resolution,const std::string &alphaName)
         : sdf(file,sdfName,worldToField,offset), density(file,densityName,worldToField,offset) {
         if (density.background!=0) throw std::runtime_error("classic_local: density background must be zero");
+        if (!alphaName.empty()) {
+            alpha=std::make_unique<GridView>(file,alphaName,worldToField,offset,true);
+            if (alpha->worldToIndex!=density.worldToIndex || alpha->translation!=density.translation)
+                throw std::runtime_error("classic_local: alpha and density grids require the same index transform");
+            if (alpha->background<0) throw std::runtime_error("classic_local: alpha background must be nonnegative");
+        }
         // Include interpolation support between active nodes and vacuum nodes.
         first=density.minimum-Eigen::Vector3i::Ones();
         last=density.maximum+Eigen::Vector3i::Ones();
@@ -158,36 +195,44 @@ struct ClassicLocalGrid::Impl {
             count*=size_t(n);
         }
         maxima.resize(count);
+        if (alpha) spatialMaxima.resize(count);
         const uint32 depth=uint32(dimensions.z());
         const auto workers=ThreadUtils::pool ? std::max(1u,ThreadUtils::pool->threadCount()) : 1u;
         ThreadUtils::parallelFor(0,depth,std::min(workers,depth),[&](uint32 z) {
             auto accessor=density.grid->getAccessor();
+            std::optional<decltype(accessor)> alphaAccessor;
+            if (alpha) alphaAccessor.emplace(*alpha->grid);
             for (int y=0; y<dimensions.y(); ++y)
             for (int x=0; x<dimensions.x(); ++x) {
                 const Eigen::Vector3i cell(x,y,int(z));
                 Eigen::Vector3i lo,hi;
                 for (int a=0; a<3; ++a) {
                     // One-cell halo covers cell selection at rounded DDA faces.
-                    lo[a]=std::max(density.minimum[a],int(std::floor(face(a,cell[a])))-1);
-                    hi[a]=std::min(density.maximum[a],int(std::ceil(face(a,cell[a]+1)))+1);
+                    lo[a]=int(std::floor(face(a,cell[a])))-1;
+                    hi[a]=int(std::ceil(face(a,cell[a]+1)))+1;
                 }
-                double maximum=0;
-                for (int k=lo.z(); k<=hi.z(); ++k) for (int j=lo.y(); j<=hi.y(); ++j)
-                    for (int i=lo.x(); i<=hi.x(); ++i) {
-                        const double value=accessor.getValue(nanovdb::Coord(i,j,k));
-                        if (!(value>=0) || !std::isfinite(value))
-                            throw std::runtime_error("classic_local: density must be finite and nonnegative");
-                        maximum=std::max(maximum,value);
-                    }
-                maxima[(size_t(z)*dimensions.y()+y)*dimensions.x()+x]=maximum==0 ? 0 :
-                    std::nextafter(maximum*(1+guard),std::numeric_limits<double>::infinity());
+                const size_t index=(size_t(z)*dimensions.y()+y)*dimensions.x()+x;
+                if (!alphaAccessor) {
+                    maxima[index]=nodeMaximum(accessor,lo.cwiseMax(density.minimum),hi.cwiseMin(density.maximum),
+                                              density.background,"density");
+                    continue;
+                }
+                maxima[index]=nodeMaximum(accessor,lo,hi,density.background,"density");
+                if (maxima[index]>0) {
+                    const double a=nodeMaximum(*alphaAccessor,lo,hi,alpha->background,"alpha");
+                    // The normalized mean normal has projection >= -1. Both density
+                    // and alpha interpolate within their respective corner extrema.
+                    if (a>0) spatialMaxima[index]=paddedMaximum(maxima[index]*
+                        ClassicGlobal::negativePartMean(-1.0,a/std::sqrt(2.0)));
+                }
             }
         });
     }
 };
 
 ClassicLocalGrid::ClassicLocalGrid(const std::string &file, const std::string &sdfName,
-        const std::string &densityName, const Mat4f &fieldToWorld, int size, int resolution) {
+        const std::string &densityName, const Mat4f &fieldToWorld, int size, int resolution,
+        const std::string &alphaName) {
     if (size<1 || size>64) throw std::invalid_argument("classic_local: macrocell_size must be in [1,64]");
     if (resolution<0) throw std::invalid_argument("classic_local: negative macrocell_resolution");
     Eigen::Matrix4d transform;
@@ -197,11 +242,15 @@ ClassicLocalGrid::ClassicLocalGrid(const std::string &file, const std::string &s
         throw std::invalid_argument("classic_local: field transform must be finite, affine and invertible");
     const Eigen::Matrix4d inverse=transform.inverse();
     _impl=std::make_unique<Impl>(file,sdfName,densityName,inverse.topLeftCorner<3,3>(),
-                               inverse.topRightCorner<3,1>(),size,resolution);
+                               inverse.topRightCorner<3,1>(),size,resolution,alphaName);
 }
 ClassicLocalGrid::~ClassicLocalGrid()=default;
 double ClassicLocalGrid::density(const V &world) const {
     return _impl->densityAt(world,false);
+}
+double ClassicLocalGrid::alpha(const V &world) const {
+    if (!_impl->alpha) throw std::logic_error("classic_local: alpha_grid was not loaded");
+    return _impl->alpha->sample(world);
 }
 bool ClassicLocalGrid::hasDensity(const V &world) const { return _impl->densityAt(world,true)!=0; }
 V ClassicLocalGrid::meanGradient(const V &world) const {
@@ -270,7 +319,7 @@ bool ClassicLocalGrid::Cursor::next(Segment &segment) {
     const double end=std::min(_end,_nextFace.minCoeff());
     if (!(end>_begin)) throw std::runtime_error("classic_local: density DDA failed to advance");
     const size_t index=(size_t(_cell.z())*_grid->dimensions.y()+_cell.y())*_grid->dimensions.x()+_cell.x();
-    segment={_begin,end,_grid->maxima[index]};
+    segment={_begin,end,_grid->maxima[index],_grid->spatialMaxima.empty() ? 0 : _grid->spatialMaxima[index]};
     if (end<_end) for (int a=0;a<3;++a) {
         // Recompute absolute crossings, including all axes tied at an edge.
         // Adding a constant delta instead would accumulate rounding error.
@@ -301,11 +350,13 @@ void ClassicLocalGrid::Cursor::appendVoxelBoundaries(std::vector<double> &knots)
 }
 #else
 struct ClassicLocalGrid::Impl {};
-ClassicLocalGrid::ClassicLocalGrid(const std::string &,const std::string &,const std::string &,const Mat4f &,int,int) {
+ClassicLocalGrid::ClassicLocalGrid(const std::string &,const std::string &,const std::string &,const Mat4f &,int,int,
+                                   const std::string &) {
     throw std::runtime_error("classic_local requires a build with NanoVDB support");
 }
 ClassicLocalGrid::~ClassicLocalGrid()=default;
 double ClassicLocalGrid::density(const Eigen::Vector3d &) const { throw std::runtime_error("NanoVDB unavailable"); }
+double ClassicLocalGrid::alpha(const Eigen::Vector3d &) const { throw std::runtime_error("NanoVDB unavailable"); }
 bool ClassicLocalGrid::hasDensity(const Eigen::Vector3d &) const { throw std::runtime_error("NanoVDB unavailable"); }
 Eigen::Vector3d ClassicLocalGrid::meanGradient(const Eigen::Vector3d &) const { throw std::runtime_error("NanoVDB unavailable"); }
 ClassicLocalGrid::Cursor::Cursor(const ClassicLocalGrid &,const Eigen::Vector3d &,const Eigen::Vector3d &,double,double) {

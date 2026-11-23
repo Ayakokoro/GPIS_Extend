@@ -1,0 +1,197 @@
+{
+  "media": [
+    {
+      "name": "gp",
+      "type": "classic_local",
+      "field": {
+        "file": "../../../gpis-scenes/dragon/dragon-classic-local.nvdb",
+        "sdf_grid": "sdf",
+        "density_grid": "density",
+        "alpha_grid": "alpha",
+        "transform": {
+          "scale": [
+            1,
+            1,
+            -1
+          ]
+        },
+        "macrocell_size": 8
+      },
+      "material": {
+        "type": "conductor",
+        "eta": [
+          0.200437697,
+          0.9240334304,
+          1.1022119527
+        ],
+        "k": [
+          3.9129485033,
+          2.4528477015,
+          2.1421879552
+        ]
+      },
+      "max_bounces": 1024
+    }
+  ],
+  "bsdfs": [
+    {
+      "name": "processBox",
+      "albedo": 1.0,
+      "type": "forward"
+    },
+    {
+      "name": "light",
+      "albedo": 1,
+      "type": "null"
+    }
+  ],
+  "primitives": [
+    {
+      "name": "processBox",
+      "transform": {
+        "position": [
+          0,
+          1.001,
+          0
+        ],
+        "scale": [
+          4,
+          2,
+          2
+        ],
+        "rotation": [
+          0,
+          0,
+          0
+        ]
+      },
+      "type": "cube",
+      "bsdf": "processBox",
+      "int_medium": "gp"
+    },
+    {
+      "name": "Floor",
+      "transform": {
+        "position": [
+          0,
+          -0.01,
+          0
+        ],
+        "rotation": [
+          0,
+          65,
+          0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "type": "mesh",
+      "file": "../../../gpis-scenes/dragon/background.obj",
+      "smooth": true,
+      "backface_culling": false,
+      "recompute_normals": true,
+      "bsdf": {
+        "albedo": 0.2,
+        "type": "lambert"
+      }
+    },
+    {
+      "bump_strength": 1,
+      "transform": {
+        "position": [
+          0,
+          0,
+          1.17369
+        ],
+        "rotation": [
+          0,
+          -67.2614,
+          0
+        ]
+      },
+      "emission": "../../../gpis-scenes/dragon/FlowCheck.hdr",
+      "scale": 0.7,
+      "type": "infinite_sphere",
+      "sample": true,
+      "bsdf": {
+        "albedo": 1,
+        "type": "null"
+      }
+    },
+    {
+      "name": "light",
+      "transform": {
+        "position": [
+          0,
+          5,
+          0
+        ],
+        "scale": 1,
+        "rotation": [
+          180,
+          0,
+          0
+        ]
+      },
+      "power": [
+        300,
+        300,
+        300
+      ],
+      "type": "quad",
+      "bsdf": "light"
+    }
+  ],
+  "camera": {
+    "tonemap": "filmic",
+    "resolution": [
+      128,
+      64
+    ],
+    "reconstruction_filter": "tent",
+    "transform": {
+      "position": [
+        -1,
+        1.0,
+        3
+      ],
+      "look_at": [
+        0,
+        0.4,
+        0
+      ],
+      "up": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    "type": "pinhole",
+    "fov": 45.0
+  },
+  "integrator": {
+    "min_bounces": 0,
+    "max_bounces": 20,
+    "enable_consistency_checks": false,
+    "enable_two_sided_shading": true,
+    "type": "path_tracer",
+    "enable_light_sampling": true,
+    "enable_volume_light_sampling": true,
+    "include_surfaces": true
+  },
+  "renderer": {
+    "overwrite_output_files": true,
+    "adaptive_sampling": false,
+    "enable_resume_render": false,
+    "stratified_sampler": false,
+    "scene_bvh": true,
+    "spp": 4,
+    "spp_step": 1,
+    "timeout": "0",
+    "output_file": "dragon-classic-local.png",
+    "hdr_output_file": "dragon-classic-local.exr"
+  }
+}

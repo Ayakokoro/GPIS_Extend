@@ -50,6 +50,7 @@ struct ConditionalTrackingSettings {
     double macrocellFarStartScale = 4.0; // distance from conditioning birth / directional ell
     double macrocellFarMaxExpectedEvents = 0.0; // 0 disables far-field relaxation
     TransitionVoxelBound transitionVoxelBound = TransitionVoxelBound::Disabled; // opt-in one-bound-per-cell experiment
+    bool nonstationaryHybrid = false; // integrate the birth prefix, then track certified tail intervals
     void validate() const;
 };
 
@@ -59,6 +60,8 @@ struct ConditionalTrackingWork {
     double distance=0;
     std::uint64_t networkQueries=0, correctionCapHits=0, neuralOutsideDomain=0, neuralBaselineFallbacks=0;
     std::uint64_t neuralOutsideFeatureRange=0;
+    std::uint64_t nonstationaryBoundedIntervals=0, nonstationaryFallbackIntervals=0, nonstationaryPrefixIntervals=0;
+    std::uint64_t nonstationaryCoarseIntervals=0; // subset of the bounded intervals
 };
 
 // A finite, forward part of a straight conditional flight. Geometry endpoints
@@ -101,9 +104,9 @@ public:
     // Joint endpoint observation conditioned on the old birth and F(endpoint)>0.
     FlightState samplePositiveEndpoint(Random &rng) const;
     // Collision tracking returns survival 0/1; ratio tracking returns a weight.
-    // hit is the physical distance from this segment's origin.
-    // begin and hit are world distances from the same origin. The birth is unchanged.
+    // All distances are world distances from the segment origin. An interior
+    // splitDistance divides the tracked interval without renewing the birth or optical clock.
     double track(Random &rng, bool collision, double &hit, ConditionalTrackingWork *work=nullptr,
-                 double begin=0) const;
+                 double begin=0, double splitDistance=0) const;
 };
 }

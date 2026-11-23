@@ -20,7 +20,9 @@ class ClassicLocalPhase final : public PhaseFunction {
 public:
     explicit ClassicLocalPhase(const ClassicLocalMedium &medium) : _medium(medium) {}
     float pdf(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
-        return float(_medium.ndf().phasePdf(_medium.localMeanGradient(Vec3d(s.p)),
+        const auto mean=_medium.phaseMean(Vec3d(s.p));
+        if (!mean) return 0.0f;
+        return float(_medium.ndf().phasePdf(*mean,
                      eigen(Vec3d(wi)).normalized(),eigen(Vec3d(wo)).normalized()));
     }
     Vec3f eval(const Vec3f &wi,const Vec3f &wo,const MediumSample &s) const override {
@@ -30,10 +32,11 @@ public:
     }
     bool sample(PathSampleGenerator &sampler,const Vec3f &wi,const MediumSample &s,PhaseSample &result) const override {
         const V w=eigen(Vec3d(wi)).normalized();
-        const V mean=_medium.localMeanGradient(Vec3d(s.p));
-        const V n=_medium.ndf().sampleVisibleNormal(mean,w,sampler);
+        const auto mean=_medium.phaseMean(Vec3d(s.p));
+        if (!mean) return false;
+        const V n=_medium.ndf().sampleVisibleNormal(*mean,w,sampler);
         result.w=Vec3f(vec(w-2*w.dot(n)*n)).normalized();
-        result.pdf=float(_medium.ndf().phasePdf(mean,w,eigen(Vec3d(result.w)).normalized()));
+        result.pdf=float(_medium.ndf().phasePdf(*mean,w,eigen(Vec3d(result.w)).normalized()));
         result.weight=_medium.reflectance(std::abs(w.dot(n)));
         return result.pdf>0 && std::isfinite(result.pdf);
     }
@@ -49,14 +52,20 @@ ClassicLocalMedium::~ClassicLocalMedium()=default;
 void ClassicLocalMedium::fromJson(JsonPtr value,const Scene &scene) {
     JsonSerializable::fromJson(value,scene);
     for (const char *key : {"gaussian_process","phase_function","transmittance","sigma_a","sigma_s","alpha_grid"})
-        if (value[key]) value.parseError(std::string("classic_local does not use '")+key+"'; use field and stationary covariance");
-    _field.fromJson(value.getRequiredMember("field"),scene);
-    _covariance=scene.fetchCovarianceFunction(value.getRequiredMember("covariance"));
-    if (!_covariance->isStationaryKernel()) value.parseError("classic_local requires a stationary kernel");
+        if (value[key]) value.parseError(std::string("unsupported classic_local property '")+key+"'; configure the baked grids in field");
+    _field.fromJson(value.getRequiredMember("field"),scene,true);
+    if (_field.alphaName.empty()) {
+        _covariance=scene.fetchCovarianceFunction(value.getRequiredMember("covariance"));
+        if (!_covariance->isStationaryKernel())
+            value.parseError("classic_local: bake spatial roughness into field.alpha_grid or specify a stationary covariance");
+    } else {
+        if (value["covariance"]) value.parseError("classic_local: specify either field.alpha_grid or covariance");
+        _covariance.reset();
+    }
     if (auto material=value["material"]) {
         material.getField("type",_materialType);
         if (material["roughness"] || material["alpha"])
-            material.parseError("classic_local: set roughness through the stationary kernel sigma/lengthScale");
+            material.parseError("classic_local: set roughness through field.alpha_grid or the stationary covariance");
         if (_materialType=="mirror") material.getField("albedo",_mirrorAlbedo);
         else if (_materialType=="conductor") {
             material.getField("eta",_eta); material.getField("k",_k);
@@ -76,18 +85,23 @@ rapidjson::Value ClassicLocalMedium::toJson(Allocator &allocator) const {
     JsonObject material{allocator,"type",_materialType};
     if (_materialType=="mirror") material.add("albedo",_mirrorAlbedo);
     else material.add("eta",_eta,"k",_k,"force_unit_fresnel",_forceUnitFresnel);
-    return JsonObject{JsonSerializable::toJson(allocator),allocator,
+    JsonObject result{JsonSerializable::toJson(allocator),allocator,
         "type","classic_local","field",_field.toJson(allocator),
-        "covariance",*_covariance,"material",rapidjson::Value(material),"max_bounces",_maxBounce};
+        "material",rapidjson::Value(material),"max_bounces",_maxBounce};
+    if (_covariance) result.add("covariance",*_covariance);
+    return result;
 }
 
 void ClassicLocalMedium::loadResources() {
-    _covariance->loadResources();
+    if (_covariance) _covariance->loadResources();
     _grid=_field.load();
 }
 void ClassicLocalMedium::prepareForRender() {
     if (!_grid) throw std::runtime_error("classic_local: loadResources must precede prepareForRender");
-    if (!_covariance->isStationaryKernel()) throw std::runtime_error("classic_local requires a stationary kernel");
+    if (!_field.alphaName.empty()) {
+        _ndf=std::make_unique<ClassicGlobal::GaussianNdf>(Eigen::Matrix3d::Identity());
+        return;
+    }
     const Vec3d zero(0.0);
     const double variance=(*_covariance)(Derivative::None,Derivative::None,zero,zero,zero,zero);
     if (!(variance>0) || !std::isfinite(variance)) throw std::runtime_error("classic_local: invalid field variance");
@@ -107,6 +121,13 @@ V ClassicLocalMedium::localMeanGradient(const Vec3d &position) const {
     if (norm>0) gradient/=norm;
     return gradient;
 }
+std::optional<V> ClassicLocalMedium::phaseMean(const Vec3d &position) const {
+    if (_field.alphaName.empty()) return localMeanGradient(position);
+    const double stddev=_grid->alpha(eigen(position))*std::sqrt(0.5);
+    if (stddev==0) return std::nullopt;
+    // Dividing G by its standard deviation preserves the flux-weighted normal law.
+    return localMeanGradient(position)/stddev;
+}
 double ClassicLocalMedium::extinction(const Vec3d &position,const Vec3d &travelDirection) const {
     const double density=_grid->density(eigen(position));
     if (!(density>=0) || !std::isfinite(density)) throw std::runtime_error("classic_local: invalid density");
@@ -114,7 +135,11 @@ double ClassicLocalMedium::extinction(const Vec3d &position,const Vec3d &travelD
     const V direction=eigen(travelDirection);
     const double speed=direction.stableNorm();
     if (!(speed>0) || !std::isfinite(speed)) throw std::runtime_error("classic_local: invalid direction");
-    return density*_ndf->projectedArea(localMeanGradient(position),direction/speed);
+    const V w=direction/speed;
+    if (_field.alphaName.empty()) return density*_ndf->projectedArea(localMeanGradient(position),w);
+    const double stddev=_grid->alpha(eigen(position))*std::sqrt(0.5);
+    if (stddev==0) return 0; // GPDistribution's zero-alpha convention.
+    return density*ClassicGlobal::negativePartMean(w.dot(localMeanGradient(position)),stddev);
 }
 
 double ClassicLocalMedium::track(PathSampleGenerator &sampler,const Ray &ray,bool collision,double &hit) const {
@@ -127,16 +152,16 @@ double ClassicLocalMedium::track(PathSampleGenerator &sampler,const Ray &ray,boo
     hit=end;
     if (end<=begin) return 1;
     const V w=direction/speed;
-    // Every local mean has norm <= 1. Monotonicity of the negative-part mean
-    // gives a tighter directional bound than sqrt(1+trace(C)).
-    const double areaMaximum=ClassicGlobal::negativePartMean(-1,std::sqrt(w.dot(_ndf->covariance()*w)))*(1+1e-12);
+    const bool spatialAlpha=!_field.alphaName.empty();
+    const double areaMaximum=spatialAlpha ? 0 :
+        ClassicGlobal::negativePartMean(-1,std::sqrt(w.dot(_ndf->covariance()*w)))*(1+1e-12);
     ClassicLocalGrid::Cursor cursor(*_grid,origin,direction,begin,end);
     ClassicLocalGrid::Segment segment;
     ConditionalGpis::Random random(sampler);
     ConditionalGpis::MajorantOpticalDepth optical;
     double weight=1;
     while (cursor.next(segment)) {
-        const double maximum=segment.densityMaximum*areaMaximum;
+        const double maximum=spatialAlpha ? segment.spatialExtinctionMaximum : segment.densityMaximum*areaMaximum;
         if (!std::isfinite(maximum) || !std::isfinite(maximum*speed))
             throw std::runtime_error("classic_local: nonfinite extinction majorant");
         double t=segment.begin,candidate;

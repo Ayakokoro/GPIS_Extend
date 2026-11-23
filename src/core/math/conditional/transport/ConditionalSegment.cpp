@@ -110,14 +110,18 @@ ConditionalSegment::ConditionalSegment(const GPSSField &f,const FlightState &s,
     if (f.nonstationary) {
         if (neuralModel || tracking.classicLocalBand || tracking.exteriorCutoffSigma>0 ||
             tracking.majorantMode!=ConditionalMajorantMode::Adaptive)
-            throw NumericError(NumericStatus::InvalidInput,"proc_nonstationary requires full-domain numerical conditional tracking");
+            throw NumericError(NumericStatus::InvalidInput,"proc_nonstationary requires full-domain conditional tracking");
         const auto domain=f.activeDomain.intersect({s.birthPosition,_w});
         if (!domain.hit || _age+length>domain.exit)
             throw NumericError(NumericStatus::InvalidInput,"conditional segment exceeds the field domain");
         const double step=tracking.step>0 ? tracking.step : tracking.stepScale*f.nonstationary->minLength();
-        _varying=std::make_unique<NonstationarySegment>(*f.nonstationary,*f.mean,s,o,_w,length,step);
+        _varying=std::make_unique<NonstationarySegment>(*f.nonstationary,*f.mean,s,o,_w,length,step,
+            tracking.nonstationaryHybrid,tracking.macrocellSize>0,
+            tracking.step>0 ? tracking.step : std::numeric_limits<double>::infinity());
         return;
     }
+    if(tracking.nonstationaryHybrid)
+        throw NumericError(NumericStatus::InvalidInput,"nonstationary_tracking hybrid requires proc_nonstationary covariance");
     _inverseEll=std::sqrt(_w.dot(f.kernel.precision()*_w));
     _straight.emplace(f,alongDirection(s,_w),tracking.normalizedBoundOnly,tracking.farBoundStartScale,
                       tracking.simpleBoundStartScale,tracking.tabulatedBounds);
@@ -323,7 +327,8 @@ FlightState ConditionalSegment::samplePositiveEndpoint(Random &rng) const
     endpoint.birthPosition=_origin+_length*_w;
     return endpoint;
 }
-double ConditionalSegment::track(Random &rng,bool collision,double &hit,ConditionalTrackingWork *diagnostics,double begin) const
+double ConditionalSegment::track(Random &rng,bool collision,double &hit,ConditionalTrackingWork *diagnostics,
+        double begin,double splitDistance) const
 {
     Profile::Scope profile(Profile::Stage::Track);
     Profile::Scope setup(Profile::Stage::TrackSetup);
@@ -331,9 +336,18 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
     ConditionalTrackingWork neuralWork;
     if(!(begin>=0 && begin<=_length))
         throw NumericError(NumericStatus::InvalidInput,"conditional tracking start outside the segment");
+    if(!(splitDistance>=0 && std::isfinite(splitDistance)))
+        throw NumericError(NumericStatus::InvalidInput,"invalid conditional tracking split");
 #if defined(TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE) && TUNGSTEN_ENABLE_CONDITIONAL_RAY_PROFILE
-    if(auto *record=RayProfile::active()) record->trackingStart=begin;
+    if(auto *record=RayProfile::active()) {
+        record->trackingStart=begin;
+        record->trackingSplit=splitDistance;
+    }
 #endif
+    if (_varying) {
+        setup.finish();
+        return _varying->track(rng,collision,hit,begin,splitDistance,diagnostics);
+    }
     double traversed=begin;
     struct CaptureWork {
         ConditionalTrackingWork *output;
@@ -344,11 +358,6 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
             neural.networkQueries,neural.correctionCapHits,neural.neuralOutsideDomain,neural.neuralBaselineFallbacks,
             neural.neuralOutsideFeatureRange}; }
     } capture{diagnostics,work,traversed,neuralWork};
-    if (_varying) {
-        const double tr=_varying->track(rng,collision,hit,begin);
-        traversed=hit;
-        return tr;
-    }
     const bool twoConstants=_tracking.majorantMode==ConditionalMajorantMode::TwoConstants;
     hit=_length;
     const double ell=1/_inverseEll;
@@ -468,6 +477,8 @@ double ConditionalSegment::track(Random &rng,bool collision,double &hit,Conditio
         Profile::Scope proposalTime(Profile::Stage::TrackProposal);
         double hi;
         double proposalEnd=lo<chapter2Begin ? std::min(occupiedEnd,chapter2Begin) : occupiedEnd;
+        if(lo<splitDistance && _age+lo<_age+splitDistance)
+            proposalEnd=std::min(proposalEnd,splitDistance);
         if(pending.empty() && lo>=chapter2RetryAt) {
             const auto tryBlock=[&](bool parent) {
                 double endAge=_age+proposalEnd,maximum;

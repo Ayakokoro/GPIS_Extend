@@ -107,11 +107,14 @@ inline void nonGpSurfaceChecks()
             diagnostic.flight.at("birth_value")==.3 && !state.startsAtScatteringSurface,
             "only the first segment after a scattering surface consumes the physical epsilon");
     }
-    // GP offsets use world units even when the ray direction is not unit length.
+    // The GP split and both segment ends use world distances. The short ray
+    // puts the requested split beyond the endpoint without clipping a fresh GP birth.
     for(bool jitter : {false,true}) {
         auto experiment=makeMedium(std::string(R"("tracking_collision_start_step":0.0625,"tracking_collision_start_jitter":)")+
                 (jitter ? "true" : "false"));
-        for(bool gpBirth : {false,true}) for(bool collision : {false,true}) {
+        for(float farT : {.25f,.015625f}) for(bool gpBirth : {false,true}) for(bool collision : {false,true}) {
+            const Ray testRay(position,dir,.0625f,farT);
+            const double length=2*double(farT);
             auto c=std::make_shared<ConditionalPathContext>(*observation);
             c->owner=experiment.get();c->birth.birthValue=gpBirth ? 0.0 : .3;
             c->birth.birthGradient=V::UnitZ();
@@ -119,21 +122,24 @@ inline void nonGpSurfaceChecks()
             state.startsAtScatteringSurface=!gpBirth;
             IndependentPathSampler actual(923,false),expected(923,false);
             actual.startPath(2,4);expected.startPath(2,4);
-            const double begin=.125+(gpBirth ? .0625*(jitter ? double(expected.next1D()) : 1.0) : 0.0);
+            const double begin=gpBirth ? 0.0 : std::min(.125,length);
+            const double split=gpBirth ? std::min(length,.0625*(jitter ? double(expected.next1D()) : 1.0)) : 0.0;
             cg::ConditionalSegment referenceSegment(experiment->field(),c->birth,c->position,
-                    V::UnitZ(),.5,experiment->trackingSettings());
+                    V::UnitZ(),length,experiment->trackingSettings());
             cg::Random rng(expected);double hit;
-            const double weight=referenceSegment.track(rng,collision,hit,nullptr,begin);
+            const double weight=referenceSegment.track(rng,collision,hit,nullptr,begin,split);
             if(collision) {
                 MediumSample sample{};
-                check(experiment->sampleDistance(actual,ray,state,sample) && sample.t==float(hit/2) &&
-                        sample.exited==(weight!=0),"GP offset collision distance");
+                check(experiment->sampleDistance(actual,testRay,state,sample) && sample.t==float(hit/2) &&
+                        sample.exited==(weight!=0),"GP split collision distance");
             } else {
-                check(experiment->transmittance(actual,ray,true,true,&state)==Vec3f(float(weight)),
-                        "GP offset shadow weight");
+                check(experiment->transmittance(actual,testRay,true,true,&state)==Vec3f(float(weight)),
+                        "GP split shadow weight");
             }
             check(diagnostic.flight.at("tracking_start_distance")==begin &&
-                    diagnostic.flight.at("birth_value")==c->birth.birthValue,"GP offset preserves the observation");
+                    diagnostic.flight.at("tracking_split_distance")==split &&
+                    diagnostic.flight.at("birth_value")==c->birth.birthValue,
+                    "the split preserves the GP observation and the physical tracking interval");
         }
     }
     auto shortState=surfaceState;

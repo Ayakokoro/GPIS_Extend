@@ -89,12 +89,68 @@ $$
 The value and spatial derivatives at both points determine the Gaussian law
 of the field and gradient given the latest observed value and full gradient.
 The same law supplies the collision normal, the positive endpoint observation
-and the directional downcrossing rate. Nonstationary transport integrates that
-rate numerically, splitting at parameter clamps and VDB voxel faces. Distance
+and the directional downcrossing rate. By default nonstationary transport
+integrates that rate numerically, splitting at parameter clamps and VDB voxel faces. Distance
 sampling inverts the cumulative optical depth. The default shadow estimate is
 its exponential transmittance. `tracking_step` can tighten the integration
-step in world units. Stationary majorant tuning only affects stationary kernels.
-The nonstationary path uses full-domain integration and the baseline collision
+step in world units.
+
+After a GP collision, `tracking_collision_start_step` places an additional
+integration boundary at the specified world distance. Both sides contribute to
+the optical depth. A single exponential threshold can produce a collision on
+either side, conditioned on the original hit. Shadow rays include the same
+prefix. The default step is zero. For a fixed boundary, for example, set
+`"tracking_collision_start_step": 0.0001` and
+`"tracking_collision_start_jitter": false` on the medium. With jitter enabled
+(the default), the boundary is uniform from zero to the configured step.
+
+Set `"nonstationary_tracking": "hybrid"` on the medium to try upper-bound
+tracking with `proc_nonstationary`. The default is `"quadrature"`. Hybrid
+integrates from the physical tracking start through the requested split.
+For each subsequent interval it combines certified mean and directional
+derivative bounds with the conditional covariance of the original flight.
+The Gibbs correlation decay uses the birth kernel width and the largest target
+width reachable on each axis over the interval, including clamped ramp endpoints.
+The derivative coefficients retain their conservative flight-wide bounds.
+An interval uses tracking when the certificate gives a finite extinction
+upper bound and at most four expected proposals. Ill-conditioned near-birth
+intervals, missing mean bounds and expensive proposals use quadrature.
+This also works with a zero split distance.
+
+For a VDB mean, set `"tracking_macrocell_size": 8` together with hybrid
+tracking to try one certificate for a block eight voxels wide on each axis.
+The renderer builds the block value and gradient bounds once before rendering.
+A rejected block returns to the fine-cell algorithm, including its quadrature
+fallback. The default block size is zero. An explicit positive `tracking_step`
+also limits the distance covered by each block proposal.
+
+Distance sampling and binary shadow visibility use Poisson thinning on the
+bounded intervals. One residual exponential clock carries across interval
+boundaries, including changes between thinning and direct integration.
+Ordinary shadows multiply ratio-tracking weights on bounded intervals by
+the exponential transmittance of the integrated intervals. The prefix can
+produce a hit. Both methods retain the numerical tolerances of quadrature
+where they integrate the rate.
+
+On the Dragon preset at 128 × 64 and 4 spp, using eight threads, independent
+path sampling and a fixed split of 0.0001, the Release renderer reported the
+following times. The two seeds used opposite run orders.
+
+| Tracking method | Seed 41 | Seed 42 |
+| --- | ---: | ---: |
+| Quadrature | 40.99 s | 44.91 s |
+| Hybrid, per voxel | 44.86 s | 44.91 s |
+| Hybrid, 8 × 8 × 8 blocks | 15.83 s | 17.13 s |
+
+Including scene loading, block construction and output, average process time
+was 44.34 s for quadrature and 18.22 s for the eight-voxel blocks.
+For seed 41, sampling the time of one in 64 calls gave 197.7 summed worker
+seconds for per-voxel kernel bounds. With blocks, coarse and fine kernel
+bounds together took 51.4 worker seconds, numerical optical-depth integration
+took 48.5 and evaluating the hazard at candidates took 1.2. The block mode
+accepted 2.84 million of 3.57 million block proposals.
+
+The nonstationary path covers the full domain and uses the baseline collision
 gradient. The baked support band, exterior cutoff, `two_constants`,
 `fp_gradient`, and neural correction require the stationary path.
 

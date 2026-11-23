@@ -4,12 +4,13 @@
 #include "math/ClassicGlobalMath.hpp"
 #include "math/Mat4f.hpp"
 #include "io/Path.hpp"
+#include <optional>
 
 namespace Tungsten {
 class ClassicLocalGrid;
 class CovarianceFunction;
 
-// Baked density with a local unit mean gradient and one stationary covariance.
+// Baked density with a local mean normal and either stationary covariance or baked roughness.
 class ClassicLocalMedium final : public Medium {
     ClassicLocalField _field;
     std::string _materialType="conductor";
@@ -34,6 +35,8 @@ public:
     Vec3f transmittance(PathSampleGenerator &sampler,const Ray &ray,bool startOnSurface,bool endOnSurface,MediumState *state) const override;
     float pdf(PathSampleGenerator &sampler,const Ray &ray,bool startOnSurface,bool endOnSurface) const override;
     Eigen::Vector3d localMeanGradient(const Vec3d &position) const;
+    // Mean in the coordinates of ndf(). Spatial alpha uses unit covariance.
+    std::optional<Eigen::Vector3d> phaseMean(const Vec3d &position) const;
     double extinction(const Vec3d &position,const Vec3d &travelDirection) const;
     const ClassicGlobal::GaussianNdf &ndf() const { return *_ndf; }
     Vec3f reflectance(double cosine) const;

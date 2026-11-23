@@ -1,10 +1,10 @@
-# Stationary classic_local
+# classic_local
 
-`classic_local` renders an existing NanoVDB `sdf` and `density` field using a
-local Gaussian microfacet distribution. It supports the CPU path tracer,
-including NEE/MIS and its resumable CPU wavefront path. No field is baked or
-modified by this medium. The `obj2json_macrofacet` converter and its
-`--emit-baked-json` option are unchanged.
+`classic_local` renders a baked NanoVDB field using a local Gaussian
+microfacet distribution. A stationary covariance supplies fixed roughness.
+For a nonstationary source such as Dragon, the renderer reads the spatial
+`alpha` channel used by the GP branch of `primitive_macrofacet`.
+Both configurations support the CPU path tracer, NEE/MIS and CPU wavefront tracing.
 
 ## Scene configuration
 
@@ -32,21 +32,32 @@ modified by this medium. The `obj2json_macrofacet` converter and its
 }
 ```
 
-The covariance must be stationary and have positive finite field variance and
+The stationary configuration above requires positive finite field variance and
 a positive-definite gradient covariance. Its mixed derivatives at zero are
 evaluated once during render preparation. For an isotropic SE kernel,
 `Cov(grad F) = sigma^2 / lengthScale^2 I`. With macrofacet's roughness convention,
 `alpha = sqrt(2) * sigma / lengthScale`. The example corresponds to alpha 0.5.
 The covariance is specified in scene world coordinates.
 
-The baked density is authoritative: changing `sigma` in this JSON does not
-rebake or recompute it. Use the sigma with which the file was generated and
-adjust lengthScale to select the fixed roughness. This version does not read
-sigma sidecars or alpha grids. An alpha channel already inside the file is
-ignored; requesting `alpha_grid`/`use_alpha_grid`, or a non-stationary kernel,
-is rejected. A stationary input passed to `--emit-baked-json` can produce a
-constant variance grid inside its non-stationary wrapper, but this medium
-does not use that GPIS scene representation.
+For spatial roughness, replace the medium's `covariance` entry with a named
+float grid inside `field`, as in the Dragon example.
+
+```json
+"field": {
+  "file": "dragon-classic-local.nvdb",
+  "sdf_grid": "sdf",
+  "density_grid": "density",
+  "alpha_grid": "alpha",
+  "transform": {"scale": [1, 1, -1]}
+}
+```
+
+Exactly one roughness source is required. The renderer uses the density from
+the bake in both configurations. On retained nodes the exporter writes
+`alpha = max(1e-6, sqrt(2 * Var(dF/dx)))` from the source kernel at that
+point. The scalar alpha describes an isotropic distribution at each position.
+To change the nonstationary source kernel or
+the density cutoff, update the source scene or bake options and regenerate the field.
 
 `material.type` can also be `mirror`, with RGB or scalar `albedo`. Conductor
 materials accept `force_unit_fresnel: true` for energy tests. The phase
@@ -55,8 +66,10 @@ and `pdf` describe the same distribution.
 
 ## Field coordinates and domain
 
-Both named grids must be float grids. Density must be finite and nonnegative,
-with zero background. Values use trilinear interpolation; the SDF gradient is
+All named grids must be float grids. Density must be finite and nonnegative,
+with zero background. Spatial alpha must be finite and nonnegative on density
+support and use the same index transform as density. Values use trilinear
+interpolation. The SDF gradient is
 the analytic gradient of that same interpolant, transformed into world space.
 The active domain follows macrofacet's SDF grid bounds, from the minimum
 index node to one node past the maximum. Transport outside it is vacuum.
@@ -82,27 +95,46 @@ converter's band cutoff: it uses the zeros and values actually stored.
 
 ## Transport
 
-At each query, the SDF mean gradient is normalized. An exactly zero gradient
-stays zero, matching macrofacet's isotropic constant-mean case. The random
-gradient retains all three covariance components. With travel direction w:
+At each query the SDF gradient is normalized, with a zero gradient kept at
+zero. For a unit travel direction `w` the local law is
 
 ```text
 meanG(x)   = normalize(grad sdf(x)), or zero
-G(x)       ~ Normal(meanG(x), stationaryGradientCovariance)
+G(x)       ~ Normal(meanG(x), C(x))
 area(x,w)  = E[max(-dot(w,G(x)), 0)]
 sigmaT(x,w)= bakedDensity(x) * area(x,w)
 ```
 
-Each bounce uses this local point distribution; there is no conditional birth
-observation. Reflections use the flux-weighted Gaussian VNDF already used by
-classic_global, with the normalized local mean instead of the raw SDF gradient.
+In stationary scenes `C` is the gradient covariance of the kernel. For
+positive spatial alpha, first interpolate `alpha(x)`, then set
+`s = alpha(x)/sqrt(2)` and `C(x) = s^2 I`. With `c = -dot(w, meanG)`, the
+GP projected area in `primitive_macrofacet` is
+
+```text
+area = 0.5 * c * erfc(-c/alpha) + alpha/(2*sqrt(pi)) * exp(-(c/alpha)^2)
+```
+
+At tangency the area is `alpha/(2 sqrt(pi))`. At exactly zero alpha the GP implementation
+assigns zero projected area and the point produces no collision.
+
+Reflections sample the flux-weighted Gaussian visible-normal distribution.
+For spatial alpha, the scaled gradient `G/s` has mean `meanG/s` and unit
+covariance. Scaling preserves the normal and cancels in the normalized flux
+weight, so visible-normal sampling and the phase PDF can both use the same
+unit-covariance distribution at the collision point. The reference renderer
+uses a Beckmann and uniform-hemisphere mixture to sample the same GP target.
 
 Loading builds immutable density maxima over macrocells (default width 8 fine
 cells, supported widths 1 through 64). Bounds include interpolation nodes and
-a halo for rounded face queries. During a flight the maximum projected area
-uses `negativePartMean(-1, sqrt(w^T C w))`, since the local mean norm is at most
-one. This is a conservative, direction-dependent bound, tighter than the
-orientation-independent `sqrt(1 + trace(C))` bound in macrofacet.
+a halo for rounded face queries. For stationary covariance the maximum area
+along a ray is `negativePartMean(-1, sqrt(w^T C w))`.
+For spatial alpha, loading precomputes each block's extinction bound
+`rhoMax * negativePartMean(-1, alphaMax/sqrt(2))`, with zero for an empty
+or all-zero-alpha block. The projected mean is at least -1, and the negative
+part expectation increases with standard deviation. Independent corner maxima
+therefore bound the product throughout the block even when their locations
+differ. The `1.2 * rhoMax` multiplier in `primitive_macrofacet` can be below
+the true extinction when the baked alpha is large.
 
 DDA supplies piecewise-constant extinction majorants. Delta tracking samples
 collisions; ratio tracking estimates shadow transmittance with unbiased
@@ -111,16 +143,23 @@ Candidates with zero density skip the SDF query. Every nonzero candidate is
 checked against its majorant. Field handles and precomputed bounds are shared
 read-only; traversal state and NanoVDB accessors are local to each query/ray.
 
-This version requires positive-definite Gaussian gradient distributions. It
-does not implement GGX, spatial roughness, BDPT distance PDFs or a CUDA kernel.
-
 ## Build and run
 
 ```powershell
 cmake -S . -B build -DTUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS=ON
-cmake --build build --config Release --target tungsten classic_local_test --parallel 8
+cmake --build build --config Release --target tungsten classic_local_test obj2json_macrofacet --parallel 8
 ctest --test-dir build -C Release -R '^classic_local' --output-on-failure
 .\build\Release\tungsten.exe -t 8 -d build/classic-local-shaderball data/example-scenes/classic-local/shaderball.json
+```
+
+From the repository root, bake the original nonstationary Dragon and render
+its 128×64, 4 spp preview. The bake uses 128 voxels along the longest axis.
+The exporter writes density and alpha inside the source 3σ band. Runtime
+transport follows the interpolated baked field, including its edge voxels.
+
+```powershell
+.\build\Release\obj2json_macrofacet.exe --format nvdb --resolution 128 --padding-sigma 3 gpis-scenes/dragon/dragon-function-space.json gpis-scenes/dragon/dragon-classic-local
+.\build\Release\tungsten.exe -t 8 -d build/classic-local-dragon data/example-scenes/classic-local/dragon.json
 ```
 
 The shaderball example references the existing sibling asset
@@ -131,13 +170,23 @@ build dependency on the sibling macrofacet project.
 
 The tests create tiny synthetic NVDB fixtures solely for validation. They
 check grid interpolation and derivatives, DDA bounds, transformed fields,
-fixed covariance despite a varying alpha channel, analytic free-flight and
+fixed covariance despite a varying alpha channel, spatial-alpha extinction
+and visible-normal sampling, analytic free-flight and
 transmittance probabilities, Gaussian VNDF distributions, JSON round trips,
 unsupported inputs, and mixed-geometry white furnaces with/without NEE and
 with CPU wavefront tracing. A separate furnace starts inside a forward cube
 less than one ray epsilon from its exit to exercise boundary recovery.
 
 ## Validation
+
+On 2026-11-24 the Dragon example rendered at 128x64 on 8 CPU threads with
+seed 41. The renderer reported 0.216 s at 4 spp and 8.897 s at 128 spp.
+All 8,192 RGB pixels were finite in both EXRs. At grid node (44, 12, 41)
+the baked density was 1.891386 and alpha was 77.650703. The tangential
+extinction was 41.430542 in both the renderer and the reference GP formula.
+The traversed block's precomputed bound was 63.767235. A 16x16 white furnace
+with spatial alpha from 0 to 16 at 128 spp produced mean radiance 0.996765
+with NEE and 0.995106 with CPU wavefront tracing (reference 1).
 
 On 2026-10-21 the Release build passed all 21 `classic_local`, `classic_global`
 and `global_conditional` CTest checks. The local furnace means were 1.00089

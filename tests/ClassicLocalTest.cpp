@@ -42,8 +42,7 @@ void fixture(const std::filesystem::path &path,bool negative=false,bool flat=fal
         s.setValue(index,float(flat ? 2 : 0.3*p.x()+2*p.z()));
         const double rho=twoBands && i!=-2 && i!=5 ? 0 : density(p);
         d.setValue(index,float(negative && i==1 && j==1 && k==1 ? -1 : rho));
-        // Deliberately varying: stationary mode must never use this channel.
-        a.setValue(index,float(0.001+0.1*(i+3)));
+        a.setValue(index,j<=-2 ? 0.0f : j<=1 ? 0.5f : 16.0f);
     }
     std::vector<nanovdb::GridHandle<nanovdb::HostBuffer>> handles;
     handles.emplace_back(nanovdb::tools::createNanoGrid(sdf));
@@ -52,10 +51,13 @@ void fixture(const std::filesystem::path &path,bool negative=false,bool flat=fal
     nanovdb::io::writeGrids<nanovdb::HostBuffer,std::vector>(path.generic_string(),handles);
 }
 std::string mediumJson(const std::filesystem::path &path,int width=4,const std::string &transform="{}",
-        const std::string &covariance=R"({"type":"squared_exponential","sigma":1,"lengthScale":1})") {
+        const std::string &covariance=R"({"type":"squared_exponential","sigma":1,"lengthScale":1})",
+        const std::string &alphaName="") {
     return R"({"name":"local","type":"classic_local","field":{"file":")"+path.generic_string()+
         R"(","transform":)"+transform+R"(,"macrocell_size":)"+std::to_string(width)+
-        R"(},"covariance":)"+covariance+R"(,"material":{"type":"mirror","albedo":1},"max_bounces":64})";
+        (alphaName.empty() ? "" : ",\"alpha_grid\":\""+alphaName+"\"")+"}"+
+        (covariance.empty() ? "" : ",\"covariance\":"+covariance)+
+        R"(,"material":{"type":"mirror","albedo":1},"max_bounces":64})";
 }
 std::shared_ptr<ClassicLocalMedium> parse(const std::string &json) {
     JsonDocument doc(Path("classic-local-test.json"),json); Scene scene;
@@ -114,6 +116,8 @@ void conditionalBandChecks(const std::filesystem::path &file) {
     namespace cg=Tungsten::ConditionalGpis;
     fixture(file,false,false,true);
     ClassicLocalGrid band(file.generic_string(),"sdf","density",Mat4f(),1);
+    auto spatial=parse(mediumJson(file,1,"{}","","alpha"));
+    close(spatial->extinction(Vec3d(0,0.8,0.4),Vec3d(0.0,1.0,0.0)),0,0,"high alpha in the density gap is vacuum");
     for(int i=-24;i<=40;++i) {
         const V point(-.4+i*.0625,.2,.1);
         require(band.hasDensity(point)==(band.density(point)>0),"support near isolated active nodes and faces");
@@ -222,6 +226,94 @@ void transportChecks(const std::filesystem::path &file) {
     require(rejected,"unsupported BDPT PDF must be explicit");
     std::cout<<"phase: normalization, VNDF distribution, white energy and MIS eval/pdf passed\n";
 }
+void spatialAlphaChecks(const std::filesystem::path &file) {
+    const V normal=V(0.3,0,2).normalized();
+    auto medium=parse(mediumJson(file,1,"{}","","alpha"));
+    auto phase=medium->phaseFunction(Vec3f(0.0f));
+    IndependentPathSampler rng(2486,false);
+    const Vec3f wi(float(-normal.x()),0,float(-normal.z()));
+    MediumSample event{};
+    for (double y:{0.45,0.575,0.7}) {
+        const double alpha=0.5+15.5*(y-0.45)/0.25;
+        const Vec3d point(0,y,0.4);
+        close(medium->extinction(point,Vec3d(0.0,1.0,0.0)),density(V(0,y,0.4))*alpha/(2*std::sqrt(pi)),
+            1e-6,"tangent extinction interpolates alpha before forming gradient variance");
+        event.p=Vec3f(point);
+        const ClassicGlobal::GaussianNdf reference(0.5*alpha*alpha*Eigen::Matrix3d::Identity());
+        // Axial incidence makes the reference phase independent of azimuth.
+        double referenceCosine=0;
+        constexpr int bins=512, draws=2048;
+        for (int j=0;j<bins;++j) {
+            const double c=-1+2.0*(j+0.5)/bins;
+            const V wo=c*normal+std::sqrt(1-c*c)*V::UnitY();
+            const double pdf=reference.phasePdf(normal,-normal,wo);
+            referenceCosine+=4*pi/bins*pdf*c;
+            if (j%32==0) {
+                const Vec3f out(float(wo.x()),float(wo.y()),float(wo.z()));
+                close(phase->pdf(wi,out,event),pdf,2e-5,"phase PDF uses the collision-point alpha");
+                close(phase->eval(wi,out,event).x(),pdf,2e-5,"white mirror evaluation uses local phase PDF");
+            }
+        }
+        double sampledCosine=0;
+        for (int i=0;i<draws;++i) {
+            rng.startPath(2,i); PhaseSample sample;
+            require(phase->sample(rng,wi,event,sample),"spatial visible-normal sample");
+            sampledCosine+=V(sample.w.x(),sample.w.y(),sample.w.z()).dot(normal);
+            close(sample.pdf,phase->pdf(wi,sample.w,event),1e-6,"spatial sampled and evaluated PDF");
+        }
+        close(sampledCosine/draws,referenceCosine,0.06,"visible-normal sampling responds to local alpha");
+    }
+    event.p=Vec3f(0,-0.4f,0.4f);
+    PhaseSample zeroSample;
+    close(medium->extinction(Vec3d(event.p),Vec3d(wi)),0,0,"positive density with zero alpha has zero extinction");
+    close(phase->pdf(wi,-wi,event),0,0,"zero-alpha phase PDF");
+    require(!phase->sample(rng,wi,event,zeroSample),"zero-alpha phase has no samples");
+
+    const V origin(0,-0.39,0.4);
+    for (int resolution:{0,32}) {
+        ClassicLocalGrid grid(file.generic_string(),"sdf","density",Mat4f(),1,resolution,"alpha");
+        close(grid.alpha(V(0,0.575,0.4)),8.25,1e-8,"trilinear roughness at half voxel");
+        ClassicLocalGrid::Cursor cursor(grid,origin,V::UnitY(),0,1.5);
+        ClassicLocalGrid::Segment block;
+        int blocks=0;
+        while (cursor.next(block)) {
+            for (int i=0;i<=8;++i) {
+                const V p=origin+(block.begin+(block.end-block.begin)*i/8)*V::UnitY();
+                const double a=grid.alpha(p);
+                const double hazard=a>0 ? grid.density(p)*area(normal,-normal,a/std::sqrt(2.0)) : 0;
+                require(hazard<=block.spatialExtinctionMaximum*(1+1e-10),"macrocell bound misses interpolated roughness");
+            }
+            ++blocks;
+        }
+        require(blocks>1,"spatial majorant traverses multiple macrocells");
+    }
+    // Density and alpha are linear along this tangent ray; Simpson integrates their product exactly.
+    const double tau=0.25/(12*std::sqrt(pi))*(0.5*density(V(0,0.45,0.4))+
+        4*8.25*density(V(0,0.575,0.4))+16*density(V(0,0.7,0.4)));
+    const double expected=std::exp(-tau);
+    const Ray ray(Vec3f(0,0.45f,0.4f),Vec3f(0.0f,1.0f,0.0f),0,0.25f);
+    constexpr int count=8192;
+    int escaped=0; double transmittance=0;
+    for (int i=0;i<count;++i) {
+        rng.startPath(3,i); Medium::MediumState state{}; state.reset(); MediumSample sample{};
+        require(medium->sampleDistance(rng,ray,state,sample),"spatial free flight failed");
+        escaped+=sample.exited;
+        transmittance+=medium->transmittance(rng,ray,false,true,&state).x();
+    }
+    const double tolerance=6*std::sqrt(expected*(1-expected)/count);
+    close(double(escaped)/count,expected,tolerance,"spatial free flight vs analytic transmittance");
+    close(transmittance/count,expected,tolerance,"spatial ratio tracking vs analytic transmittance");
+    rapidjson::Document doc; auto saved=medium->toJson(doc.GetAllocator());
+    require(!saved.HasMember("covariance") && std::string(saved["field"]["alpha_grid"].GetString())=="alpha",
+        "serialize the chosen roughness source");
+    rapidjson::StringBuffer buffer; rapidjson::Writer<rapidjson::StringBuffer> writer(buffer); saved.Accept(writer);
+    auto copy=parse(buffer.GetString());
+    const Vec3d midpoint(0,0.575,0.4),tangent(0.0,1.0,0.0);
+    close(copy->extinction(midpoint,tangent),medium->extinction(midpoint,tangent),0,"spatial-alpha scene round trip");
+    auto reflected=parse(mediumJson(file,1,R"({"scale":[1,-1,1]})","","alpha"));
+    close(reflected->extinction(Vec3d(0,-midpoint.y(),midpoint.z()),-tangent),medium->extinction(midpoint,tangent),
+        1e-6,"spatial roughness follows the field transform");
+}
 void validationChecks(const std::filesystem::path &file,const std::filesystem::path &output) {
     auto rejects=[](const std::string &json) { try { parse(json); } catch (const std::exception &) { return true; } return false; };
     require(rejects(mediumJson(file,0)),"invalid macrocell size");
@@ -235,7 +327,10 @@ void validationChecks(const std::filesystem::path &file,const std::filesystem::p
     fixed.insert(fixed.find("\"macrocell_resolution\""),"\"macrocell_size\":4,");
     require(rejects(fixed),"ambiguous macrocell layout");
     auto alpha=mediumJson(file); alpha.insert(alpha.find("\"macrocell_size\""),"\"alpha_grid\":\"alpha\",");
-    require(rejects(alpha),"spatial alpha is unsupported");
+    require(rejects(alpha),"two roughness sources are ambiguous");
+    require(rejects(mediumJson(file,4,"{}","")),"missing roughness source");
+    require(rejects(mediumJson(file,4,"{}","","absent")),"missing named alpha grid");
+    require(rejects(mediumJson(file,4,"{}","","sdf")),"negative alpha rejected");
     require(rejects(mediumJson(file,4,"{}",R"({"type":"squared_exponential","sigma":0,"lengthScale":1})")),
         "degenerate kernel is rejected");
     require(rejects(mediumJson(file,4,"{}",R"({"type":"nonstationary","cov":{"type":"squared_exponential","sigma":1,"lengthScale":1}})")),
@@ -279,8 +374,8 @@ int main(int argc,char **argv) {
         require(argc==2,"expected fixture output directory");
         const auto output=std::filesystem::absolute(argv[1]); std::filesystem::create_directories(output);
         const auto file=output/"field.nvdb"; fixture(file);
-        gridChecks(file); transportChecks(file); validationChecks(file,output); renderFixture(file,output);
+        gridChecks(file); transportChecks(file); spatialAlphaChecks(file); validationChecks(file,output); renderFixture(file,output);
         conditionalBandChecks(output/"two-bands.nvdb");
-        std::cout<<"stationary classic_local checks passed\n"; return 0;
+        std::cout<<"classic_local checks passed\n"; return 0;
     } catch (const std::exception &error) { std::cerr<<error.what()<<"\n"; return 1; }
 }

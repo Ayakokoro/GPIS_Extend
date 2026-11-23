@@ -12,6 +12,7 @@ inline void exportOptimizationFixedRays(const nlohmann::json &files,const std::f
         birth.birthValue=input["birth_value"];birth.age=input["birth_age"];
         const auto origin=vec(input["origin"]),direction=vec(input["direction"]);birth.direction=direction;
         const double length=input["length"];const bool collision=input["domain"]=="path";
+        const double begin=input.value("tracking_start_distance",0.0),split=input.value("tracking_split_distance",0.0);
         const auto tape=input["uniforms"].get<std::vector<float>>();
         for(bool optimized:{false,true}) {
             auto settings=chosen;
@@ -24,7 +25,7 @@ inline void exportOptimizationFixedRays(const nlohmann::json &files,const std::f
             rp::Flight recording(birth,origin,direction,length,collision,input["bounce"].get<int>());
             cg::ConditionalSegment segment(field,birth,origin,direction,length,settings,nullptr,L,L);
             recording.constructed();TransitionBudgetSampler sampler(tape);cg::Random rng(sampler);
-            cg::ConditionalTrackingWork work;double hit;const double result=segment.track(rng,collision,hit,&work);
+            cg::ConditionalTrackingWork work;double hit;const double result=segment.track(rng,collision,hit,&work,begin,split);
             recording.finish(result,hit);rp::registry().enabled=false;const auto &r=rp::registry().thread().scratch;
             if(!optimized && (result!=input["result"].get<double>() || hit!=input["hit"].get<double>() || sampler.consumed!=tape.size()))
                 throw std::runtime_error("Baseline fixed-ray replay changed");

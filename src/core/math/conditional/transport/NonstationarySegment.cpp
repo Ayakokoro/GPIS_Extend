@@ -1,5 +1,6 @@
 #include "NonstationarySegment.h"
-#include "ConditionalFlightKernel.h"
+#include "ConditionalSegment.h"
+#include "MajorantOpticalDepth.h"
 #include "math/conditional/mathutility/Gaussian1D.h"
 #include "math/conditional/mathutility/GaussianMoments1D.h"
 #include "math/conditional/mathutility/Quadrature.h"
@@ -62,6 +63,12 @@ double crossingRate(const ConditionalScalarStatistics &s, bool upcrossing) {
                                          std::sqrt(s.varianceAtZero)).logValue;
     return std::exp(logMills - std::log(sd) + flux);
 }
+
+// Decide from the certificate and interval alone, before drawing proposals.
+bool useTracking(double maximum, double length) {
+    constexpr double maxExpectedCandidates = 4.0;
+    return std::isfinite(maximum) && maximum >= 0 && maximum*length <= maxExpectedCandidates;
+}
 }
 
 FlightState startNonstationaryExterior(const NonstationaryConditioning &kernel, const MeanField &mean,
@@ -74,12 +81,13 @@ FlightState startNonstationaryExterior(const NonstationaryConditioning &kernel, 
 
 NonstationarySegment::NonstationarySegment(const NonstationaryConditioning &kernel, const MeanField &mean,
         const FlightState &birth, const Point3 &origin, const Vector3 &direction, double length,
-        double trackingStep)
+        double trackingStep, bool hybrid, bool coarse, double coarseStep)
     : _kernel(kernel), _mean(mean), _birth(directedBirth(birth, direction)), _origin(origin),
       _length(length), _age((origin-birth.birthPosition).dot(_birth.direction)),
       _maximumStep(0.5*kernel.minLength()), _birthStep(_maximumStep),
+      _coarseStep(coarse && hybrid ? coarseStep : 0.0), _hybrid(hybrid),
       _flight(kernel, mean, _birth), _cursor(mean.createRayCursor(origin, _birth.direction)) {
-    if (!(length >= 0.0 && trackingStep >= 0.0 && birth.birthValue >= 0.0) ||
+    if (!(length >= 0.0 && trackingStep >= 0.0 && birth.birthValue >= 0.0 && _coarseStep >= 0) ||
         !std::isfinite(_age+length) || !std::isfinite(trackingStep))
         throw NumericError(NumericStatus::InvalidInput, "invalid nonstationary flight interval");
     if (trackingStep > 0.0) _maximumStep = std::min(_maximumStep, trackingStep);
@@ -149,7 +157,7 @@ FlightState NonstationarySegment::samplePositiveEndpoint(Random &rng) const {
                           m.meanF, m.varianceF, m.meanG, m.regression, m.gradientGivenValueCovariance, rng);
 }
 
-double NonstationarySegment::nextIntervalEnd(double begin) const {
+double NonstationarySegment::nextIntervalEnd(double begin, MeanRayBounds *bounds) const {
     const double step = std::min(_maximumStep, std::max(_birthStep, 0.5*(_age+begin)));
     double end = std::min(_length, begin+step);
     end = std::min(end, _kernel.nextBreakpoint(_origin, _birth.direction, begin));
@@ -164,8 +172,13 @@ double NonstationarySegment::nextIntervalEnd(double begin) const {
 
     SdfRayQueryOptions options;
     options.computeBeginDerivative = false;
-    const auto range = _cursor ? _cursor->rayBounds(begin, end, options) :
-                                 _mean.rayBounds(_origin, _birth.direction, begin, end, options);
+    // A continued segment can start a few ulps off the birth ray. Bound the
+    // same world-space mean queried by moments(age) when certifying a cell.
+    const auto range = bounds && _origin != _birth.birthPosition ?
+        _mean.rayBounds(_birth.birthPosition, _birth.direction, _age+begin, _age+end, options) :
+        (_cursor ? _cursor->rayBounds(begin, end, options) :
+                   _mean.rayBounds(_origin, _birth.direction, begin, end, options));
+    if (bounds) *bounds = range;
     // Even well away from birth a steep mean can cross several standard
     // deviations within one voxel. Cap the change near the zero level.
     if (range.certified) {
@@ -175,6 +188,25 @@ double NonstationarySegment::nextIntervalEnd(double begin) const {
         if (rate > 0.0 && std::isfinite(rate)) end = std::min(end, begin + scale/rate);
     }
     return std::max(std::nextafter(begin, _length), end);
+}
+
+double NonstationarySegment::coarseMajorant(double begin, double &end, double &retryAt) const {
+    end = std::min(_length, begin+_coarseStep);
+    const double beginAge = _age+begin;
+    double endAge = _age+end;
+    MeanRayBounds range;
+    if (!(endAge > beginAge) || !_flight.coarseMeanBounds(beginAge, endAge, range)) {
+        // Some cursors lack block bounds, or cannot certify a face this close.
+        retryAt = std::min(end, begin+_maximumStep);
+        return std::numeric_limits<double>::infinity();
+    }
+    if (_age+end > endAge) {
+        end = endAge-_age;
+        if (_age+end > endAge) end = std::nextafter(end, begin);
+    }
+    retryAt = end;
+    if (!(end > begin && range.certified)) return std::numeric_limits<double>::infinity();
+    return _flight.hazardMajorant(beginAge, _age+end, range);
 }
 
 double NonstationarySegment::logPositive(double t) const {
@@ -217,44 +249,119 @@ double NonstationarySegment::opticalDepth(double begin, double end) const {
     return depth + (upward ? decrease : 0.0);
 }
 
-double NonstationarySegment::track(Random &rng, bool collision, double &hit, double begin) const {
+double NonstationarySegment::invertOpticalDepth(double lo, double hi, double remaining,
+        double spanDepth, double depthTolerance) const {
+    for (int i=0; i<96; ++i) {
+        const double alpha = std::clamp(remaining/spanDepth, 0.2, 0.8);
+        const double mid = lo + alpha*(hi-lo);
+        if (!(mid > lo && mid < hi)) break;
+        const double leftDepth = opticalDepth(lo, mid);
+        if (std::abs(leftDepth-remaining) <= depthTolerance) return mid;
+        if (leftDepth < remaining) {
+            remaining -= leftDepth;
+            spanDepth = std::max(remaining, spanDepth-leftDepth);
+            lo = mid;
+        } else {
+            spanDepth = leftDepth;
+            hi = mid;
+        }
+        const double scale = std::min(_maximumStep, _age+hi);
+        if (hi-lo <= scale*1e-7) break;
+    }
+    return lo + 0.5*(hi-lo);
+}
+
+double NonstationarySegment::track(Random &rng, bool collision, double &hit, double begin,
+        double splitDistance, ConditionalTrackingWork *work) const {
     if (!(begin >= 0 && begin <= _length))
         throw NumericError(NumericStatus::InvalidInput, "invalid nonstationary tracking start");
+    if (!(splitDistance >= 0 && std::isfinite(splitDistance)))
+        throw NumericError(NumericStatus::InvalidInput, "invalid nonstationary tracking split");
     hit = _length;
+    if (work) { *work = {}; work->distance = begin; }
     if (begin == _length) return 1.0;
-    const double target = collision ? -std::log(rng.openUniform01()) : std::numeric_limits<double>::infinity();
-    double total = 0;
+    const double target = collision && !_hybrid ? -std::log(rng.openUniform01()) : std::numeric_limits<double>::infinity();
+    double total = 0, weight = 1;
+    MajorantOpticalDepth clock;
+    MeanRayBounds range;
+    double intervalEnd = begin, coarseRetryAt = begin;
     for (double a = begin; a < _length;) {
-        const double b = nextIntervalEnd(a);
-        const double depth = opticalDepth(a, b);
-        if (collision && depth >= target-total) {
-            double lo = a, hi = b;
-            double remaining = target-total, spanDepth = depth;
-            for (int i=0; i<96; ++i) {
-                const double alpha = std::clamp(remaining/spanDepth, 0.2, 0.8);
-                const double mid = lo + alpha*(hi-lo);
-                if (!(mid > lo && mid < hi)) break;
-                const double leftDepth = opticalDepth(lo, mid);
-                if (std::abs(leftDepth-remaining) <= 1e-8*target) { hit = mid; return 0.0; }
-                if (leftDepth < remaining) {
-                    remaining -= leftDepth;
-                    spanDepth = std::max(remaining, spanDepth-leftDepth);
-                    lo = mid;
-                } else {
-                    spanDepth = leftDepth;
-                    hi = mid;
-                }
-                const double scale = std::min(_maximumStep, _age+hi);
-                if (hi-lo <= scale*1e-7) break;
+        const bool prefix = a < splitDistance;
+        bool coarse = false;
+        double maximum = std::numeric_limits<double>::infinity();
+        if (_coarseStep > 0 && !prefix && a == intervalEnd && a >= coarseRetryAt) {
+            double end;
+            maximum = coarseMajorant(a, end, coarseRetryAt);
+            if (useTracking(maximum, end-a)) {
+                coarse = true;
+                intervalEnd = end;
             }
-            hit = lo + 0.5*(hi-lo);
-            return 0.0;
         }
-        total += depth;
+        // Insert the split inside one natural interval, retaining its original
+        // right endpoint and the rest of the grid for both path and shadow rays.
+        if (a == intervalEnd) intervalEnd = nextIntervalEnd(a, _hybrid ? &range : nullptr);
+        double b = intervalEnd;
+        // An unresolvable prefix stays in its original quadrature interval.
+        if (a < splitDistance && splitDistance < b && b-splitDistance < b-a && _age+splitDistance > _age+a)
+            b = splitDistance;
+        if (work) ++work->intervals;
+        if (_hybrid) {
+            if (!coarse) maximum = prefix ? std::numeric_limits<double>::infinity() :
+                _flight.hazardMajorant(_age+a, _age+b, range);
+            // Decide before drawing proposals. Loose certificates can cost more
+            // hazard evaluations than integrating the same interval directly.
+            if (useTracking(maximum, b-a)) {
+                if (work) {
+                    ++work->nonstationaryBoundedIntervals;
+                    if (coarse) ++work->nonstationaryCoarseIntervals;
+                }
+                double offset = 0, candidate;
+                while (clock.advanceFromOffset(rng, maximum, a, b, offset, candidate)) {
+                    if (work) { ++work->candidates; work->distance = candidate; }
+                    const double rate = hazard(candidate);
+                    if (!(rate >= 0 && rate <= maximum))
+                        throw NumericError(NumericStatus::InvalidMajorant, "nonstationary hazard exceeds its certified bound");
+                    const double acceptance = rate/maximum;
+                    if (collision) {
+                        if (rng.openUniform01() < acceptance) { hit = candidate; return 0; }
+                    } else {
+                        weight *= 1.0-acceptance;
+                        if (weight == 0) return 0;
+                    }
+                }
+                a = b;
+                if (work) work->distance = a;
+                continue;
+            }
+            if (work) {
+                if (prefix) ++work->nonstationaryPrefixIntervals;
+                else ++work->nonstationaryFallbackIntervals;
+            }
+        }
+        const double depth = opticalDepth(a, b);
+        if (collision && _hybrid) {
+            // On this cell the proposal intensity equals the true hazard.
+            // Advance the same clock in optical-depth coordinates, then invert.
+            double remaining;
+            if (depth > 0 && clock.advance(rng, 1.0, 0.0, depth, remaining)) {
+                hit = remaining == 0 ? a : invertOpticalDepth(a, b, remaining, depth, 1e-8*remaining);
+                if (work) work->distance = hit;
+                return 0;
+            }
+        } else if (collision && depth >= target-total) {
+            hit = invertOpticalDepth(a, b, target-total, depth, 1e-8*target);
+            if (work) work->distance = hit;
+            return 0.0;
+        } else {
+            // Ratio tracking samples only bounded cells. The integrated cells
+            // contribute their exponential transmission factors deterministically.
+            total += depth;
+        }
+        if (work) work->distance = b;
         if (!collision && std::exp(-total) == 0) return 0.0;
         a = b;
     }
-    return collision ? 1.0 : std::exp(-total);
+    return collision ? 1.0 : weight*std::exp(-total);
 }
 
 } // namespace Tungsten::ConditionalGpis

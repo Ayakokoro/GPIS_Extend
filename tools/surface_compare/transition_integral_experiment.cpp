@@ -72,6 +72,7 @@ J chapter2WindowReplay(const J &config,const cg::GPSSField &field,cg::Conditiona
     const double ell=1/std::sqrt(birth.direction.dot(field.kernel.precision()*birth.direction));
     const double end=std::min(ray["length"].get<double>(),config.value("end_scale",2.)*ell-age);
     const double begin=std::max({0.,ray.value("tracking_start_distance",0.),config.value("begin_scale",0.)*ell-age});
+    const double split=ray.value("tracking_split_distance",0.);
     require(begin<end,"Empty chapter 2 replay window");
     if(config.at("raw").get<bool>()) {
         settings.coupledLocalScale=0;settings.chapter2StartScale=1e-12;settings.chapter2FallbackEvents=0;
@@ -85,7 +86,7 @@ J chapter2WindowReplay(const J &config,const cg::GPSSField &field,cg::Conditiona
         {
             cg::Profile::Scope medium(cg::Profile::Stage::Medium,collision ? cg::Profile::Domain::Path:cg::Profile::Domain::Shadow);
             cg::ConditionalSegment seg(field,birth,origin,birth.direction,end,settings,nullptr,L,L);
-            weight=seg.track(rng,collision,hit,&work,begin);
+            weight=seg.track(rng,collision,hit,&work,begin,split);
         }
         const double elapsed=seconds(start);
         trials.push_back({{"seed",seed},{"seconds",elapsed},{"candidates",work.candidates},{"intervals",work.intervals},

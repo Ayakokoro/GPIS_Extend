@@ -35,6 +35,7 @@ inline void compare(const Json &spec,const std::filesystem::path &out,const cg::
     birth.birthValue=ray["birth_value"];birth.age=ray["birth_age"];birth.direction=vec(ray["direction"]);
     const auto origin=vec(ray["origin"]);const auto direction=birth.direction;
     const double length=ray.at("length"),begin=ray.value("tracking_start_distance",0.);
+    const double split=ray.value("tracking_split_distance",0.);
     const bool collision=ray["domain"]=="path";
     const double L=field.mean->globalMagnitudeBounds()->maximumGradientNorm;
     const auto prefix=ray["uniforms"].get<std::vector<float>>();
@@ -54,7 +55,7 @@ inline void compare(const Json &spec,const std::filesystem::path &out,const cg::
         Flight trace(birth,origin,direction,length,collision,ray["bounce"].get<int>());
         cg::ConditionalSegment segment(field,birth,origin,direction,length,settings[mode],nullptr,L,L);
         Tape tape(prefix);cg::Random rng(tape);cg::ConditionalTrackingWork work;double hit;
-        trace.constructed();const double result=segment.track(rng,collision,hit,&work,begin);
+        trace.constructed();const double result=segment.track(rng,collision,hit,&work,begin,split);
         trace.finish(result,hit);registry().enabled=false;
         const auto &r=registry().thread().scratch;
         auto &row=report["modes"][names[mode]];
@@ -158,7 +159,7 @@ inline void compare(const Json &spec,const std::filesystem::path &out,const cg::
         Tape tape(prefix);cg::Random rng(tape);cg::ConditionalTrackingWork work;double hit;
         const auto start=Clock::now();
         cg::ConditionalSegment segment(field,birth,origin,direction,length,settings[mode],nullptr,L,L);
-        const double value=segment.track(rng,collision,hit,&work,begin);
+        const double value=segment.track(rng,collision,hit,&work,begin,split);
         const double us=std::chrono::duration<double,std::micro>(Clock::now()-start).count();
         if(repeat<0) continue;
         auto &row=report["modes"][names[mode]];

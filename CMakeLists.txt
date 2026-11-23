@@ -523,7 +523,7 @@ if (OpenVDB_FOUND AND TBB_FOUND AND nanovdb_FOUND)
     endif()
 endif()
 
-option(TUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS "Build stationary classic_local tests" OFF)
+option(TUNGSTEN_BUILD_CLASSIC_LOCAL_TESTS "Build classic_local transport and render tests" OFF)
 if (TUNGSTEN_ENABLE_NEURAL_RENEWAL)
     include(cmake/NeuralRenewal.cmake)
 endif()

@@ -21,6 +21,7 @@ inline nlohmann::json optimizationRays(const nlohmann::json &files,
         const auto origin=vec(input["origin"]),direction=vec(input["direction"]);birth.direction=direction;
         const double length=input["length"];const bool collision=input["domain"]=="path";
         const double begin=input.value("tracking_start_distance",0.0);
+        const double split=input.value("tracking_split_distance",0.0);
         const auto key=std::make_tuple(file.get<std::string>(),settings.exteriorCutoffSigma,settings.classicLocalBand);
         if(!references.count(key)) {
             auto observation=birth;observation.direction=direction.normalized();observation.age=0;
@@ -88,7 +89,7 @@ inline nlohmann::json optimizationRays(const nlohmann::json &files,
             cg::ConditionalTrackingWork work;double hit;
             const auto start=Clock::now();
             cg::ConditionalSegment segment(field,birth,origin,direction,length,settings,nullptr,L,L);
-            const double tr=segment.track(rng,collision,hit,&work,begin);
+            const double tr=segment.track(rng,collision,hit,&work,begin,split);
             times.push_back(std::chrono::duration<double,std::micro>(Clock::now()-start).count());
             sum+=tr;sum2+=tr*tr;events+=work.candidates;intervals+=work.intervals;
         }

@@ -13,11 +13,11 @@ class Scene;
 class ClassicLocalGrid;
 struct ClassicLocalField {
     PathPtr file;
-    std::string sdfName="sdf", densityName="density";
+    std::string sdfName="sdf", densityName="density", alphaName;
     Mat4f transform;
     int macrocellSize=8;
     int macrocellResolution=0; // Optional fixed number of blocks on each axis.
-    void fromJson(JsonPtr field,const Scene &scene);
+    void fromJson(JsonPtr field,const Scene &scene,bool allowAlphaGrid=false);
     rapidjson::Value toJson(rapidjson::Document::AllocatorType &allocator) const;
     std::unique_ptr<ClassicLocalGrid> load() const;
 };
@@ -27,7 +27,7 @@ class ClassicLocalGrid {
     struct Impl;
     std::unique_ptr<Impl> _impl;
 public:
-    struct Segment { double begin, end, densityMaximum; };
+    struct Segment { double begin, end, densityMaximum, spatialExtinctionMaximum; };
     class Cursor {
         const Impl *_grid;
         Eigen::Vector3d _origin, _direction;
@@ -45,9 +45,10 @@ public:
     };
     ClassicLocalGrid(const std::string &file, const std::string &sdfName,
                      const std::string &densityName, const Mat4f &fieldToWorld, int macrocellSize,
-                     int macrocellResolution=0);
+                     int macrocellResolution=0, const std::string &alphaName="");
     ~ClassicLocalGrid();
     double density(const Eigen::Vector3d &world) const;
+    double alpha(const Eigen::Vector3d &world) const;
     bool hasDensity(const Eigen::Vector3d &world) const;
     Eigen::Vector3d meanGradient(const Eigen::Vector3d &world) const;
 };
