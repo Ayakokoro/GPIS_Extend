@@ -7,11 +7,11 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace Tungsten {
 
-// World-space covariance parameters along a ray. The split planes are
-// fixed for the scene; each flight needs at most four split distances.
+// World-space covariance parameters along a ray.
 class LatticeNonstationaryParameters {
     using V = Eigen::Vector3d;
 
@@ -96,6 +96,7 @@ class LatticeNonstationaryParameters {
     Parameter<ProceduralScalar> _amplitude;
     Parameter<ProceduralVector> _width;
 
+public:
     struct Jet {
         ParameterJet sigma,ell;
         LatticeNoiseParameters along(const V &dir) const {
@@ -106,8 +107,8 @@ class LatticeNonstationaryParameters {
         return {_amplitude.sample(origin,dir,t,side),_width.sample(origin,dir,t,side)};
     }
 
-public:
     double minEll, maxEll, maxSigma, maxSigmaGradient, maxEllGradient;
+    double baseEll() const { return _width.multiplier; }
     explicit LatticeNonstationaryParameters(const ProceduralNonstationaryCovariance &covariance) {
         const auto *base=dynamic_cast<const SquaredExponentialCovariance *>(covariance.stationaryCovariance().get());
         if (!base || !base->isIsotropic() || covariance.isNonstationaryAnisotropicKernel())
@@ -141,6 +142,27 @@ public:
 
     LatticeNoiseParameters at(const V &origin, const V &direction, double t, int side) const {
         return sample(origin,direction,t,side).along(direction);
+    }
+
+    struct WidthPlane { int axis; double coordinate, ell; };
+
+    // Invert the procedural log(1 + ls) ramp, before multiplying by the
+    // stationary covariance length. The sparse-convolution levels are powers
+    // of the dimensionless ls, not powers of a world-space distance.
+    std::vector<WidthPlane> levelPlanes(double levelRatio) const {
+        std::vector<WidthPlane> planes;
+        if (_width.axis<0 || _width.startValue==_width.endValue) return planes;
+        const double low=std::min(_width.startValue,_width.endValue);
+        const double high=std::max(_width.startValue,_width.endValue);
+        for (int level=int(std::floor(std::log(low)/std::log(levelRatio)));; ++level) {
+            const double scale=std::pow(levelRatio,level);
+            if (scale>=high) break;
+            if (scale<=low) continue;
+            const double coordinate=_width.start+
+                    (std::log1p(scale)-std::log1p(_width.startValue))/_width.logSlope;
+            planes.push_back({_width.axis,coordinate,scale*baseEll()});
+        }
+        return planes;
     }
 
     // On a plateau, the whole Hermite piece (including its endpoint jets)

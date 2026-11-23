@@ -1,3 +1,4 @@
+#include "io/DirectoryChange.hpp"
 #include "io/JsonDocument.hpp"
 #include "io/Scene.hpp"
 #include "media/GpisSdfGrid.hpp"
@@ -22,6 +23,12 @@ using V = Eigen::Vector3d;
 namespace fs = std::filesystem;
 
 namespace {
+#ifdef TUNGSTEN_RESAMPLE_SDF_MEAN
+constexpr bool ResampleMean = true;
+#else
+constexpr bool ResampleMean = false;
+#endif
+
 std::string jsonText(const rapidjson::Value &value)
 {
     rapidjson::StringBuffer buffer;
@@ -68,7 +75,8 @@ struct Errors {
 int main(int argc, char **argv)
 {
     if (argc < 3 || argc > 5) {
-        std::cerr << "Usage: bake_sdf_mean scene.json output.vdb [voxel_size=0.01] [medium=gp]\n";
+        std::cerr << "Usage: " << fs::path(argv[0]).filename().string()
+                  << " scene.json output.vdb [voxel_size=0.01] [medium=gp]\n";
         return 2;
     }
     try {
@@ -94,23 +102,23 @@ int main(int argc, char **argv)
         }
         if (!selected) throw std::runtime_error("Requested medium was not found");
         const auto meanJson = selected.getRequiredMember("gaussian_process").getRequiredMember("mean");
-        DirectoryChange context(Path(input.parent_path().generic_string()));
+        DirectoryChange sceneDirectory(Path(input.parent_path().generic_string()));
+        if (meanJson.castField<std::string>("type") != "procedural" && !ResampleMean)
+            throw std::runtime_error("This baker expects a procedural SDF mean");
         openvdb::initialize();
         Scene scene;
         const auto mean = scene.fetchMeanFunction(meanJson);
         const auto *queries = mean->sdfQueries();
-        const auto *tabulated = dynamic_cast<const TabulatedMean *>(mean.get());
-        if (!queries && (!tabulated || tabulated->isVolume()))
-            throw std::runtime_error("Expected a procedural SDF or a tabulated SDF mean");
-        mean->loadResources();
+        if (!ResampleMean && !queries) throw std::runtime_error("Mean does not expose SDF queries");
         const auto valueAt = [&](const V &p) {
-            return queries ? queries->evaluateJet(p).value :
-                (*mean)(Derivative::None,Vec3d(p.x(),p.y(),p.z()),Vec3d(0.0));
+            if constexpr (ResampleMean)
+                return (*mean)(Derivative::None, to_vec3d(p), Vec3d(0.0));
+            return queries->evaluateJet(p).value;
         };
         const auto jetAt = [&](const V &p) {
-            if (queries) return queries->evaluateJet(p);
-            const auto g = mean->dmean_da(Vec3d(p.x(),p.y(),p.z()));
-            return SdfJet{valueAt(p), V(g.x(),g.y(),g.z())};
+            if constexpr (ResampleMean)
+                return SdfJet{valueAt(p), to_eigen3d(mean->dmean_da(to_vec3d(p)))};
+            return queries->evaluateJet(p);
         };
 
         // Cover all cube boundaries carrying this medium, in world coordinates.
@@ -219,7 +227,9 @@ int main(int argc, char **argv)
         };
         double sigma = 0;
         selected.getRequiredMember("gaussian_process").getRequiredMember("covariance").getField("sigma", sigma);
-        const double band = std::max(3*std::abs(sigma), 3*spacing);
+        const bool analyticReference = !ResampleMean && mean->sdfQueries();
+        const double band = analyticReference ? std::max(3*std::abs(sigma), 3*spacing) : 1.0;
+        const double nodeTolerance = analyticReference ? 2e-5 : 1e-3;
         for (int i = 0; i < 100000; ++i) {
             V p;
             for (int a = 0; a < 3; ++a) p[a] = minimum[a]+random()*(maximum[a]-minimum[a]);
@@ -233,7 +243,7 @@ int main(int argc, char **argv)
                 const auto ref = jetAt(p);
                 const auto v = baked.evaluate(p);
                 nodes.add(ref,v);
-                if (std::abs(ref.value-v.value) > 2e-5*std::max(1.0,std::abs(ref.value)))
+                if (std::abs(ref.value-v.value) > nodeTolerance*std::max(1.0,std::abs(ref.value)))
                     throw std::runtime_error("Reloaded voxel values do not match the source mean");
             }
         }
