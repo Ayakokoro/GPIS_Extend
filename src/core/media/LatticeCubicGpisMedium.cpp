@@ -3,6 +3,7 @@
 #include "GpisSdfGrid.hpp"
 #include "GpisSdfCubicRay.hpp"
 #include "LatticeNonstationaryParameters.hpp"
+#include "TwoLevelLatticeRayField.hpp"
 #include "io/JsonObject.hpp"
 #include "math/CubicDowncrossing.hpp"
 #include "math/NonstationaryLatticeGaussianNoise.hpp"
@@ -25,12 +26,7 @@ Vector eigen(const Vec3f &p) { return {p.x(),p.y(),p.z()}; }
 Vector eigen(const Vec3d &p) { return {p.x(),p.y(),p.z()}; }
 Vec3d vec(const Vector &p) { return Vec3d(p.x(),p.y(),p.z()); }
 
-int cellAt(double t, double spacing);
-struct NoisePiece {
-    int cell;
-    double start, end;
-    double width() const { return end-start; }
-};
+using NoisePiece = LatticeNoisePiece;
 
 struct StationaryRayNoise {
     const LatticeGaussianKernel &kernel;
@@ -39,9 +35,7 @@ struct StationaryRayNoise {
     : kernel(k), realization(k,seed) {}
     double kernelSpacing() const { return kernel.spacing; }
     NoisePiece piece(double t) const {
-        const int i=cellAt(t,kernel.spacing);
-        const double spacing=kernel.spacing;
-        return {i,i*spacing,(i+1.0)*spacing};
+        return NoisePiece::containing(t,kernel.spacing);
     }
     Cubic segment(const NoisePiece &p) const { return realization.segment(p.cell); }
     double absoluteBound() const { return realization.absoluteBound(); }
@@ -63,9 +57,7 @@ struct VaryingRayNoise {
     : model(m), realization(m.kernel,seed), origin(o), direction(d), cuts(m.parameters.cuts(o,d)) {}
     double kernelSpacing() const { return model.kernel.spacing; }
     NoisePiece piece(double t) const {
-        const double spacing=model.kernel.spacing;
-        const int cell=cellAt(t,spacing);
-        NoisePiece p{cell,cell*spacing,(cell+1.0)*spacing};
+        NoisePiece p=NoisePiece::containing(t,model.kernel.spacing);
         for (double cut : cuts) {
             if (cut>=p.end) break;
             if (cut<=t) p.start=std::max(p.start,cut);
@@ -137,17 +129,6 @@ template<class Noise> struct Endpoint : MediumPathContext {
           age(t), transverseSeed(seed) {}
 };
 
-int cellAt(double t, double spacing) {
-    const double index=std::floor(t/spacing);
-    if (!(index>=0 && index<std::numeric_limits<int>::max()-1))
-        throw std::runtime_error("lattice_cubic_gpis: ray exceeds the lattice index range");
-    int i=int(index);
-    // Division may round a point less than a knot onto its integer index.
-    if (i*spacing>t) --i;
-    else if ((i+1)*spacing<=t) ++i;
-    return i;
-}
-
 } // namespace
 
 LatticeCubicGpisMedium::LatticeCubicGpisMedium() {
@@ -163,6 +144,9 @@ void LatticeCubicGpisMedium::fromJson(JsonPtr value, const Scene &scene) {
         value.parseError("lattice_cubic_gpis supports only correlation_context renewal+");
     value.getField("lattice_spacing_in_ell",_spacingInEll);
     value.getField("kernel_radius_in_ell",_radiusInEll);
+    value.getField("lattice_multiresolution",_multiResolution);
+    if (_multiResolution && _radiusInEll!=3.0f)
+        value.parseError("lattice_multiresolution uses the sparse convolution support; remove the custom kernel_radius_in_ell");
     value.getField("step_size",_entryStepSize);
     if (!std::isfinite(_entryStepSize) || _entryStepSize<=0)
         value.parseError("lattice_cubic_gpis step_size must be finite and positive");
@@ -179,7 +163,8 @@ rapidjson::Value LatticeCubicGpisMedium::toJson(Allocator &allocator) const {
     value.RemoveMember("tracking_step");
     value.AddMember("correlation_context","renewal+",allocator);
     value.AddMember("lattice_spacing_in_ell",_spacingInEll,allocator);
-    value.AddMember("kernel_radius_in_ell",_radiusInEll,allocator);
+    if (_multiResolution) value.AddMember("lattice_multiresolution",true,allocator);
+    else value.AddMember("kernel_radius_in_ell",_radiusInEll,allocator);
     value.AddMember("step_size",_entryStepSize,allocator);
     value.AddMember("geometry_pruning",_prune,allocator);
     value.AddMember("geometry_pruning_mode",
@@ -195,7 +180,9 @@ void LatticeCubicGpisMedium::prepareForRender() {
     if (!_sdfGrid) throw std::invalid_argument("lattice_cubic_gpis requires a trilinear OpenVDB SDF");
     _kernel.reset();
     _varying.reset();
-    if (varying) _varying=std::make_unique<VaryingLatticeModel>(*varying,_spacingInEll,_radiusInEll);
+    _twoLevel.reset();
+    if (varying && _multiResolution) _twoLevel=std::make_unique<TwoLevelLatticeModel>(*varying,_spacingInEll);
+    else if (varying) _varying=std::make_unique<VaryingLatticeModel>(*varying,_spacingInEll,_radiusInEll);
     else _kernel=std::make_unique<LatticeGaussianKernel>(float(_sigma),se->lengthScale(),_spacingInEll,_radiusInEll);
 #if OPENVDB_AVAILABLE
     if (_prune) _sdfGrid->buildMacrocells(8,true);
@@ -204,6 +191,7 @@ void LatticeCubicGpisMedium::prepareForRender() {
 
 std::optional<float> LatticeCubicGpisMedium::trace(PathSampleGenerator &sampler, const Ray &ray,
                                    MediumState *state, MediumSample *sample) const {
+    if (_twoLevel) return traceField<TwoLevelLatticeRayField>(*_twoLevel,sampler,ray,state,sample);
     if (_varying) return traceField<VaryingRayNoise>(*_varying,sampler,ray,state,sample);
     return traceField<StationaryRayNoise>(*_kernel,sampler,ray,state,sample);
 }
@@ -293,7 +281,8 @@ std::optional<float> LatticeCubicGpisMedium::traceField(const Model &model,PathS
     if (_prune && _threeSigmaPruning) {
         // This scene-wide cutoff can discard tail crossings, including on
         // conditioned flights. It applies only to the first macrocell test.
-        bound=3*(_varying ? _varying->parameters.maxSigma : _sigma);
+        bound=3*(_twoLevel ? _twoLevel->parameters.maxSigma :
+                 _varying ? _varying->parameters.maxSigma : _sigma);
         boundEnd=limit;
     }
     NoisePiece piece{0,0,0};

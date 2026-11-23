@@ -21,12 +21,26 @@ class LatticeGaussianKernel {
     int _radius;
     float _sigma, _originStddev, _invValueVariance, _invSlopeVariance, _boundPerCoefficient;
     float _transverseScale;
+    float _originSlopeVariance, _slopeBoundPerCoefficient;
     std::vector<Knot> _origin;
     std::vector<Cubic> _weights;
 
 public:
     const float spacing;
     float originStddev() const { return _originStddev; }
+    float originSlopeVariance() const { return _originSlopeVariance; }
+
+    template<typename Callback>
+    void forEachWeight(int cell, double u, Callback &&visit) const {
+        const double v=1-u;
+        const double a=(1+2*u)*v*v, da=u*v*v, b=(1+2*v)*u*u, db=-v*u*u;
+        for (std::size_t j=0;j<_weights.size();++j) {
+            const auto &w=_weights[j];
+            visit(std::int64_t(cell)+1-_radius+std::int64_t(j),
+                  _sigma*(a*w[0]+da*w[1]+b*w[2]+db*w[3]),
+                  _sigma*(6*u*v*(w[2]-w[0])+v*(1-3*u)*w[1]+u*(3*u-2)*w[3])/spacing);
+        }
+    }
 
     LatticeGaussianKernel(float sigma, float ell, float spacingInEll=0.5f, float radiusInEll=3.0f)
         : _sigma(sigma), _transverseScale(sigma/ell), spacing(ell*spacingInEll)
@@ -49,6 +63,7 @@ public:
         double originNormSq = 0;
         float slopeVariance = 0, powerNorm = 0;
         Cubic controlNorm{};
+        std::array<double,3> derivativeNorm{};
         for (int j=1-_radius; j<=_radius; ++j) {
             // For segment i, coefficient i+j contributes this same polynomial.
             const Knot a = knot(-j), b = knot(1-j);
@@ -62,6 +77,9 @@ public:
                 slopeVariance += a.slope*a.slope;
             }
             Cubic controls{a.value,a.value+a.slope/3,b.value-b.slope/3,b.value};
+            derivativeNorm[0]+=std::abs(a.slope);
+            derivativeNorm[1]+=std::abs(3.*delta-a.slope-b.slope);
+            derivativeNorm[2]+=std::abs(b.slope);
             for (int k=0; k<4; ++k) {
                 controlNorm[k] += std::abs(controls[k]);
                 powerNorm += std::abs(w[k]);
@@ -70,12 +88,15 @@ public:
         _originStddev = sigma*float(std::sqrt(originNormSq));
         _invValueVariance = float(1/originNormSq);
         _invSlopeVariance = 1/slopeVariance;
+        _originSlopeVariance = sigma*sigma*slopeVariance/(spacing*spacing);
         if (!std::isfinite(_invValueVariance) || !std::isfinite(_invSlopeVariance))
             throw std::invalid_argument("lattice_gaussian: kernel cannot resolve both origin observations");
         // Convex hull in Bernstein form, padded for float dot products,
         // basis conversion and evaluation of the assembled power polynomial.
         const float roundoff = (4*_weights.size()+32)*std::numeric_limits<float>::epsilon();
         _boundPerCoefficient = sigma*(*std::max_element(controlNorm.begin(),controlNorm.end()) + roundoff*powerNorm);
+        _slopeBoundPerCoefficient = float(sigma*(*std::max_element(derivativeNorm.begin(),derivativeNorm.end())
+                                  + 6*roundoff*powerNorm)/spacing);
     }
 
     // Renewal+ observes only the value and axial slope. The two independent
@@ -161,6 +182,7 @@ public:
     }
 
     float absoluteBound() const { return _maxCoefficient*_kernel._boundPerCoefficient; }
+    float absoluteSlopeBound() const { return _maxCoefficient*_kernel._slopeBoundPerCoefficient; }
 
     // For t in [cell*spacing,(cell+1)*spacing], evaluate in u=t/spacing-cell.
     std::array<double,4> segment(int cell) const {

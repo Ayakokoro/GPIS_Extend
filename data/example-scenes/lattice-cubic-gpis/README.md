@@ -26,6 +26,28 @@ build/Release/tungsten.exe -t 8 -s 20261024 -d outputs/lattice-shaderball-nonsta
 
 对掠射光线换一组种子，每种方法采样 32,768 次后，格点和参考的命中率分别为 59.56% 和 59.13%，累计概率最大差为 0.85 个百分点。[掠射复测](../../../outputs/shaderball_first_hit_rays/nonstationary_render/grazing_check/summary.json)
 
+## 对齐稀疏卷积的双层协方差
+
+在 `type: "lattice_cubic_gpis"` 的介质对象中设置 `"lattice_multiresolution": true`。Dragon 使用原有的三线性 SDF、`var` 和 `ls` 场。`lattice_spacing_in_ell` 指定每层格距与该层相关长度的比值，默认 0.5。各层使用独立的高斯格点系数，同一层在不同查询位置共享实现。
+
+设局部长度乘数 `ls` 位于相邻的尺度 $a=2.5^k$ 和 $b=2.5^{k+1}$ 之间。计算 $f=(\mathrm{ls}-a)/(b-a)$，再把权重向量 $(1-f,f)$ 除以其欧氏范数。Dragon 在 `ls = 0.223` 处选用 0.16 和 0.40 两层。两个查询点可以选中不同的层，只有共享层对它们的协方差有贡献。
+
+沿同一条射线，令 $d$ 为两点距离，$L_j$ 为第 $j$ 层的物理相关长度（基础 SE 长度乘以层尺度）。在有限支撑、独立脉冲的统计模型下，稀疏卷积的单层值协方差为
+
+$$
+k_j(d)=\exp[-d^2/(2L_j^2)]\,\mathrm{erf}\!\left(\max\!\left(0,3-\frac{|d|}{\sqrt 2 L_j}\right)\right).
+$$
+
+混合场的目标值协方差为 $\sigma(p)\sigma(q)\sum_j w_j(p)w_j(q)k_j(d)$。格点间距、核尾的离散化和 Hermite 插值会产生数值误差。跨越长度渐变时，lattice 的几何导数包含混合权重的导数。高斯格点和有限数量的 Bernoulli 脉冲也有不同的高阶统计，因此协方差相近时，高光图像仍可能有差异。
+
+在仓库根目录运行下列命令可复核协方差。工具沿一条穿过 Dragon 长度渐变区的斜射线，在 197 个位置上计算渲染用三次插值基函数的协方差，再与稀疏卷积的有限支撑积分比较。19,503 个点对的最大绝对误差按两点标准差参数的乘积归一化后，默认格距为 0.002492，格距减半后为 0.000621。工具还在 18 个位置直接调用两种噪声实现，报告蒙特卡洛协方差及其标准误。
+
+```powershell
+cmake -S . -B build -DTUNGSTEN_BUILD_LATTICE_CUBIC_TESTS=ON
+cmake --build build --config Release --target tungsten lattice_multires_covariance
+build/Release/lattice_multires_covariance.exe 131072 covariance.json
+```
+
 ## 平稳射线上的实现
 
 在射线的物理弧长坐标中，用种子和有符号格点编号生成系数。基函数由高斯卷积核在间距 Δ 的格点处的值和斜率构造，相邻结点之间采用三次 Hermite 插值。支撑半径向上取整到格点，在最外层结点同时置零函数值与斜率。每个噪声格段只组装一次，跨越多个 SDF 体素时复用。

@@ -5,6 +5,7 @@
 #include "media/ClassicGlobalFpGradientMedium.hpp"
 #include "media/LatticeCubicGpisMedium.hpp"
 #include "media/LatticeNonstationaryParameters.hpp"
+#include "media/TwoLevelLatticeRayField.hpp"
 #include "primitives/Cube.hpp"
 #include "sampling/IndependentPathSampler.hpp"
 #include "thread/ThreadUtils.hpp"
@@ -77,11 +78,12 @@ std::shared_ptr<LatticeCubicGpisMedium> load(const fs::path &path,bool prune,boo
                                              const std::string &pruningMode="",
                                              const std::string &correlation="",
                                              std::optional<float> stepSize=std::nullopt,
-                                             const std::string &material=R"({"type":"mirror","albedo":1})") {
+                                             const std::string &material=R"({"type":"mirror","albedo":1})",
+                                             const std::string &extraFields="") {
     const std::string covariance=varying
         ? R"({"type":"proc_nonstationary","cov":{"type":"squared_exponential","sigma":1,"lengthScale":1},"var":{"type":"noise","noise":"left_right","min":0.012,"max":0.035,"start":-0.25,"end":0.23},"ls":{"type":"noise","noise":"front_back","min":0.09,"max":0.25,"start":0.018,"end":1.38}})"
         : R"({"type":"squared_exponential","sigma":0.02,"lengthScale":0.25})";
-    const std::string json=R"({"type":"lattice_cubic_gpis","geometry_pruning":)"+
+    const std::string json="{"+extraFields+R"("type":"lattice_cubic_gpis","geometry_pruning":)"+
         std::string(prune ? "true" : "false")+
         (pruningMode.empty() ? "" : ",\"geometry_pruning_mode\":\""+pruningMode+"\"")+
         (correlation.empty() ? "" : ",\"correlation_context\":\""+correlation+"\"")+
@@ -633,6 +635,27 @@ void testParameterFields() {
     close(params.at(reverseOrigin,-forward,back[1],-1).ellSlope,-slope,1e-12,"reverse width derivative");
     close(params.at(reverseOrigin,-forward,back[1],1).ellSlope,0,0,"reverse exterior derivative");
 
+    const TwoLevelLatticeModel twoLevel(*k,0.5);
+    require(twoLevel.levelPlanes.size()==1,"test ramp crosses exactly one sparse convolution octave");
+    const auto &plane=twoLevel.levelPlanes.front();
+    close(plane.ell,0.5*0.4,1e-12,"octave scale includes the stationary base length");
+    for (int sign : {1,-1}) {
+        const V o=sign==1 ? origin : reverseOrigin;
+        const V d=double(sign)*forward;
+        const double cut=(plane.coordinate-o.z())/d.z();
+        TwoLevelLatticeRayField field(twoLevel,o,d,711);
+        const auto before=field.piece(cut-1e-8), after=field.piece(cut);
+        close(before.end,cut,1e-14,"left piece ends at octave transition");
+        close(after.start,cut,1e-14,"right piece starts at octave transition");
+        const auto l=field.segment(before), r=field.segment(after);
+        close(l[0]+l[1]+l[2]+l[3],r[0],1e-12,"mixed realization continuous at octave boundary");
+        field.condition(0.042,-0.51);
+        const auto first=field.piece(0);
+        const auto c=field.segment(first);
+        close(c[0],0.042,1e-6,"two-level field conditions on the total value");
+        close(c[1]/first.width(),-0.51,1e-5,"two-level field conditions on the total axial derivative");
+    }
+
     const NonstationaryLatticeGaussianKernel kernel(params.minEll,params.maxEll,params.maxSigma,
         params.maxSigmaGradient,params.maxEllGradient);
     const NonstationaryLatticeGaussianRay noise(kernel,175);
@@ -718,6 +741,20 @@ int main(int argc,char **argv) try {
     testOrdinarySurfaceRenewal(*pruned);
     const auto varyingPlain=load(path,false,true),varyingPruned=load(path,true,true);
     testVarying(*varyingPlain,*varyingPruned);
+    const auto loadTwoLevel=[&](bool prune,const std::string &extra="") {
+        return load(path,prune,true,"","",std::nullopt,R"({"type":"mirror","albedo":1})",
+                    R"("lattice_multiresolution":true,)"+extra);
+    };
+    const auto twoLevelPlain=loadTwoLevel(false),twoLevelPruned=loadTwoLevel(true);
+    testVarying(*twoLevelPlain,*twoLevelPruned);
+    require(!varyingPlain->toJson(doc.GetAllocator()).HasMember("lattice_multiresolution"),
+            "existing single-resolution scenes retain their serialization");
+    require(twoLevelPruned->toJson(doc.GetAllocator())["lattice_multiresolution"].GetBool(),
+            "two-level opt-in serialization");
+    rejected=false;
+    try { loadTwoLevel(false,R"("kernel_radius_in_ell":4,)"); }
+    catch (const std::exception &) { rejected=true; }
+    require(rejected,"two-level mode must explain an incompatible support override");
     testTransverseMemory(dir/"lattice-test-zero.vdb");
     testOrdinaryDirectLighting(dir/"lattice-test-zero.vdb");
     testPruningModes(dir/"lattice-test-plateau.vdb");
