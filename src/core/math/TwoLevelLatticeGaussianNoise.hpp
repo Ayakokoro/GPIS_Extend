@@ -8,7 +8,6 @@ namespace Tungsten {
 // sparse convolution chooses its octave in units of the stationary base ell.
 class TwoLevelLatticeKernel {
     friend class TwoLevelLatticeRay;
-    static constexpr double Cutoff = 2.1213203435596426; // three convolution standard deviations
     double _baseEll, _maxEll, _maxSigma, _maxSigmaSlope, _maxEllSlope;
     LatticeGaussianKernel _shape;
 
@@ -35,16 +34,19 @@ class TwoLevelLatticeKernel {
     }
 public:
     static constexpr double Base=2.5;
+    static constexpr float DefaultRadiusInEll=2.1213203435596426f; // three convolution standard deviations
     struct Blend {
         int level;
         double lowEll,highEll,lowWeight,highWeight,lowDerivative,highDerivative;
+        bool atBoundary;
     };
     const double spacing;
 
     TwoLevelLatticeKernel(double baseEll,double minEll,double maxEll,double maxSigma,
-                          double maxSigmaSlope,double maxEllSlope,double spacingInEll=.5)
+                          double maxSigmaSlope,double maxEllSlope,double spacingInEll=.5,
+                          float radiusInEll=DefaultRadiusInEll)
     : _baseEll(baseEll),_maxEll(maxEll),_maxSigma(maxSigma),_maxSigmaSlope(maxSigmaSlope),
-      _maxEllSlope(maxEllSlope),_shape(1.f,1.f,float(spacingInEll),float(Cutoff)),
+      _maxEllSlope(maxEllSlope),_shape(1.f,1.f,float(spacingInEll),radiusInEll),
       spacing(minEll/Base*_shape.spacing) {
         if (!(baseEll>0 && minEll>0 && minEll<=maxEll && maxSigma>0 &&
               maxSigmaSlope>=0 && maxEllSlope>=0 && std::isfinite(baseEll) &&
@@ -62,11 +64,12 @@ public:
             throw std::runtime_error("invalid two-level lattice scale");
         const double closest=std::round(level);
         const double tolerance=16*std::numeric_limits<double>::epsilon()*std::max(1.,std::abs(level));
-        const int low=std::abs(level-closest)<=tolerance ? int(closest)-(side<0) : int(std::floor(level));
+        const bool atBoundary=std::abs(level-closest)<=tolerance;
+        const int low=atBoundary ? int(closest)-(side<0) : int(std::floor(level));
         const double lo=_baseEll*std::pow(Base,low),hi=_baseEll*std::pow(Base,low+1);
         const double f=std::clamp((ell-lo)/(hi-lo),0.,1.),g=1.-f;
         const double norm=std::sqrt(g*g+f*f),scale=1./((hi-lo)*norm*norm*norm);
-        return {low,lo,hi,g/norm,f/norm,-f*scale,g*scale};
+        return {low,lo,hi,g/norm,f/norm,-f*scale,g*scale,atBoundary};
     }
 
     // Coefficient rows for the mixed field and its ray derivative, before the
@@ -107,35 +110,49 @@ class TwoLevelLatticeRay {
     Jet evaluateLayer(int level,double ell,double t) const {
         const auto c=_kernel.coordinate(t,ell);
         Layer &l=layer(level);
+        const double spacing=ell*_kernel._shape.spacing;
         if (l.cell!=c.cell) {
+            // A boundary probe needs only this knot. Build the rest of the cell
+            // if a later probe actually falls in its interior.
+            if (c.u==0.) {
+                const auto knot=l.ray.knot(c.cell);
+                return {knot[0],knot[1]/spacing};
+            }
             l.cubic=l.ray.segment(c.cell);
             l.cell=c.cell;
         }
         const auto &v=l.cubic;
         return {((v[3]*c.u+v[2])*c.u+v[1])*c.u+v[0],
-                ((3*v[3]*c.u+2*v[2])*c.u+v[1])/(ell*_kernel._shape.spacing)};
+                ((3*v[3]*c.u+2*v[2])*c.u+v[1])/spacing};
     }
-    Jet evaluate(double t,const LatticeNoiseParameters &p,int side) const {
+public:
+    struct EndpointJet {
+        double value,slope;
+        bool atOctaveCrease;
+    };
+    EndpointJet endpoint(double t,const LatticeNoiseParameters &p,int side) const {
         const auto b=_kernel.blend(p.ell,(p.ellSlope>0 ? side : p.ellSlope<0 ? -side : 0));
         const auto lo=evaluateLayer(b.level,b.lowEll,t),hi=evaluateLayer(b.level+1,b.highEll,t);
         const double unit=b.lowWeight*lo.value+b.highWeight*hi.value;
         const double width=b.lowDerivative*lo.value+b.highDerivative*hi.value;
         return {p.sigma*unit,p.sigmaSlope*unit+p.sigma*(p.ellSlope*width+
-                b.lowWeight*lo.slope+b.highWeight*hi.slope)};
+                b.lowWeight*lo.slope+b.highWeight*hi.slope),b.atBoundary && p.ellSlope!=0.};
     }
-public:
     TwoLevelLatticeRay(const TwoLevelLatticeKernel &kernel,std::uint32_t seed)
     : _kernel(kernel),_seed(seed) {
         LatticeGaussianRay prior(kernel._shape,seed);
         _bound=_kernel.controlBound(prior.absoluteBound(),prior.absoluteSlopeBound());
     }
     double absoluteBound() const { return _bound; }
-    double value(double t,const LatticeNoiseParameters &p) const { return evaluate(t,p,1).value; }
+    double value(double t,const LatticeNoiseParameters &p) const { return endpoint(t,p,1).value; }
+    static std::array<double,4> hermite(double width,const EndpointJet &a,const EndpointJet &b) {
+        const double da=a.slope*width,db=b.slope*width,delta=b.value-a.value;
+        return {a.value,da,3*delta-2*da-db,da+db-2*delta};
+    }
     std::array<double,4> segment(double lo,double hi,const LatticeNoiseParameters &left,
                                  const LatticeNoiseParameters &right) const {
-        const auto a=evaluate(lo,left,1),b=evaluate(hi,right,-1);
-        const double da=a.slope*(hi-lo),db=b.slope*(hi-lo),delta=b.value-a.value;
-        return {a.value,da,3*delta-2*da-db,da+db-2*delta};
+        const auto a=endpoint(lo,left,1),b=endpoint(hi,right,-1);
+        return hermite(hi-lo,a,b);
     }
 
     void transverse(double t,const LatticeNoiseParameters &p,double &responseSigma,

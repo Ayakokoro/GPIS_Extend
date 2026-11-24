@@ -27,10 +27,11 @@ struct TwoLevelLatticeModel {
     TwoLevelLatticeKernel kernel;
     std::vector<LatticeNonstationaryParameters::WidthPlane> levelPlanes;
 
-    TwoLevelLatticeModel(const ProceduralNonstationaryCovariance &cov,double spacing)
+    TwoLevelLatticeModel(const ProceduralNonstationaryCovariance &cov,double spacing,
+                         float radiusInEll=TwoLevelLatticeKernel::DefaultRadiusInEll)
     : parameters(cov),
       kernel(parameters.baseEll(),parameters.minEll,parameters.maxEll,parameters.maxSigma,
-             parameters.maxSigmaGradient,parameters.maxEllGradient,spacing),
+             parameters.maxSigmaGradient,parameters.maxEllGradient,spacing,radiusInEll),
       levelPlanes(parameters.levelPlanes(TwoLevelLatticeKernel::Base)) {}
 };
 
@@ -41,18 +42,25 @@ class TwoLevelLatticeRayField {
     V _origin, _direction;
     struct Cut { double distance, ell; };
     std::vector<Cut> _cuts;
+    mutable std::optional<double> _cachedEnd;
+    mutable TwoLevelLatticeRay::EndpointJet _endJet{};
 
-    void snapWidth(double t,LatticeNoiseParameters &p) const {
+    bool snapWidthAtCut(double t,LatticeNoiseParameters &p) const {
+        bool atCut=false;
         for (const auto &cut : _cuts)
-            if (cut.distance==t && cut.ell>0) {
-                p.ell=cut.ell;
-                return;
+            if (cut.distance==t) {
+                atCut=true;
+                if (cut.ell>0) {
+                    p.ell=cut.ell;
+                    break;
+                }
             }
+        return atCut;
     }
 public:
     LatticeNoiseParameters at(double t,int side) const {
         auto p=_model.parameters.at(_origin,_direction,t,side);
-        snapWidth(t,p);
+        snapWidthAtCut(t,p);
         return p;
     }
 
@@ -88,17 +96,26 @@ public:
         return interval;
     }
     std::array<double,4> segment(const LatticeNoisePiece &p) const {
-        return _ray.segment(p.start,p.end,at(p.start,1),at(p.end,-1));
+        const auto left=_cachedEnd==p.start ? _endJet : _ray.endpoint(p.start,at(p.start,1),1);
+        auto rightParameters=_model.parameters.at(_origin,_direction,p.end,-1);
+        const bool atCut=snapWidthAtCut(p.end,rightParameters);
+        _endJet=_ray.endpoint(p.end,rightParameters,-1);
+        // A ramp cut or a width rounded onto an octave boundary can have
+        // different incoming and outgoing slopes at the same distance.
+        if (atCut || _endJet.atOctaveCrease) _cachedEnd.reset();
+        else _cachedEnd=p.end;
+        return _ray.hermite(p.width(),left,_endJet);
     }
     double absoluteBound() const { return _ray.absoluteBound(); }
     double boundUntil(double,double limit,double &end) const { end=limit; return absoluteBound(); }
     void condition(double value,std::optional<double> derivative) {
+        _cachedEnd.reset();
         _ray.condition(at(0,1),value,derivative);
     }
     void transverse(const LatticeNoisePiece &,double t,V &mean,double &sd) const {
         const auto jet=_model.parameters.sample(_origin,_direction,t,1);
         auto p=jet.along(_direction);
-        snapWidth(t,p);
+        snapWidthAtCut(t,p);
         double dSigma,dEll;
         _ray.transverse(t,p,dSigma,dEll,sd);
         mean+=dSigma*V(jet.sigma.gradient.x(),jet.sigma.gradient.y(),jet.sigma.gradient.z())

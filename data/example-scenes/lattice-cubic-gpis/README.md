@@ -30,6 +30,8 @@ build/Release/tungsten.exe -t 8 -s 20261024 -d outputs/lattice-shaderball-nonsta
 
 在 `type: "lattice_cubic_gpis"` 的介质对象中设置 `"lattice_multiresolution": true`。Dragon 使用原有的三线性 SDF、`var` 和 `ls` 场。`lattice_spacing_in_ell` 指定每层格距与该层相关长度的比值，默认 0.5。各层使用独立的高斯格点系数，同一层在不同查询位置共享实现。
 
+双层模式可用 `multires_kernel_radius_in_ell` 指定每层核的支撑半径。设该层相关长度为 $L_j$，格距比例为 $h$，指定的半径比例为 $R$，默认 $R=3/\sqrt{2}$。实际支撑边界位于 $L_j h\lceil R/h\rceil$，该处核值与斜率均为零。默认 $h=0.5$ 时边界为 $2.5L_j$。固定 $h$ 时，半径向上取整后相差至少一个格点才会改变核。
+
 设局部长度乘数 `ls` 位于相邻的尺度 $a=2.5^k$ 和 $b=2.5^{k+1}$ 之间。计算 $f=(\mathrm{ls}-a)/(b-a)$，再把权重向量 $(1-f,f)$ 除以其欧氏范数。Dragon 在 `ls = 0.223` 处选用 0.16 和 0.40 两层。两个查询点可以选中不同的层，只有共享层对它们的协方差有贡献。
 
 沿同一条射线，令 $d$ 为两点距离，$L_j$ 为第 $j$ 层的物理相关长度（基础 SE 长度乘以层尺度）。在有限支撑、独立脉冲的统计模型下，稀疏卷积的单层值协方差为

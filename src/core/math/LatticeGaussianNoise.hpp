@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../Platform.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -173,10 +175,11 @@ class LatticeGaussianSamples {
         x = (x^(x>>27))*0x94d049bb133111ebULL;
         return x^(x>>31);
     }
+
 protected:
     // U >= 2^-32 in Box-Muller, so sqrt(-2 log(U)) <= 6.661.
     static constexpr float PriorCoefficientBound = 6.67f;
-    float prior(std::int64_t index) const {
+    FORCE_INLINE float prior(std::int64_t index) const {
         const unsigned slot = static_cast<unsigned>(index) & (CacheSize-1);
         if (_indices[slot] != index) {
             const std::uint64_t hash = mix(std::uint64_t(index)+_key);
@@ -199,6 +202,27 @@ class LatticeGaussianRay : private LatticeGaussianSamples {
     const LatticeGaussianKernel &_kernel;
     std::vector<float> _conditioned;
     float _maxCoefficient = PriorCoefficientBound;
+    static constexpr std::int64_t NoKnot = std::numeric_limits<std::int64_t>::min();
+    mutable std::int64_t _cachedKnot = NoKnot;
+    mutable LatticeGaussianKernel::Knot _cachedJet{};
+
+    float coefficient(std::int64_t offset) const {
+        // Offsets are relative to the first coefficient affected by condition().
+        return std::uint64_t(offset)<_conditioned.size() ?
+            _conditioned[std::size_t(offset)] : prior(offset+1-_kernel._radius);
+    }
+
+    LatticeGaussianKernel::Knot convolveKnot(std::int64_t index) const {
+        LatticeGaussianKernel::Knot result{};
+        // Every lattice knot has the same stencil as the origin.
+        const auto &knots = _kernel._origin;
+        for (std::size_t k=0; k<knots.size(); ++k) {
+            const float z = coefficient(index+std::int64_t(k));
+            result.value += knots[k].value*z;
+            result.slope += knots[k].slope*z;
+        }
+        return result;
+    }
 public:
     LatticeGaussianRay(const LatticeGaussianKernel &kernel, std::uint32_t seed)
         : LatticeGaussianSamples(seed), _kernel(kernel) {}
@@ -207,6 +231,7 @@ public:
     // birth knot the value row is even and the derivative row is odd. Thus
     // AA^T is diagonal for this very spline, including the compact cutoff.
     void condition(float valueNoise, float directionalDerivativeNoise, bool includeDerivative=true) {
+        _cachedKnot = NoKnot;
         if (_kernel._sigma == 0) return;
         const auto &rows = _kernel._origin;
         _conditioned.resize(rows.size());
@@ -230,17 +255,36 @@ public:
     float absoluteBound() const { return _maxCoefficient*_kernel._boundPerCoefficient; }
     float absoluteSlopeBound() const { return _maxCoefficient*_kernel._slopeBoundPerCoefficient; }
 
+    // Value and slope per lattice interval, with the same float scaling as segment().
+    std::array<double,2> knot(int index) const {
+        if (_kernel._sigma == 0) return {};
+        if (_cachedKnot != index) {
+            _cachedJet = convolveKnot(index);
+            _cachedKnot = index;
+        }
+        return {_cachedJet.value*_kernel._sigma,_cachedJet.slope*_kernel._sigma};
+    }
+
     // For t in [cell*spacing,(cell+1)*spacing], evaluate in u=t/spacing-cell.
     std::array<double,4> segment(int cell) const {
-        std::array<float,4> endpoints{};
         if (_kernel._sigma == 0) return {};
-        const auto &weights = _kernel._weights;
-        for (std::size_t k=0; k<weights.size(); ++k) {
-            const auto relative = std::int64_t(cell)+std::int64_t(k);
-            const float z = std::uint64_t(relative)<_conditioned.size() ?
-                _conditioned[std::size_t(relative)] : prior(relative+1-_kernel._radius);
-            for (int d=0; d<4; ++d) endpoints[d] += weights[k][d]*z;
+        const auto nextKnot = std::int64_t(cell)+1;
+        std::array<float,4> endpoints{};
+        if (_cachedKnot == cell) {
+            endpoints[0] = _cachedJet.value;
+            endpoints[1] = _cachedJet.slope;
+            const auto right = convolveKnot(nextKnot);
+            endpoints[2] = right.value;
+            endpoints[3] = right.slope;
+        } else {
+            const auto &weights = _kernel._weights;
+            for (std::size_t k=0; k<weights.size(); ++k) {
+                const float z = coefficient(std::int64_t(cell)+std::int64_t(k));
+                for (int d=0; d<4; ++d) endpoints[d] += weights[k][d]*z;
+            }
         }
+        _cachedKnot = nextKnot;
+        _cachedJet = {endpoints[2],endpoints[3]};
         // Adjacent cells sum their shared knot in the same order. Convert to
         // powers once, after the dot products, to preserve C1 knot agreement.
         for (float &v : endpoints) v *= _kernel._sigma;

@@ -11,6 +11,7 @@ struct TwoLevelLatticeModel;
 
 class LatticeCubicGpisMedium final : public ClassicGlobalMedium {
     float _spacingInEll=0.5f, _radiusInEll=3.0f;
+    std::optional<float> _multiresRadiusInEll;
     float _entryStepSize=0.01f;
     bool _prune=true, _threeSigmaPruning=false;
     bool _inheritFullGradient=false;

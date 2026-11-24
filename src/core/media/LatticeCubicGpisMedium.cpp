@@ -156,7 +156,13 @@ void LatticeCubicGpisMedium::fromJson(JsonPtr value, const Scene &scene) {
     value.getField("kernel_radius_in_ell",_radiusInEll);
     value.getField("lattice_multiresolution",_multiResolution);
     if (_multiResolution && _radiusInEll!=3.0f)
-        value.parseError("lattice_multiresolution uses the sparse convolution support; remove the custom kernel_radius_in_ell");
+        value.parseError("use multires_kernel_radius_in_ell for a custom two-level support radius");
+    _multiresRadiusInEll.reset();
+    if (auto radius=value["multires_kernel_radius_in_ell"]) {
+        if (!_multiResolution || !dynamic_cast<const ProceduralNonstationaryCovariance *>(_covariance.get()))
+            radius.parseError("multires_kernel_radius_in_ell requires lattice_multiresolution and proc_nonstationary covariance");
+        _multiresRadiusInEll=radius.cast<float>();
+    }
     value.getField("step_size",_entryStepSize);
     if (!std::isfinite(_entryStepSize) || _entryStepSize<=0)
         value.parseError("lattice_cubic_gpis step_size must be finite and positive");
@@ -176,6 +182,7 @@ rapidjson::Value LatticeCubicGpisMedium::toJson(Allocator &allocator) const {
     value.AddMember("lattice_spacing_in_ell",_spacingInEll,allocator);
     if (_multiResolution) value.AddMember("lattice_multiresolution",true,allocator);
     else value.AddMember("kernel_radius_in_ell",_radiusInEll,allocator);
+    if (_multiresRadiusInEll) value.AddMember("multires_kernel_radius_in_ell",*_multiresRadiusInEll,allocator);
     value.AddMember("step_size",_entryStepSize,allocator);
     value.AddMember("geometry_pruning",_prune,allocator);
     value.AddMember("geometry_pruning_mode",
@@ -194,7 +201,9 @@ void LatticeCubicGpisMedium::prepareForRender() {
     _kernel.reset();
     _varying.reset();
     _twoLevel.reset();
-    if (varying && _multiResolution) _twoLevel=std::make_unique<TwoLevelLatticeModel>(*varying,_spacingInEll);
+    if (varying && _multiResolution)
+        _twoLevel=std::make_unique<TwoLevelLatticeModel>(*varying,_spacingInEll,
+            _multiresRadiusInEll.value_or(TwoLevelLatticeKernel::DefaultRadiusInEll));
     else if (varying) _varying=std::make_unique<VaryingLatticeModel>(*varying,_spacingInEll,_radiusInEll);
     else _kernel=std::make_unique<LatticeGaussianKernel>(float(_sigma),se->lengthScale(),_spacingInEll,_radiusInEll);
 #if OPENVDB_AVAILABLE

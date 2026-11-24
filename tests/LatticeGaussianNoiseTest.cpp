@@ -1,6 +1,7 @@
 #include "math/LatticeGaussianNoise.hpp"
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 
 using namespace Tungsten;
 
@@ -16,6 +17,37 @@ double eval(const std::array<double,4> &p, double u) {
 }
 double derivative(const std::array<double,4> &p, double u) {
     return p[1]+u*(2*p[2]+3*u*p[3]);
+}
+
+void testSharedKnotReuse() {
+    const LatticeGaussianKernel kernel(.7f,.3f,.5f,2.5f);
+    constexpr unsigned seed=1234;
+    LatticeGaussianRay ray(kernel,seed);
+    LatticeGaussianRay knotRay(kernel,seed);
+    auto checkAgainstColdSegments = [&](const LatticeGaussianRay &reference) {
+        for (int cell : {0,1,2,73,74,1,std::numeric_limits<int>::max(),
+                         std::numeric_limits<int>::min(),-2,-1}) {
+            auto cold=reference;
+            const auto segment=cold.segment(cell);
+            require(ray.segment(cell)==segment,
+                    "segment coefficients depend on prior knot access");
+            const auto knot=knotRay.knot(cell);
+            require(knot[0]==segment[0] && knot[1]==segment[1] &&
+                    knotRay.segment(cell)==segment,
+                    "direct knot query must agree with cold and cached segments");
+        }
+    };
+    checkAgainstColdSegments(LatticeGaussianRay(kernel,seed));
+    for (bool withSlope : {false,true}) {
+        // The last query for cell -1 cached knot zero. Conditioning changes
+        // that knot immediately before the next query for cell zero.
+        const float value=withSlope ? -.4f : .2f;
+        LatticeGaussianRay reference(kernel,seed);
+        reference.condition(value,.8f,withSlope);
+        ray.condition(value,.8f,withSlope);
+        knotRay.condition(value,.8f,withSlope);
+        checkAgainstColdSegments(reference);
+    }
 }
 
 void testTransverseConditioning() {
@@ -44,6 +76,7 @@ void testTransverseConditioning() {
 }
 
 int main() {
+    testSharedKnotReuse();
     testTransverseConditioning();
     constexpr float ell = 0.2f, sigma = 0.02f;
     const LatticeGaussianKernel kernel(sigma,ell);

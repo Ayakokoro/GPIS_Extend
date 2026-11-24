@@ -11,6 +11,8 @@
 #include "thread/ThreadUtils.hpp"
 #include <openvdb/io/File.h>
 #include <openvdb/openvdb.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -75,11 +77,21 @@ void writeMeanGrid(const fs::path &path,std::optional<float> constant=std::nullo
     file.write(openvdb::GridPtrVec{vdb});
     file.close();
 }
+std::shared_ptr<LatticeCubicGpisMedium> loadJson(const std::string &json) {
+    JsonDocument document(Path("lattice-medium-test.json"),json);
+    Scene scene;
+    auto medium=std::dynamic_pointer_cast<LatticeCubicGpisMedium>(scene.fetchMedium(document));
+    require(bool(medium),"medium factory");
+    medium->loadResources();
+    medium->prepareForRender();
+    return medium;
+}
 std::shared_ptr<LatticeCubicGpisMedium> load(const fs::path &path,bool prune,bool varying=false,
                                              const std::string &pruningMode="",
                                              const std::string &correlation="",
                                              std::optional<float> stepSize=std::nullopt,
                                              const std::string &material=R"({"type":"mirror","albedo":1})",
+                                             bool inheritFullGradient=false,
                                              const std::string &extraFields="") {
     const std::string covariance=varying
         ? R"({"type":"proc_nonstationary","cov":{"type":"squared_exponential","sigma":1,"lengthScale":1},"var":{"type":"noise","noise":"left_right","min":0.012,"max":0.035,"start":-0.25,"end":0.23},"ls":{"type":"noise","noise":"front_back","min":0.09,"max":0.25,"start":0.018,"end":1.38}})"
@@ -94,13 +106,7 @@ std::shared_ptr<LatticeCubicGpisMedium> load(const fs::path &path,bool prune,boo
             "covariance":)"+covariance+R"(,"mean":{"type":"tabulated","scale":1,"grid":{"type":"vdb","file":")"+
         path.generic_string()+R"(","density_name":"sdf","emission_name":"","request_sdf":false,
             "interpolate":"linear","normalize_size":false,"integration_method":"raymarching"}}}})";
-    JsonDocument document(Path("lattice-medium-test.json"),json);
-    Scene scene;
-    auto medium=std::dynamic_pointer_cast<LatticeCubicGpisMedium>(scene.fetchMedium(document));
-    require(bool(medium),"medium factory");
-    medium->loadResources();
-    medium->prepareForRender();
-    return medium;
+    return loadJson(json);
 }
 Medium::MediumState freshState() {
     Medium::MediumState state{};
@@ -753,11 +759,46 @@ void testParameterFields() {
         close(after.start,cut,1e-14,"right piece starts at octave transition");
         const auto l=field.segment(before), r=field.segment(after);
         close(l[0]+l[1]+l[2]+l[3],r[0],1e-12,"mixed realization continuous at octave boundary");
+        const auto coldSegment=[&](const LatticeNoisePiece &piece) {
+            return TwoLevelLatticeRayField(twoLevel,o,d,711).segment(piece);
+        };
+        require(r==coldSegment(after),"shared octave endpoint must use the outgoing octave derivative");
+
+        const auto first=field.piece(0), second=field.piece(first.end);
+        field.segment(first);
+        require(field.segment(second)==coldSegment(second),"shared lattice knot changed the cubic");
+        for (double crease:params.cuts(o,d)) {
+            if (!std::isfinite(crease)) continue;
+            const auto entering=field.piece(crease-1e-8), leaving=field.piece(crease);
+            require(entering.end==crease && leaving.start==crease,"width ramp crease must split the pieces");
+            field.segment(entering);
+            require(field.segment(leaving)==coldSegment(leaving),"shared ramp endpoint must use the outgoing slope");
+        }
+        // Just below the octave plane, rounding can already select the octave
+        // boundary rule. The two sides still need their own derivative.
+        const double nearCut=std::nextafter(cut,before.start);
+        const LatticeNoisePiece nearLeft{before.cell,before.start,nearCut}, nearRight{before.cell,nearCut,cut};
+        field.segment(nearLeft);
+        require(field.segment(nearRight)==coldSegment(nearRight),"one-sided octave derivative near the plane");
+
+        field.segment(first);
         field.condition(0.042,-0.51);
-        const auto first=field.piece(0);
+        TwoLevelLatticeRayField conditioned(twoLevel,o,d,711);
+        conditioned.condition(0.042,-0.51);
+        require(field.segment(second)==conditioned.segment(second),"conditioning must discard the prior endpoint");
         const auto c=field.segment(first);
         close(c[0],0.042,1e-6,"two-level field conditions on the total value");
         close(c[1]/first.width(),-0.51,1e-5,"two-level field conditions on the total axial derivative");
+    }
+    // This ray crosses only amplitude creases, with constant octave weights.
+    const V amplitudeOrigin(-1.27,0,0), alongX=V::UnitX();
+    TwoLevelLatticeRayField alongRamp(twoLevel,amplitudeOrigin,alongX,711);
+    for (double crease:params.cuts(amplitudeOrigin,alongX)) {
+        if (!std::isfinite(crease)) continue;
+        alongRamp.segment(alongRamp.piece(crease-1e-8));
+        const auto outgoing=alongRamp.piece(crease);
+        TwoLevelLatticeRayField cold(twoLevel,amplitudeOrigin,alongX,711);
+        require(alongRamp.segment(outgoing)==cold.segment(outgoing),"shared amplitude crease must use the outgoing slope");
     }
 
     const NonstationaryLatticeGaussianKernel kernel(params.minEll,params.maxEll,params.maxSigma,
@@ -846,7 +887,7 @@ int main(int argc,char **argv) try {
     const auto varyingPlain=load(path,false,true),varyingPruned=load(path,true,true);
     testVarying(*varyingPlain,*varyingPruned);
     const auto loadTwoLevel=[&](bool prune,const std::string &extra="") {
-        return load(path,prune,true,"","",std::nullopt,R"({"type":"mirror","albedo":1})",
+        return load(path,prune,true,"","",std::nullopt,Mirror,false,
                     R"("lattice_multiresolution":true,)"+extra);
     };
     const auto twoLevelPlain=loadTwoLevel(false),twoLevelPruned=loadTwoLevel(true);
@@ -859,6 +900,32 @@ int main(int argc,char **argv) try {
     try { loadTwoLevel(false,R"("kernel_radius_in_ell":4,)"); }
     catch (const std::exception &) { rejected=true; }
     require(rejected,"two-level mode must explain an incompatible support override");
+    const auto shortKernel=loadTwoLevel(false,R"("multires_kernel_radius_in_ell":1.5,)");
+    const auto description=shortKernel->toJson(doc.GetAllocator());
+    require(description["multires_kernel_radius_in_ell"].GetFloat()==1.5f,"serialize custom octave radius");
+    require(!twoLevelPlain->toJson(doc.GetAllocator()).HasMember("multires_kernel_radius_in_ell"),
+            "implicit octave radius stays implicit");
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    description.Accept(writer);
+    const auto restored=loadJson(buffer.GetString());
+    const Ray ray(Vec3f(0.f,0.f,2.f),Vec3f(0.f,0.f,-1.f),0,3);
+    auto shortSampler=sampler(0), restoredSampler=shortSampler, defaultSampler=shortSampler;
+    const auto shortHit=shortKernel->firstHitDistance(shortSampler,ray,nullptr);
+    require(shortHit && shortHit==restored->firstHitDistance(restoredSampler,ray,nullptr),
+            "round-tripping the octave radius preserves the hit");
+    require(shortHit!=twoLevelPlain->firstHitDistance(defaultSampler,ray,nullptr),
+            "the custom octave radius changes the sampled hit");
+    auto radiusRejected=[&](bool varying,const std::string &fields) {
+        try { load(path,false,varying,"","",std::nullopt,Mirror,false,fields); }
+        catch (const std::exception &) { return true; }
+        return false;
+    };
+    require(radiusRejected(true,R"("multires_kernel_radius_in_ell":1.5,)"),"reject an unused single-level override");
+    require(radiusRejected(false,R"("lattice_multiresolution":true,"multires_kernel_radius_in_ell":1.5,)"),
+            "reject an unused stationary override");
+    require(radiusRejected(true,R"("lattice_multiresolution":true,"multires_kernel_radius_in_ell":0.5,)"),
+            "octave radius must resolve both value and slope");
     testTransverseMemory(dir/"lattice-test-zero.vdb");
     testOrdinaryDirectLighting(dir/"lattice-test-zero.vdb");
     testPruningModes(dir/"lattice-test-plateau.vdb");
